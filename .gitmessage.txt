@@ -1,0 +1,11 @@
+type: subject
+
+# Examples:
+# feat: add hourly max calibration features
+# fix: parse CWA station ids from official rule text
+# docs: document weather and truth-source boundaries
+#
+# Optional body:
+# Why:
+# Risk:
+# Follow-up:

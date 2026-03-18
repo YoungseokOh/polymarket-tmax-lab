@@ -1,0 +1,6 @@
+extends: base.yaml
+app:
+  env: paper
+execution:
+  mode: paper
+  live_trading: false

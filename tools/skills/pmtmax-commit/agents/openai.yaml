@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Commit"
+  short_description: "Prepare commits and pushes with the repo convention."
+  default_prompt: "Use $pmtmax-commit to stage changes safely, choose a valid commit message, and push the current branch if requested."
+
+policy:
+  allow_implicit_invocation: true

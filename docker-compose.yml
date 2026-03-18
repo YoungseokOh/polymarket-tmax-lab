@@ -1,0 +1,8 @@
+services:
+  app:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    command: ["bash", "-lc", "uv sync && uv run pmtmax --help"]
+

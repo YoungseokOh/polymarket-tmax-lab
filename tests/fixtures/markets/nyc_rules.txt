@@ -1,0 +1,7 @@
+Highest temperature in NYC on December 20?
+This market will resolve to the temperature range that contains the highest temperature recorded at the LaGuardia Airport Station in degrees Fahrenheit on 20 Dec '25.
+The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day by the Forecast for the LaGuardia Airport Station once information is finalized, available here: https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA.
+This market can not resolve to "Yes" until all data for this date has been finalized.
+The resolution source for this market measures temperatures to whole degrees Fahrenheit (eg, 39°F).
+Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.
+

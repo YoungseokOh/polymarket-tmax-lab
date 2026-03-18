@@ -1,0 +1,7 @@
+Highest temperature in Taipei on March 13?
+This market will resolve to the temperature range that contains the highest temperature recorded at the Taipei Station in degrees Celsius on 13 Mar '25.
+The resolution source for this market will be the Central Weather Administration station observations for Taipei station 466920, available from the official CODiS station observation pages.
+This market can not resolve to "Yes" until all data for this date has been finalized.
+The resolution source for this market measures temperatures to whole degrees Celsius (eg, 23°C).
+Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.
+

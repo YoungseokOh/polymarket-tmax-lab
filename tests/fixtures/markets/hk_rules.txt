@@ -1,0 +1,7 @@
+Highest temperature in Hong Kong on March 13?
+This market will resolve to the temperature range that contains the highest temperature recorded at the Hong Kong International Airport Station in degrees Celsius on 13 Mar '25.
+The resolution source for this market will be the Hong Kong Observatory Daily Extract, specifically the Daily Maximum Temperature (CLMMAXT) series for station HKA, available here: https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=CLMMAXT&station=HKA&rformat=json&lang=en.
+This market can not resolve to "Yes" until all data for this date has been finalized.
+The resolution source for this market measures temperatures to whole degrees Celsius (eg, 20°C).
+Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.
+

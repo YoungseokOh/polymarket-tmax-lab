@@ -1,0 +1,6 @@
+extends: base.yaml
+app:
+  env: research
+execution:
+  mode: paper
+  live_trading: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Repo"
+  short_description: "Onboard and navigate polymarket-tmax-lab safely."
+  default_prompt: "Use $pmtmax-repo to navigate polymarket-tmax-lab, choose the right subsystem docs, and keep docs and commit rules aligned."
+
+policy:
+  allow_implicit_invocation: true

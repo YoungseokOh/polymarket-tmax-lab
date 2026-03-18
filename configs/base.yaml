@@ -1,0 +1,78 @@
+app:
+  env: research
+  random_seed: 42
+  supported_cities:
+    - Seoul
+    - NYC
+    - Hong Kong
+    - Taipei
+  data_dir: data
+  cache_dir: data/cache
+  raw_dir: data/raw
+  parquet_dir: data/parquet
+  run_dir: data/runs
+  archive_dir: data/archive
+  manifest_dir: data/manifests
+  duckdb_path: data/duckdb/warehouse.duckdb
+  llm_rule_parser: false
+
+polymarket:
+  gamma_base_url: https://gamma-api.polymarket.com
+  clob_base_url: https://clob.polymarket.com
+  ws_market_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  refresh_interval_seconds: 300
+  max_pages: 20
+
+weather:
+  openmeteo_base_url: https://api.open-meteo.com
+  archive_base_url: https://historical-forecast-api.open-meteo.com
+  timeout_seconds: 30
+  retries: 3
+  lagged_run_offsets_hours: [0, 6, 12, 24]
+  models:
+    - ecmwf_ifs025
+    - ecmwf_ifs04
+    - ecmwf_aifs025_single
+    - kma_gdps
+    - kma_ldps
+
+backtest:
+  decision_horizons:
+    - market_open
+    - previous_evening
+    - morning_of
+  default_edge_threshold: 0.03
+  min_liquidity: 250.0
+  slippage_bps: 50
+
+execution:
+  mode: paper
+  live_trading: false
+  confirm_live_trading: ""
+  max_city_exposure: 500.0
+  global_max_exposure: 2000.0
+  min_liquidity: 250.0
+  max_spread_bps: 700
+  stale_forecast_minutes: 180
+
+models:
+  benchmark_ladder:
+    - climatology
+    - raw_best_model
+    - raw_multimodel_average
+    - gaussian_emos
+    - heteroscedastic_linear
+    - ts_emos
+    - leadtime_continuous
+    - det2prob_nn
+    - pinn_postproc
+    - flexible_flow_nn
+    - transformer_postproc
+    - spatial_gnn
+    - aifs_nwp_blend
+
+firebase:
+  enabled: false
+  bucket_name: ""
+  prefix: pmtmax
+  credentials_json: ""

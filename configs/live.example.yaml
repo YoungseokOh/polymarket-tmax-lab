@@ -1,0 +1,7 @@
+extends: base.yaml
+app:
+  env: live
+execution:
+  mode: live
+  live_trading: true
+  confirm_live_trading: YES_I_UNDERSTAND

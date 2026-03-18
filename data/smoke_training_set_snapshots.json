@@ -1,0 +1,502 @@
+[
+  {
+    "captured_at": "2026-01-01T00:00:00Z",
+    "clob_token_ids": [
+      "seoul-4",
+      "seoul-5",
+      "seoul-6",
+      "seoul-7",
+      "seoul-8",
+      "seoul-9",
+      "seoul-10"
+    ],
+    "market": {
+      "clobTokenIds": "[\"seoul-4\", \"seoul-5\", \"seoul-6\", \"seoul-7\", \"seoul-8\", \"seoul-9\", \"seoul-10\"]",
+      "conditionId": "0xseoul",
+      "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the Incheon Intl Airport Station in degrees Celsius on 11 Dec '25. The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day by the Forecast for the Incheon Intl Airport Station once information is finalized, available here: https://www.wunderground.com/history/daily/kr/incheon/RKSI. This market can not resolve to \"Yes\" until all data for this date has been finalized. The resolution source for this market measures temperatures to whole degrees Celsius (eg, 9\u00b0C). Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered for this market's resolution.",
+      "id": "example-seoul",
+      "outcomePrices": "[\"0.03\", \"0.08\", \"0.14\", \"0.18\", \"0.22\", \"0.20\", \"0.15\"]",
+      "outcomes": "[\"4\u00b0C or below\", \"5\u00b0C\", \"6\u00b0C\", \"7\u00b0C\", \"8\u00b0C\", \"9\u00b0C\", \"10\u00b0C or higher\"]",
+      "question": "Highest temperature in Seoul on December 11?",
+      "slug": "highest-temperature-in-seoul-on-december-11",
+      "tokens": [
+        {
+          "outcome": "4\u00b0C or below",
+          "token_id": "seoul-4"
+        },
+        {
+          "outcome": "5\u00b0C",
+          "token_id": "seoul-5"
+        },
+        {
+          "outcome": "6\u00b0C",
+          "token_id": "seoul-6"
+        },
+        {
+          "outcome": "7\u00b0C",
+          "token_id": "seoul-7"
+        },
+        {
+          "outcome": "8\u00b0C",
+          "token_id": "seoul-8"
+        },
+        {
+          "outcome": "9\u00b0C",
+          "token_id": "seoul-9"
+        },
+        {
+          "outcome": "10\u00b0C or higher",
+          "token_id": "seoul-10"
+        }
+      ]
+    },
+    "outcome_prices": {
+      "10\u00b0C or higher": 0.15,
+      "4\u00b0C or below": 0.03,
+      "5\u00b0C": 0.08,
+      "6\u00b0C": 0.14,
+      "7\u00b0C": 0.18,
+      "8\u00b0C": 0.22,
+      "9\u00b0C": 0.2
+    },
+    "parse_error": null,
+    "spec": {
+      "city": "Seoul",
+      "condition_id": "0xseoul",
+      "country": "South Korea",
+      "event_id": null,
+      "finalization_policy": {
+        "ignore_post_final_revision": true,
+        "notes": "Parsed from market rules",
+        "wait_for_finalized_data": true
+      },
+      "market_id": "example-seoul",
+      "metric": "daily_max_temperature",
+      "notes": "Parsed at 2026-03-18T03:00:40.708893+00:00",
+      "official_source_name": "Wunderground",
+      "official_source_url": "https://www.wunderground.com/history/daily/kr/incheon/RKSI",
+      "outcome_schema": [
+        {
+          "label": "4\u00b0C or below",
+          "lower": null,
+          "lower_inclusive": true,
+          "upper": 4.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "5\u00b0C",
+          "lower": 5.0,
+          "lower_inclusive": true,
+          "upper": 5.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "6\u00b0C",
+          "lower": 6.0,
+          "lower_inclusive": true,
+          "upper": 6.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "7\u00b0C",
+          "lower": 7.0,
+          "lower_inclusive": true,
+          "upper": 7.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "8\u00b0C",
+          "lower": 8.0,
+          "lower_inclusive": true,
+          "upper": 8.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "9\u00b0C",
+          "lower": 9.0,
+          "lower_inclusive": true,
+          "upper": 9.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "10\u00b0C or higher",
+          "lower": 10.0,
+          "lower_inclusive": true,
+          "upper": null,
+          "upper_inclusive": true
+        }
+      ],
+      "precision_rule": {
+        "rounding": "whole_degree",
+        "source_precision_text": "measures temperatures to whole degrees Celsius",
+        "step": 1.0,
+        "unit": "C"
+      },
+      "question": "Highest temperature in Seoul on December 11?",
+      "slug": "highest-temperature-in-seoul-on-december-11",
+      "station_id": "RKSI",
+      "station_lat": 37.4602,
+      "station_lon": 126.4407,
+      "station_name": "Incheon Intl Airport",
+      "target_local_date": "2025-12-11",
+      "timezone": "Asia/Seoul",
+      "token_ids": [
+        "seoul-4",
+        "seoul-5",
+        "seoul-6",
+        "seoul-7",
+        "seoul-8",
+        "seoul-9",
+        "seoul-10"
+      ],
+      "unit": "C"
+    }
+  },
+  {
+    "captured_at": "2026-01-01T00:00:00Z",
+    "clob_token_ids": [
+      "nyc-34",
+      "nyc-35",
+      "nyc-37",
+      "nyc-39",
+      "nyc-41"
+    ],
+    "market": {
+      "clobTokenIds": "[\"nyc-34\", \"nyc-35\", \"nyc-37\", \"nyc-39\", \"nyc-41\"]",
+      "conditionId": "0xnyc",
+      "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the LaGuardia Airport Station in degrees Fahrenheit on 20 Dec '25. The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day by the Forecast for the LaGuardia Airport Station once information is finalized, available here: https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA. This market can not resolve to \"Yes\" until all data for this date has been finalized. The resolution source for this market measures temperatures to whole degrees Fahrenheit (eg, 39\u00b0F). Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.",
+      "id": "example-nyc",
+      "outcomePrices": "[\"0.06\", \"0.14\", \"0.24\", \"0.28\", \"0.18\"]",
+      "outcomes": "[\"34\u00b0F or below\", \"35-36\u00b0F\", \"37-38\u00b0F\", \"39-40\u00b0F\", \"41\u00b0F or higher\"]",
+      "question": "Highest temperature in NYC on December 20?",
+      "slug": "highest-temperature-in-nyc-on-december-20",
+      "tokens": [
+        {
+          "outcome": "34\u00b0F or below",
+          "token_id": "nyc-34"
+        },
+        {
+          "outcome": "35-36\u00b0F",
+          "token_id": "nyc-35"
+        },
+        {
+          "outcome": "37-38\u00b0F",
+          "token_id": "nyc-37"
+        },
+        {
+          "outcome": "39-40\u00b0F",
+          "token_id": "nyc-39"
+        },
+        {
+          "outcome": "41\u00b0F or higher",
+          "token_id": "nyc-41"
+        }
+      ]
+    },
+    "outcome_prices": {
+      "34\u00b0F or below": 0.06,
+      "35-36\u00b0F": 0.14,
+      "37-38\u00b0F": 0.24,
+      "39-40\u00b0F": 0.28,
+      "41\u00b0F or higher": 0.18
+    },
+    "parse_error": null,
+    "spec": {
+      "city": "NYC",
+      "condition_id": "0xnyc",
+      "country": "USA",
+      "event_id": null,
+      "finalization_policy": {
+        "ignore_post_final_revision": true,
+        "notes": "Parsed from market rules",
+        "wait_for_finalized_data": true
+      },
+      "market_id": "example-nyc",
+      "metric": "daily_max_temperature",
+      "notes": "Parsed at 2026-03-18T03:00:40.709018+00:00",
+      "official_source_name": "Wunderground",
+      "official_source_url": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
+      "outcome_schema": [
+        {
+          "label": "34\u00b0F or below",
+          "lower": null,
+          "lower_inclusive": true,
+          "upper": 34.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "35-36\u00b0F",
+          "lower": 35.0,
+          "lower_inclusive": true,
+          "upper": 36.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "37-38\u00b0F",
+          "lower": 37.0,
+          "lower_inclusive": true,
+          "upper": 38.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "39-40\u00b0F",
+          "lower": 39.0,
+          "lower_inclusive": true,
+          "upper": 40.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "41\u00b0F or higher",
+          "lower": 41.0,
+          "lower_inclusive": true,
+          "upper": null,
+          "upper_inclusive": true
+        }
+      ],
+      "precision_rule": {
+        "rounding": "range_bin",
+        "source_precision_text": "measures temperatures to whole degrees Fahrenheit",
+        "step": 2.0,
+        "unit": "F"
+      },
+      "question": "Highest temperature in NYC on December 20?",
+      "slug": "highest-temperature-in-nyc-on-december-20",
+      "station_id": "KLGA",
+      "station_lat": 40.7769,
+      "station_lon": -73.874,
+      "station_name": "LaGuardia Airport",
+      "target_local_date": "2025-12-20",
+      "timezone": "America/New_York",
+      "token_ids": [
+        "nyc-34",
+        "nyc-35",
+        "nyc-37",
+        "nyc-39",
+        "nyc-41"
+      ],
+      "unit": "F"
+    }
+  },
+  {
+    "captured_at": "2026-01-01T00:00:00Z",
+    "clob_token_ids": [
+      "hk-18",
+      "hk-19",
+      "hk-20",
+      "hk-21"
+    ],
+    "market": {
+      "clobTokenIds": "[\"hk-18\", \"hk-19\", \"hk-20\", \"hk-21\"]",
+      "conditionId": "0xhk",
+      "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the Hong Kong International Airport Station in degrees Celsius on 13 Mar '25. The resolution source for this market will be the Hong Kong Observatory Daily Extract, specifically the Daily Maximum Temperature (CLMMAXT) series for station HKA, available here: https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=CLMMAXT&station=HKA&rformat=json&lang=en. This market can not resolve to \"Yes\" until all data for this date has been finalized. The resolution source for this market measures temperatures to one decimal place Celsius; markets resolve to whole-degree Celsius bins using the official finalized value. Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.",
+      "id": "example-hk",
+      "outcomePrices": "[\"0.15\", \"0.32\", \"0.34\", \"0.19\"]",
+      "outcomes": "[\"18\u00b0C or below\", \"19\u00b0C\", \"20\u00b0C\", \"21\u00b0C or higher\"]",
+      "question": "Highest temperature in Hong Kong on March 13?",
+      "slug": "highest-temperature-in-hong-kong-on-march-13",
+      "tokens": [
+        {
+          "outcome": "18\u00b0C or below",
+          "token_id": "hk-18"
+        },
+        {
+          "outcome": "19\u00b0C",
+          "token_id": "hk-19"
+        },
+        {
+          "outcome": "20\u00b0C",
+          "token_id": "hk-20"
+        },
+        {
+          "outcome": "21\u00b0C or higher",
+          "token_id": "hk-21"
+        }
+      ]
+    },
+    "outcome_prices": {
+      "18\u00b0C or below": 0.15,
+      "19\u00b0C": 0.32,
+      "20\u00b0C": 0.34,
+      "21\u00b0C or higher": 0.19
+    },
+    "parse_error": null,
+    "spec": {
+      "city": "Hong Kong",
+      "condition_id": "0xhk",
+      "country": "Hong Kong",
+      "event_id": null,
+      "finalization_policy": {
+        "ignore_post_final_revision": true,
+        "notes": "Parsed from market rules",
+        "wait_for_finalized_data": true
+      },
+      "market_id": "example-hk",
+      "metric": "daily_max_temperature",
+      "notes": "Parsed at 2026-03-18T03:00:40.709164+00:00",
+      "official_source_name": "Hong Kong Observatory Daily Extract",
+      "official_source_url": "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=CLMMAXT&station=HKA&rformat=json&lang=en",
+      "outcome_schema": [
+        {
+          "label": "18\u00b0C or below",
+          "lower": null,
+          "lower_inclusive": true,
+          "upper": 18.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "19\u00b0C",
+          "lower": 19.0,
+          "lower_inclusive": true,
+          "upper": 19.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "20\u00b0C",
+          "lower": 20.0,
+          "lower_inclusive": true,
+          "upper": 20.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "21\u00b0C or higher",
+          "lower": 21.0,
+          "lower_inclusive": true,
+          "upper": null,
+          "upper_inclusive": true
+        }
+      ],
+      "precision_rule": {
+        "rounding": "whole_degree",
+        "source_precision_text": "exact_source",
+        "step": 1.0,
+        "unit": "C"
+      },
+      "question": "Highest temperature in Hong Kong on March 13?",
+      "slug": "highest-temperature-in-hong-kong-on-march-13",
+      "station_id": "HKA",
+      "station_lat": 22.308,
+      "station_lon": 113.9185,
+      "station_name": "Hong Kong International Airport",
+      "target_local_date": "2025-03-13",
+      "timezone": "Asia/Hong_Kong",
+      "token_ids": [
+        "hk-18",
+        "hk-19",
+        "hk-20",
+        "hk-21"
+      ],
+      "unit": "C"
+    }
+  },
+  {
+    "captured_at": "2026-01-01T00:00:00Z",
+    "clob_token_ids": [
+      "tpe-21",
+      "tpe-22",
+      "tpe-23",
+      "tpe-24"
+    ],
+    "market": {
+      "clobTokenIds": "[\"tpe-21\", \"tpe-22\", \"tpe-23\", \"tpe-24\"]",
+      "conditionId": "0xtpe",
+      "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the Taipei Station in degrees Celsius on 13 Mar '25. The resolution source for this market will be the Central Weather Administration station observations for Taipei station 466920, available from the official CODiS / station observation pages. This market can not resolve to \"Yes\" until all data for this date has been finalized. The resolution source for this market measures temperatures to one decimal place Celsius; markets resolve to whole-degree Celsius bins using the official finalized value. Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered.",
+      "id": "example-tpe",
+      "outcomePrices": "[\"0.18\", \"0.31\", \"0.29\", \"0.22\"]",
+      "outcomes": "[\"21\u00b0C or below\", \"22\u00b0C\", \"23\u00b0C\", \"24\u00b0C or higher\"]",
+      "question": "Highest temperature in Taipei on March 13?",
+      "slug": "highest-temperature-in-taipei-on-march-13",
+      "tokens": [
+        {
+          "outcome": "21\u00b0C or below",
+          "token_id": "tpe-21"
+        },
+        {
+          "outcome": "22\u00b0C",
+          "token_id": "tpe-22"
+        },
+        {
+          "outcome": "23\u00b0C",
+          "token_id": "tpe-23"
+        },
+        {
+          "outcome": "24\u00b0C or higher",
+          "token_id": "tpe-24"
+        }
+      ]
+    },
+    "outcome_prices": {
+      "21\u00b0C or below": 0.18,
+      "22\u00b0C": 0.31,
+      "23\u00b0C": 0.29,
+      "24\u00b0C or higher": 0.22
+    },
+    "parse_error": null,
+    "spec": {
+      "city": "Taipei",
+      "condition_id": "0xtpe",
+      "country": "Taiwan",
+      "event_id": null,
+      "finalization_policy": {
+        "ignore_post_final_revision": true,
+        "notes": "Parsed from market rules",
+        "wait_for_finalized_data": true
+      },
+      "market_id": "example-tpe",
+      "metric": "daily_max_temperature",
+      "notes": "Parsed at 2026-03-18T03:00:40.709234+00:00",
+      "official_source_name": "Central Weather Administration",
+      "official_source_url": "",
+      "outcome_schema": [
+        {
+          "label": "21\u00b0C or below",
+          "lower": null,
+          "lower_inclusive": true,
+          "upper": 21.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "22\u00b0C",
+          "lower": 22.0,
+          "lower_inclusive": true,
+          "upper": 22.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "23\u00b0C",
+          "lower": 23.0,
+          "lower_inclusive": true,
+          "upper": 23.0,
+          "upper_inclusive": true
+        },
+        {
+          "label": "24\u00b0C or higher",
+          "lower": 24.0,
+          "lower_inclusive": true,
+          "upper": null,
+          "upper_inclusive": true
+        }
+      ],
+      "precision_rule": {
+        "rounding": "whole_degree",
+        "source_precision_text": "exact_source",
+        "step": 1.0,
+        "unit": "C"
+      },
+      "question": "Highest temperature in Taipei on March 13?",
+      "slug": "highest-temperature-in-taipei-on-march-13",
+      "station_id": "466920",
+      "station_lat": 25.0377,
+      "station_lon": 121.5149,
+      "station_name": "Taipei",
+      "target_local_date": "2025-03-13",
+      "timezone": "Asia/Taipei",
+      "token_ids": [
+        "tpe-21",
+        "tpe-22",
+        "tpe-23",
+        "tpe-24"
+      ],
+      "unit": "C"
+    }
+  }
+]

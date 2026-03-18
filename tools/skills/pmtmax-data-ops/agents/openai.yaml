@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Data Ops"
+  short_description: "Operate bootstrap, warehouse, seed, and legacy data flows."
+  default_prompt: "Use $pmtmax-data-ops to manage bootstrap-lab, warehouse layout, seed export or restore, and legacy raw/parquet cleanup."
+
+policy:
+  allow_implicit_invocation: true

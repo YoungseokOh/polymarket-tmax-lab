@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Release Checklist"
+  short_description: "Validate that the research environment is experiment-ready."
+  default_prompt: "Use $pmtmax-release-checklist to run the bootstrap, training, backtest, and seed-restore checklist for polymarket-tmax-lab."
+
+policy:
+  allow_implicit_invocation: true
