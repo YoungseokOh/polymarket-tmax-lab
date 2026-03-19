@@ -122,21 +122,30 @@ def _load_snapshots(
     closed: bool | None = None,
 ) -> list[MarketSnapshot]:
     config, _, http, _, _, _ = _runtime(include_stores=False)
-    if markets_path and markets_path.exists():
-        return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
+    try:
+        if markets_path is not None:
+            if not markets_path.exists():
+                msg = f"Market snapshot file does not exist: {markets_path}"
+                raise FileNotFoundError(msg)
+            return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
 
-    if active is not None or closed is not None:
-        gamma = GammaClient(http, config.polymarket.gamma_base_url)
-        discovery = MarketDiscoveryService(gamma, max_pages=config.polymarket.max_pages)
-        discovered = discovery.discover(active=active, closed=closed)
-        snapshots = discovered.snapshots
-        return _filter_snapshots_by_city(snapshots, cities)
+        if active is not None or closed is not None:
+            gamma = GammaClient(http, config.polymarket.gamma_base_url)
+            discovery = MarketDiscoveryService(gamma, max_pages=config.polymarket.max_pages)
+            discovered = discovery.discover(active=active, closed=closed)
+            snapshots = discovered.snapshots
+            return _filter_snapshots_by_city(snapshots, cities)
 
-    return bundled_market_snapshots(cities)
+        return bundled_market_snapshots(cities)
+    finally:
+        http.close()
 
 
 def _bootstrap_snapshots(*, markets_path: Path | None, cities: list[str] | None) -> list[MarketSnapshot]:
-    if markets_path and markets_path.exists():
+    if markets_path is not None:
+        if not markets_path.exists():
+            msg = f"Market snapshot file does not exist: {markets_path}"
+            raise FileNotFoundError(msg)
         return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
     return bundled_market_snapshots(cities)
 

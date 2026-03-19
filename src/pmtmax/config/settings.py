@@ -14,7 +14,9 @@ from pmtmax.utils import load_yaml_with_extends
 class AppConfig(BaseModel):
     env: Literal["research", "paper", "live"] = "research"
     random_seed: int = 42
-    supported_cities: list[str] = Field(default_factory=lambda: ["Seoul", "NYC", "Hong Kong", "Taipei"])
+    supported_cities: list[str] = Field(
+        default_factory=lambda: ["Seoul", "NYC", "London", "Hong Kong", "Taipei"]
+    )
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")

@@ -5,6 +5,7 @@
 - `configs/research.yaml`: research-oriented overrides
 - `configs/paper.yaml`: paper-trading defaults
 - `configs/live.example.yaml`: example live-trading configuration only
+- `configs/market_inventory/`: checked-in Polymarket event URL manifests and generated curated historical `MarketSnapshot[]` inventories
 - `src/pmtmax/config/settings.py`: loads YAML plus environment variables into typed settings, including canonical warehouse paths and Firebase mirror settings
 
 ## storage
@@ -22,8 +23,13 @@
 - `data/duckdb/warehouse.duckdb`: canonical warehouse
 - `data/parquet/bronze`, `data/parquet/silver`, `data/parquet/gold`: parquet mirrors and materialized datasets
 - `data/manifests/`: generated warehouse manifest files
+- `data/manifests/historical_event_candidates.json`: persisted supported-city closed-event backlog discovered from Gamma grouped events
+- `data/manifests/historical_event_page_fetches.json`: persisted grouped event page fetch state with `pending`, `fetched`, and `fetch_failed`
+- `data/manifests/historical_collection_status.json`: grouped closed-event collection audit for append-only URL manifests
+- `data/manifests/historical_inventory_report.json`: curated historical inventory validation report
 - `data/archive/`: archived legacy databases after migration
 - `artifacts/`: trained models, metrics, and paper-trading outputs
+- `artifacts/active_weather_watchlist.json`: supported-city active grouped-event watchlist
 - `data/duckdb/warehouse.duckdb.lock`: transient writer lock file only while canonical backfill/materialization commands are running
 - `artifacts/bootstrap/pmtmax_seed.tar.gz`: portable seed archive for moving canonical data between machines
 

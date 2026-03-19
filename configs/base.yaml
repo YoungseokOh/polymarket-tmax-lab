@@ -4,6 +4,7 @@ app:
   supported_cities:
     - Seoul
     - NYC
+    - London
     - Hong Kong
     - Taipei
   data_dir: data

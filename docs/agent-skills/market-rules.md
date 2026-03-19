@@ -14,6 +14,7 @@
 ## v1 Supported Families
 - Seoul / Wunderground / Incheon Intl Airport
 - NYC / Wunderground / LaGuardia Airport
+- London / Wunderground / London City Airport
 - Hong Kong / Hong Kong Observatory
 - Taipei / Central Weather Administration
 

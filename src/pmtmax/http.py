@@ -40,6 +40,13 @@ class CachedHttpClient:
     def _cache_path(self, key: str, suffix: str) -> Path:
         return self.cache_dir / f"{stable_hash(key)}.{suffix}"
 
+    @staticmethod
+    def _cache_key(url: str, payload: dict[str, Any] | None, payload_key: str) -> str:
+        return json.dumps({"url": url, payload_key: payload}, sort_keys=True, default=str)
+
+    def _request_cache_path(self, url: str, suffix: str, *, payload: dict[str, Any] | None, payload_key: str) -> Path:
+        return self._cache_path(self._cache_key(url, payload, payload_key), suffix)
+
     @retry(
         retry=retry_if_exception(_is_retriable_http_error),
         stop=stop_after_attempt(3),
@@ -49,8 +56,7 @@ class CachedHttpClient:
     def get_json(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True) -> Any:
         """Fetch JSON with optional disk cache."""
 
-        key = json.dumps({"url": url, "params": params}, sort_keys=True, default=str)
-        cache_path = self._cache_path(key, "json")
+        cache_path = self._request_cache_path(url, "json", payload=params, payload_key="params")
         if use_cache and cache_path.exists():
             return json.loads(cache_path.read_text())
 
@@ -66,11 +72,29 @@ class CachedHttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
+    def post_json(self, url: str, data: dict[str, Any] | None = None, use_cache: bool = True) -> Any:
+        """POST form data and cache the JSON response on disk."""
+
+        cache_path = self._request_cache_path(url, "json", payload=data, payload_key="data")
+        if use_cache and cache_path.exists():
+            return json.loads(cache_path.read_text())
+
+        response = self.client.post(url, data=data)
+        response.raise_for_status()
+        payload = response.json()
+        cache_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return payload
+
+    @retry(
+        retry=retry_if_exception(_is_retriable_http_error),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        reraise=True,
+    )
     def get_text(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True) -> str:
         """Fetch text with optional disk cache."""
 
-        key = json.dumps({"url": url, "params": params}, sort_keys=True, default=str)
-        cache_path = self._cache_path(key, "txt")
+        cache_path = self._request_cache_path(url, "txt", payload=params, payload_key="params")
         if use_cache and cache_path.exists():
             return cache_path.read_text()
 
@@ -79,6 +103,22 @@ class CachedHttpClient:
         text = response.text
         cache_path.write_text(text)
         return text
+
+    def load_cached_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any | None:
+        """Return cached JSON without issuing a network request."""
+
+        cache_path = self._request_cache_path(url, "json", payload=params, payload_key="params")
+        if not cache_path.exists():
+            return None
+        return json.loads(cache_path.read_text())
+
+    def load_cached_text(self, url: str, *, params: dict[str, Any] | None = None) -> str | None:
+        """Return cached text without issuing a network request."""
+
+        cache_path = self._request_cache_path(url, "txt", payload=params, payload_key="params")
+        if not cache_path.exists():
+            return None
+        return cache_path.read_text()
 
     def close(self) -> None:
         """Close the underlying HTTP client."""

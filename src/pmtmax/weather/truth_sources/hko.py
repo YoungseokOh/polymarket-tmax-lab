@@ -24,18 +24,9 @@ class HkoTruthSource(TruthSource):
         url = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
         payload = self._load_snapshot(spec.station_id, target_date)
         if payload is None:
-            payload = self.http.get_json(
-                url,
-                params={
-                    "dataType": "CLMMAXT",
-                    "station": spec.station_id,
-                    "year": target_date.year,
-                    "month": target_date.month,
-                    "rformat": "json",
-                    "lang": "en",
-                },
-                use_cache=True,
-            )
+            payload = self._fetch_month_payload(url, spec.station_id, target_date)
+            if not payload.get("data"):
+                payload = self._fetch_full_station_payload(url, spec.station_id)
         value = self._parse_value(payload, target_date)
         observation = ObservationRecord(
             source="Hong Kong Observatory",
@@ -59,6 +50,38 @@ class HkoTruthSource(TruthSource):
         if candidate.exists():
             return cast(dict, json.loads(candidate.read_text()))
         return None
+
+    def _fetch_month_payload(self, url: str, station_id: str, target_date: date) -> dict:
+        return cast(
+            dict,
+            self.http.get_json(
+                url,
+                params={
+                    "dataType": "CLMMAXT",
+                    "station": station_id,
+                    "year": target_date.year,
+                    "month": target_date.month,
+                    "rformat": "json",
+                    "lang": "en",
+                },
+                use_cache=True,
+            ),
+        )
+
+    def _fetch_full_station_payload(self, url: str, station_id: str) -> dict:
+        return cast(
+            dict,
+            self.http.get_json(
+                url,
+                params={
+                    "dataType": "CLMMAXT",
+                    "station": station_id,
+                    "rformat": "json",
+                    "lang": "en",
+                },
+                use_cache=True,
+            ),
+        )
 
     @staticmethod
     def _parse_value(payload: dict, target_date: date) -> float:

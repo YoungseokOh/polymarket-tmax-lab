@@ -42,9 +42,9 @@ The system is designed to work in:
 - Polymarket public CLOB read endpoints for books and price history
 - Polymarket market websocket for live public updates
 - Open-Meteo forecast, historical forecast, previous-runs, and ensemble endpoints
-- Wunderground station pages
+- Wunderground station pages and Weather.com historical observation endpoints used by those pages
 - Hong Kong Observatory open data `CLMMAXT`
-- Central Weather Administration official station/CODiS snapshots
+- Central Weather Administration official station pages and CODiS station data
 
 ## Zero To First Signal
 1. Install `uv`.
@@ -97,9 +97,11 @@ By default this command:
 
 - archives legacy raw/parquet run directories into `data/archive/legacy-runs/`
 - restores from `artifacts/bootstrap/pmtmax_seed.tar.gz` if it exists and the local warehouse is missing
-- backfills bundled Seoul, NYC, Hong Kong, and Taipei market history
+- backfills bundled Seoul, NYC, Hong Kong, and Taipei seed snapshots
 - materializes both tabular and sequence gold datasets
 - writes `artifacts/bootstrap/bootstrap_manifest.json`
+
+`bootstrap-lab` is the reproducible seed/demo path. It does not discover or curate real historical Polymarket event pages by default.
 
 If you want to carry data from one machine to another, export a portable seed on the source machine:
 
@@ -140,6 +142,92 @@ uv run pmtmax bootstrap-lab
 uv run pmtmax train-baseline --dataset-path data/parquet/gold/historical_training_set.parquet
 uv run pmtmax train-advanced --model-name det2prob_nn
 ```
+
+## Real Historical Collection
+Use the curated inventory workflow when you want real historical temperature markets instead of bundled examples.
+
+If you want one long-running shell entrypoint for the full supported-city batch, use:
+
+```bash
+scripts/run_full_historical_batch.sh
+```
+
+Useful flags:
+
+```bash
+scripts/run_full_historical_batch.sh --city Seoul --max-pages 10
+scripts/run_full_historical_batch.sh --skip-refresh --skip-model-smoke
+```
+
+Each run writes a timestamped log under `artifacts/batch_logs/`.
+`--city`는 refresh/watchlist discovery뿐 아니라 backfill/materialization 입력도 해당 도시로 제한한다.
+
+Closed-event refresh만 장기 배치로 따로 돌리고 싶으면 staged wrapper를 사용한다:
+
+```bash
+scripts/run_historical_refresh_pipeline.sh
+scripts/run_historical_refresh_pipeline.sh --city London --max-pages 10 --max-events 50
+scripts/run_historical_refresh_pipeline.sh --stage classify --status-filter truth_source_lag
+scripts/run_historical_refresh_pipeline.sh --fill-gaps-only --checkpoint-every 1
+```
+
+이 wrapper는 `discover -> fetch-pages -> classify -> publish`를 분리해서 실행할 수 있고, 기본은 `--resume`라서 기존 manifest를 이어받아 partial progress를 보존한다.
+`fetch-pages`는 bounded concurrency를 사용하고, `classify`는 exact-source truth probe를 source family별 제한과 함께 병렬화한다.
+`--checkpoint-every`를 주면 fetch/classify manifest를 배치 단위로 계속 저장하고, `--fill-gaps-only`는 기존 candidate manifest를 재사용해서 이미 수집된 항목은 건너뛰고 pending gap만 이어서 채운다.
+
+1. Refresh the closed-event source URL manifest from grouped Polymarket weather events:
+
+```bash
+uv run python scripts/refresh_historical_event_urls.py
+```
+
+This staged pipeline discovers supported closed grouped events, persists the candidate backlog to `data/manifests/historical_event_candidates.json`, persists page-fetch state to `data/manifests/historical_event_page_fetches.json`, classifies each fetched event into collection statuses in `data/manifests/historical_collection_status.json`, and appends only `collected` URLs to `configs/market_inventory/historical_temperature_event_urls.json`.
+`truth_source_lag` and `truth_request_failed` remain retryable manifest states instead of failing the whole refresh.
+
+2. Build or refresh the curated inventory from the checked-in event URL manifest:
+
+```bash
+uv run python scripts/build_historical_market_inventory.py
+uv run python scripts/validate_historical_market_inventory.py
+```
+
+3. Start from a clean canonical warehouse if you want to replace the existing seed data.
+
+4. Backfill from the curated snapshot inventory:
+
+```bash
+uv run pmtmax init-warehouse
+uv run pmtmax backfill-markets --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax backfill-forecasts \
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --strict-archive \
+  --single-run-horizon market_open \
+  --single-run-horizon previous_evening \
+  --single-run-horizon morning_of
+uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax materialize-training-set \
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --decision-horizon market_open \
+  --decision-horizon previous_evening \
+  --decision-horizon morning_of
+uv run pmtmax summarize-forecast-availability
+uv run pmtmax compact-warehouse
+```
+
+The checked-in starter source URLs live in `configs/market_inventory/historical_temperature_event_urls.json`, and the generated curated `MarketSnapshot[]` inventory lives in `configs/market_inventory/historical_temperature_snapshots.json`.
+The staged closed-event manifests live in:
+
+- `data/manifests/historical_event_candidates.json`
+- `data/manifests/historical_event_page_fetches.json`
+- `data/manifests/historical_collection_status.json`
+
+5. Refresh the active supported-city watchlist when you want the next candidate batch for curation:
+
+```bash
+uv run python scripts/build_active_weather_watchlist.py
+```
+
+This writes `artifacts/active_weather_watchlist.json` without mutating the canonical warehouse.
 
 `uv run pmtmax build-dataset` remains available as a wrapper that runs the backfill
 and materialization steps in one command. Research mode defaults to strict Open-Meteo
@@ -246,7 +334,8 @@ The live broker fails closed if flags or credentials are missing.
 - Open-Meteo Single Runs support exists as an exact-run hook, but the main research pipeline still treats generic archive rows and exact single-run rows as different quality tiers.
 - Some model/location pairs are genuinely unsupported by Open-Meteo coverage. In strict mode those rows are skipped and recorded in `bronze_forecast_requests` instead of being silently replaced.
 - Bundled historical market snapshots provide a reproducible backtest path for Seoul, NYC, Hong Kong, and Taipei even when no active temperature markets are currently listed.
-- The CWA adapter is cache-first and fails closed unless an official snapshot is available locally. It does not substitute another source or station.
+- The Wunderground adapter prefers the official Weather.com historical observation endpoint for airport station history and falls back to cached station-page snapshots when provided locally.
+- The CWA adapter is cache-first but can use the official CODiS station API as an exact-source override for Taipei station data. It still does not substitute another source or station.
 - Advanced models beyond the det2prob path are practical public-data approximations of the cited papers, not paper-faithful reproductions of closed or richer operational inputs.
 - Firebase sync is a backup mirror for raw/parquet/manifests only. DuckDB remains the local canonical warehouse and is not mirrored.
 - Public CLOB endpoint shapes can change; the repo isolates them behind read clients and tests.

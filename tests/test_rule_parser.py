@@ -31,6 +31,22 @@ def test_parse_nyc_rules() -> None:
     assert spec.precision_rule.step == 2.0
 
 
+def test_parse_london_rules() -> None:
+    market = {
+        **EXAMPLE_MARKETS["Seoul"],
+        "id": "example-london",
+        "slug": "highest-temperature-in-london-on-march-18-2026",
+        "question": "Highest temperature in London on March 18?",
+    }
+    spec = parse_market_spec(_read_fixture("london_rules.txt"), market=market)
+    assert spec.city == "London"
+    assert spec.station_name == "London City Airport"
+    assert spec.station_id == "EGLC"
+    assert spec.timezone == "Europe/London"
+    assert spec.station_lat is not None
+    assert spec.official_source_url == "https://www.wunderground.com/history/daily/gb/london/EGLC"
+
+
 def test_parse_hko_rules() -> None:
     spec = parse_market_spec(_read_fixture("hk_rules.txt"), market=EXAMPLE_MARKETS["Hong Kong"])
     assert spec.city == "Hong Kong"

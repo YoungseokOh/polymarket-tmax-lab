@@ -41,6 +41,17 @@ STATIONS: dict[str, StationDefinition] = {
         lon=-73.8740,
         aliases=("new york city", "laguardia", "laguardia airport", "klga"),
     ),
+    "London": StationDefinition(
+        city="London",
+        country="United Kingdom",
+        timezone="Europe/London",
+        official_source_name="Wunderground",
+        station_id="EGLC",
+        station_name="London City Airport",
+        lat=51.51,
+        lon=0.028,
+        aliases=("london city airport", "eglc"),
+    ),
     "Hong Kong": StationDefinition(
         city="Hong Kong",
         country="Hong Kong",

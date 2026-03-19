@@ -5,6 +5,7 @@
 ### Wunderground airport templates
 - Seoul / Incheon Intl Airport Station
 - NYC / LaGuardia Airport Station
+- London / London City Airport Station
 - Core fields parsed:
   - official source URL
   - airport station name/id
@@ -45,6 +46,6 @@
 ## Examples
 - Seoul: Wunderground / Incheon Intl Airport / Celsius / whole degree
 - NYC: Wunderground / LaGuardia / Fahrenheit / two-degree labeled ranges
+- London: Wunderground / London City Airport / Celsius / whole degree
 - Hong Kong: HKO `CLMMAXT` / HKA / Celsius / official daily extract
 - Taipei: CWA station `466920` / Celsius / official station observations
-

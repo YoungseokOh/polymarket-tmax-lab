@@ -1,0 +1,11 @@
+This market will resolve to the temperature range that contains the highest temperature recorded at the London City Airport Station in degrees Celsius on 18 Mar '26.
+
+The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day by the Forecast for the London City Airport Station once information is finalized, available here: https://www.wunderground.com/history/daily/gb/london/EGLC.
+
+To toggle between Fahrenheit and Celsius, click the gear icon next to the search bar and switch the Temperature setting between °F and °C.
+
+This market can not resolve to "Yes" until all data for this date has been finalized.
+
+The resolution source for this market measures temperatures to whole degrees Celsius (eg, 9°C). Thus, this is the level of precision that will be used when resolving the market.
+
+Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered for this market's resolution.
