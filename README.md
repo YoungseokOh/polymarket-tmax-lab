@@ -334,7 +334,7 @@ The live broker fails closed if flags or credentials are missing.
 - Open-Meteo Single Runs support exists as an exact-run hook, but the main research pipeline still treats generic archive rows and exact single-run rows as different quality tiers.
 - Some model/location pairs are genuinely unsupported by Open-Meteo coverage. In strict mode those rows are skipped and recorded in `bronze_forecast_requests` instead of being silently replaced.
 - Bundled historical market snapshots provide a reproducible backtest path for Seoul, NYC, Hong Kong, and Taipei even when no active temperature markets are currently listed.
-- The Wunderground adapter prefers the official Weather.com historical observation endpoint for airport station history and falls back to cached station-page snapshots when provided locally.
+- The Wunderground adapter uses the official Weather.com historical observation endpoint only when `PMTMAX_WU_API_KEY` is set, and otherwise falls back to same-source station pages or cached local snapshots.
 - The CWA adapter is cache-first but can use the official CODiS station API as an exact-source override for Taipei station data. It still does not substitute another source or station.
 - Advanced models beyond the det2prob path are practical public-data approximations of the cited papers, not paper-faithful reproductions of closed or richer operational inputs.
 - Firebase sync is a backup mirror for raw/parquet/manifests only. DuckDB remains the local canonical warehouse and is not mirrored.

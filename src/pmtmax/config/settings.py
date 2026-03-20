@@ -112,6 +112,7 @@ class EnvSettings(BaseSettings):
     http_timeout: int = 30
     http_retries: int = 3
     llm_rule_parser: bool = False
+    wu_api_key: str = ""
     poly_private_key: str = ""
     poly_proxy_address: str = ""
     poly_api_key: str = ""

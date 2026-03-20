@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode, urlparse
 
+from pmtmax.config.settings import EnvSettings
 from pmtmax.http import CachedHttpClient
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.storage.schemas import ObservationRecord
@@ -18,15 +19,21 @@ TEMP_MAX_PATTERNS = [
     re.compile(r'"temperatureMax"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)', re.I),
 ]
 WU_HISTORICAL_URL = "https://api.weather.com/v1/location/{location_id}/observations/historical.json"
-WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY_ENV = "PMTMAX_WU_API_KEY"
 
 
 class WundergroundTruthSource(TruthSource):
     """Retrieve daily max temperature from Wunderground history pages."""
 
-    def __init__(self, http: CachedHttpClient, snapshot_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        http: CachedHttpClient,
+        snapshot_dir: Path | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self.http = http
         self.snapshot_dir = snapshot_dir
+        self.api_key = EnvSettings().wu_api_key if api_key is None else api_key
 
     def fetch_observation_bundle(self, spec: MarketSpec, target_date: date) -> TruthFetchBundle:
         url = f"{spec.official_source_url.rstrip('/')}/date/{target_date.isoformat()}"
@@ -84,10 +91,13 @@ class WundergroundTruthSource(TruthSource):
         return None
 
     def _fetch_historical_payload(self, spec: MarketSpec, target_date: date) -> tuple[dict[str, object], str]:
+        if not self.api_key:
+            msg = f"Missing {WU_API_KEY_ENV} for Weather.com historical API"
+            raise RuntimeError(msg)
         location_id = self._location_id(spec)
         base_url = WU_HISTORICAL_URL.format(location_id=location_id)
         params = {
-            "apiKey": WU_API_KEY,
+            "apiKey": self.api_key,
             "units": "m" if spec.unit == "C" else "e",
             "startDate": target_date.strftime("%Y%m%d"),
             "endDate": target_date.strftime("%Y%m%d"),

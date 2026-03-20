@@ -37,7 +37,7 @@ def test_wunderground_truth_source_uses_cached_html_snapshot_when_available() ->
 def test_wunderground_truth_source_fetches_official_historical_api_for_live_data() -> None:
     spec = example_market_specs(["Seoul"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
     http = _FakeHttp()
-    source = WundergroundTruthSource(http)  # type: ignore[arg-type]
+    source = WundergroundTruthSource(http, api_key="test-weathercom-key")  # type: ignore[arg-type]
 
     bundle = source.fetch_observation_bundle(spec, date(2026, 3, 17))
 
@@ -46,7 +46,7 @@ def test_wunderground_truth_source_fetches_official_historical_api_for_live_data
     assert len(http.calls) == 1
     assert http.calls[0]["url"] == "https://api.weather.com/v1/location/RKSI:9:KR/observations/historical.json"
     assert http.calls[0]["params"] == {
-        "apiKey": "e1f10a1e78da46f5b10a1e78da96f525",
+        "apiKey": "test-weathercom-key",
         "units": "m",
         "startDate": "20260317",
         "endDate": "20260317",

@@ -20,6 +20,7 @@ feature building, lagged pseudo-ensemble support, and official truth retrieval.
 ## Operational Rules
 - Do not silently substitute another station or another source.
 - If official truth is unavailable, fail closed or use an explicitly documented local snapshot path or same-source official adapter override.
+- Wunderground historical Weather.com access must read `PMTMAX_WU_API_KEY` from runtime settings; do not check API keys into source.
 - Historical forecast reconstruction uses Open-Meteo's generic archive forecast endpoint and must avoid lookahead.
 - Exact decision-horizon backfills may add `single_run` rows on top of generic archive rows. Gold materialization should prefer those horizon-specific rows when they exist.
 - Research backfills default to strict archive mode; fixture fallback is demo-only and must be logged in bronze tables.
