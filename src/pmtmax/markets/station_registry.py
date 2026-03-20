@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+
+CATALOG_PATH = Path(__file__).resolve().parents[3] / "configs" / "market_inventory" / "station_catalog.json"
 
 
 @dataclass(frozen=True)
@@ -16,81 +22,71 @@ class StationDefinition:
     lat: float
     lon: float
     aliases: tuple[str, ...] = ()
+    truth_track: str = "exact_public"
+    settlement_eligible: bool = True
+    public_truth_source_name: str | None = None
+    public_truth_station_id: str | None = None
+    research_priority: str = "expansion"
 
 
-STATIONS: dict[str, StationDefinition] = {
-    "Seoul": StationDefinition(
-        city="Seoul",
-        country="South Korea",
-        timezone="Asia/Seoul",
-        official_source_name="Wunderground",
-        station_id="RKSI",
-        station_name="Incheon Intl Airport",
-        lat=37.4602,
-        lon=126.4407,
-        aliases=("incheon", "incheon intl airport", "rksi"),
-    ),
-    "NYC": StationDefinition(
-        city="NYC",
-        country="USA",
-        timezone="America/New_York",
-        official_source_name="Wunderground",
-        station_id="KLGA",
-        station_name="LaGuardia Airport",
-        lat=40.7769,
-        lon=-73.8740,
-        aliases=("new york city", "laguardia", "laguardia airport", "klga"),
-    ),
-    "London": StationDefinition(
-        city="London",
-        country="United Kingdom",
-        timezone="Europe/London",
-        official_source_name="Wunderground",
-        station_id="EGLC",
-        station_name="London City Airport",
-        lat=51.51,
-        lon=0.028,
-        aliases=("london city airport", "eglc"),
-    ),
-    "Hong Kong": StationDefinition(
-        city="Hong Kong",
-        country="Hong Kong",
-        timezone="Asia/Hong_Kong",
-        official_source_name="Hong Kong Observatory Daily Extract",
-        station_id="HKA",
-        station_name="Hong Kong International Airport",
-        lat=22.3080,
-        lon=113.9185,
-        aliases=("hong kong international airport", "hka"),
-    ),
-    "Taipei": StationDefinition(
-        city="Taipei",
-        country="Taiwan",
-        timezone="Asia/Taipei",
-        official_source_name="Central Weather Administration",
-        station_id="466920",
-        station_name="Taipei",
-        lat=25.0377,
-        lon=121.5149,
-        aliases=("taipei station", "466920"),
-    ),
-}
+@lru_cache(maxsize=1)
+def _station_maps() -> tuple[dict[str, StationDefinition], dict[str, StationDefinition], dict[str, str]]:
+    payload = json.loads(CATALOG_PATH.read_text())
+    by_city: dict[str, StationDefinition] = {}
+    by_station_id: dict[str, StationDefinition] = {}
+    aliases: dict[str, str] = {}
+    for key, raw in payload.items():
+        city = str(raw.get("city") or key)
+        definition = StationDefinition(
+            city=city,
+            country=str(raw["country"]),
+            timezone=str(raw["timezone"]),
+            official_source_name=str(raw["official_source_name"]),
+            station_id=str(raw["station_id"]),
+            station_name=str(raw["station_name"]),
+            lat=float(raw["lat"]),
+            lon=float(raw["lon"]),
+            aliases=tuple(str(item).lower() for item in raw.get("aliases", [])),
+            truth_track=str(raw.get("truth_track", "exact_public")),
+            settlement_eligible=bool(raw.get("settlement_eligible", True)),
+            public_truth_source_name=str(raw.get("public_truth_source_name") or "") or None,
+            public_truth_station_id=str(raw.get("public_truth_station_id") or "") or None,
+            research_priority=str(raw.get("research_priority", "expansion")),
+        )
+        by_city.setdefault(city, definition)
+        by_station_id[definition.station_id.upper()] = definition
+        aliases.setdefault(city.lower(), city)
+        aliases[definition.station_id.lower()] = city
+        aliases[definition.station_name.lower()] = city
+        for alias in definition.aliases:
+            aliases[alias] = city
+    return by_city, by_station_id, aliases
+
+
+def supported_cities() -> list[str]:
+    """Return canonical cities from the checked-in station catalog."""
+
+    by_city, _, _ = _station_maps()
+    return list(by_city)
 
 
 def canonical_city(city: str) -> str:
     """Return the canonical supported city label when known."""
 
     lowered = city.strip().lower()
-    for definition in STATIONS.values():
-        if lowered == definition.city.lower() or lowered in definition.aliases:
-            return definition.city
-    if lowered == "new york city":
-        return "NYC"
-    return city.strip()
+    _, _, aliases = _station_maps()
+    return aliases.get(lowered, city.strip())
 
 
 def lookup_station(city: str) -> StationDefinition | None:
     """Lookup canonical station metadata for a city or alias."""
 
-    canonical = canonical_city(city)
-    return STATIONS.get(canonical)
+    by_city, _, _ = _station_maps()
+    return by_city.get(canonical_city(city))
+
+
+def lookup_station_by_station_id(station_id: str) -> StationDefinition | None:
+    """Lookup station metadata by the official station id from market rules."""
+
+    _, by_station_id, _ = _station_maps()
+    return by_station_id.get(station_id.strip().upper())

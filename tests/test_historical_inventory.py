@@ -21,6 +21,7 @@ from pmtmax.markets.inventory import (
     build_historical_collection_status,
     build_historical_inventory_from_pages,
     discover_temperature_event_refs,
+    discover_temperature_event_refs_from_gamma,
     fetch_historical_event_page_report,
     merge_historical_collection_status_reports,
     merge_historical_event_candidates,
@@ -173,6 +174,50 @@ def test_build_historical_inventory_from_pages_skips_open_events() -> None:
     assert {issue.reason for issue in report.issues} == {"not_closed"}
 
 
+def test_build_historical_inventory_from_pages_filters_truth_unready_snapshots() -> None:
+    seoul_page = HistoricalEventPage(
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
+        html=_event_page_html(
+            title="Highest temperature in Seoul on December 11?",
+            slug="highest-temperature-in-seoul-on-december-11",
+            event_id="evt-seoul",
+            active=False,
+            closed=True,
+        ),
+        fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
+    )
+    nyc_page = HistoricalEventPage(
+        url="https://polymarket.com/event/highest-temperature-in-nyc-on-december-20",
+        html=_event_page_html(
+            title="Highest temperature in NYC on December 20?",
+            slug="highest-temperature-in-nyc-on-december-20",
+            event_id="evt-nyc",
+            active=False,
+            closed=True,
+            description=EXAMPLE_MARKETS["NYC"]["description"],
+        ),
+        fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
+    )
+
+    snapshots, report = build_historical_inventory_from_pages(
+        [seoul_page, nyc_page],
+        supported_cities=["Seoul", "NYC"],
+        source_manifest="test_urls.json",
+        as_of_date=date(2026, 3, 19),
+        truth_probe=lambda snapshot: (
+            TruthProbeResult(status="truth_source_lag", detail="no public archive rows")
+            if snapshot.spec is not None and snapshot.spec.city == "Seoul"
+            else TruthProbeResult(status="ready", detail="")
+        ),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].spec is not None
+    assert snapshots[0].spec.city == "NYC"
+    assert report.issue_counts["truth_source_lag"] == 1
+    assert any(issue.reason == "truth_source_lag" and issue.city == "Seoul" for issue in report.issues)
+
+
 def test_preserve_existing_capture_times_reuses_previous_snapshot_timestamp() -> None:
     fresh_snapshot = snapshot_from_temperature_event_page(
         url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
@@ -217,6 +262,30 @@ def test_validate_historical_inventory_flags_examples_and_duplicates() -> None:
     assert {issue.reason for issue in report.issues} == {"duplicate_market_id", "example_market_id"}
 
 
+def test_validate_historical_inventory_flags_truth_unready_snapshot() -> None:
+    snapshot = snapshot_from_temperature_event_page(
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
+        html=_event_page_html(
+            title="Highest temperature in Seoul on December 11?",
+            slug="highest-temperature-in-seoul-on-december-11",
+            event_id="evt-seoul",
+            active=False,
+            closed=True,
+        ),
+        captured_at=datetime(2026, 3, 19, tzinfo=UTC),
+    )
+
+    report = validate_historical_inventory(
+        [snapshot],
+        supported_cities=["Seoul"],
+        source_manifest="test_inventory.json",
+        truth_probe=lambda _: TruthProbeResult(status="truth_source_lag", detail="lagging source"),
+    )
+
+    assert report.issue_counts["truth_source_lag"] == 1
+    assert report.issues[0].reason == "truth_source_lag"
+
+
 def test_discover_temperature_event_refs_filters_supported_titles() -> None:
     refs = discover_temperature_event_refs(
         [
@@ -246,7 +315,48 @@ def test_discover_temperature_event_refs_filters_supported_titles() -> None:
     )
 
     assert [ref.city for ref in refs] == ["London"]
-    assert refs[0].url == "https://polymarket.com/event/highest-temperature-in-london-on-march-17-2026"
+
+
+class _FakeGammaClient:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def fetch_events(
+        self,
+        *,
+        active: bool | None = None,  # noqa: ARG002
+        closed: bool | None = None,  # noqa: ARG002
+        tag_slug: str | None = None,
+        limit: int = 100,  # noqa: ARG002
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        self.calls.append(f"{tag_slug}:{offset}")
+        if offset > 0:
+            return []
+        if tag_slug == "weather":
+            return [
+                {"id": "evt-london", "slug": "highest-temperature-in-london-on-march-21-2026", "title": "Highest temperature in London on March 21?", "active": True, "closed": False},
+                {"id": "evt-nyc", "slug": "highest-temperature-in-nyc-on-march-21-2026", "title": "Highest temperature in NYC on March 21?", "active": True, "closed": False},
+            ]
+        if tag_slug == "temperature":
+            return [
+                {"id": "evt-london", "slug": "highest-temperature-in-london-on-march-21-2026", "title": "Highest temperature in London on March 21?", "active": True, "closed": False},
+                {"id": "evt-toronto", "slug": "highest-temperature-in-toronto-on-march-21-2026", "title": "Highest temperature in Toronto on March 21?", "active": True, "closed": False},
+            ]
+        return []
+
+
+def test_discover_temperature_event_refs_from_gamma_dedupes_fallback_tags() -> None:
+    refs = discover_temperature_event_refs_from_gamma(
+        _FakeGammaClient(),  # type: ignore[arg-type]
+        supported_cities=["London", "NYC", "Toronto"],
+        active=True,
+        closed=False,
+        max_pages=2,
+    )
+
+    assert [ref.city for ref in refs] == ["London", "NYC", "Toronto"]
+    assert refs[0].url == "https://polymarket.com/event/highest-temperature-in-london-on-march-21-2026"
 
 
 def test_merge_historical_event_candidates_preserves_first_seen_and_adds_new_refs() -> None:

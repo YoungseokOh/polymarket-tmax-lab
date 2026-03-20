@@ -7,6 +7,31 @@ app:
     - London
     - Hong Kong
     - Taipei
+    - Toronto
+    - Tokyo
+    - Singapore
+    - Chicago
+    - Atlanta
+    - Miami
+    - Dallas
+    - Ankara
+    - Wellington
+    - Lucknow
+    - Paris
+    - Milan
+    - Warsaw
+    - Madrid
+    - Tel Aviv
+    - Buenos Aires
+    - Seattle
+    - Sao Paulo
+    - Shanghai
+    - Munich
+    - Chongqing
+    - Beijing
+    - Wuhan
+    - Chengdu
+    - Shenzhen
   data_dir: data
   cache_dir: data/cache
   raw_dir: data/raw

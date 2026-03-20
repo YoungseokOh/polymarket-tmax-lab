@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from pmtmax.backfill import BackfillPipeline
 from pmtmax.http import CachedHttpClient
@@ -35,6 +37,22 @@ class _SingleRunOpenMeteoClient:
         payload = _load_fixture("Seoul")
         payload["hourly"]["temperature_2m"] = [value + 1.0 for value in payload["hourly"]["temperature_2m"]]
         return payload
+
+
+class _BadTruthHttp:
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        return "<html>no daily max here</html>"
+
+
+class _LagTruthHttp:
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        if params and params.get("yyyymm") == "202508":
+            return (
+                '"TM","STN_ID","TMP_MNM_TM","TMP_MNM","TMP_MAX_TM","TMP_MAX"\n'
+                '"20250823","113","559","250","1411","315"\n'
+                '"20250824","113","601","248","1342","302"\n'
+            )
+        return '"TM","STN_ID","TMP_MNM_TM","TMP_MNM","TMP_MAX_TM","TMP_MAX"\n'
 
 
 def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> None:
@@ -156,3 +174,132 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
     availability = pipeline.summarize_forecast_availability(top_k=2)
     assert not availability["summary"].empty
     assert not availability["recommended"].empty
+
+
+def test_backfill_pipeline_fails_closed_when_truth_rows_are_missing(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "missing_truth.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=_BadTruthHttp(),  # type: ignore[arg-type]
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets(snapshots, source_name="missing_truth_test")
+    pipeline.backfill_forecasts(
+        snapshots,
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+    )
+    truth_tables = pipeline.backfill_truth(snapshots)
+
+    assert len(truth_tables["bronze_truth_snapshots"]) == 1
+    assert truth_tables["silver_observations_daily"].empty
+    with pytest.raises(ValueError, match="public truth response"):
+        pipeline.materialize_training_set(
+            snapshots,
+            output_name="missing_truth_training_set",
+            decision_horizons=["morning_of"],
+        )
+
+
+def test_backfill_pipeline_classifies_truth_archive_lag_and_summarizes_it(tmp_path: Path) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    lagged_snapshot = snapshot.model_copy(
+        update={
+            "spec": snapshot.spec.model_copy(update={"target_local_date": date(2025, 9, 1)}),  # type: ignore[union-attr]
+        }
+    )
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "truth_lag.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=_LagTruthHttp(),  # type: ignore[arg-type]
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets([lagged_snapshot], source_name="truth_lag_test")
+    pipeline.backfill_forecasts(
+        [lagged_snapshot],
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+    )
+    truth_tables = pipeline.backfill_truth([lagged_snapshot])
+    summary = pipeline.summarize_truth_coverage()
+
+    assert truth_tables["silver_observations_daily"].empty
+    assert truth_tables["bronze_truth_snapshots"].iloc[0]["status"] == "lag"
+    assert str(truth_tables["bronze_truth_snapshots"].iloc[0]["latest_available_date"]).startswith("2025-08-24")
+    assert not summary["summary"].empty
+    assert not summary["details"].empty
+    assert set(summary["details"]["status"].astype(str)) == {"lag"}
+    with pytest.raises(ValueError, match="Public archive lag detected: Seoul/RKSI: latest 2025-08-24"):
+        pipeline.materialize_training_set(
+            [lagged_snapshot],
+            output_name="truth_lag_training_set",
+            decision_horizons=["morning_of"],
+        )
+
+
+def test_empty_materialization_message_filters_truth_lag_to_requested_snapshots(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul", "NYC"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "lag_filter.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=_LagTruthHttp(),  # type: ignore[arg-type]
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+    warehouse.upsert_table(
+        "bronze_truth_snapshots",
+        pd.DataFrame(
+            [
+                {
+                    "market_id": snapshots[0].spec.market_id,  # type: ignore[union-attr]
+                    "status": "lag",
+                    "city": "Seoul",
+                    "station_id": "RKSI",
+                    "target_local_date": pd.Timestamp("2025-09-01"),
+                    "latest_available_date": pd.Timestamp("2025-08-24"),
+                },
+                {
+                    "market_id": snapshots[1].spec.market_id,  # type: ignore[union-attr]
+                    "status": "lag",
+                    "city": "NYC",
+                    "station_id": "KLGA",
+                    "target_local_date": pd.Timestamp("2025-09-01"),
+                    "latest_available_date": pd.Timestamp("2025-08-27"),
+                },
+            ]
+        ),
+    )
+
+    message = pipeline._empty_materialization_message([snapshots[0]], pd.DataFrame(), pd.DataFrame())
+
+    assert "Seoul/RKSI: latest 2025-08-24" in message
+    assert "NYC/KLGA" not in message

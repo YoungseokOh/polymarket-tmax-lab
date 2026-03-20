@@ -17,7 +17,7 @@ from pmtmax.backtest.dataset_builder import DatasetBuilder
 from pmtmax.backtest.metrics import summarize_trade_log
 from pmtmax.backtest.pnl import Position, settle_position
 from pmtmax.backtest.rolling_origin import rolling_origin_splits
-from pmtmax.config.settings import load_settings
+from pmtmax.config.settings import EnvSettings, load_settings
 from pmtmax.execution.edge import compute_edge
 from pmtmax.execution.fees import estimate_fee
 from pmtmax.execution.guardrails import exposure_ok, forecast_fresh, spread_ok
@@ -28,8 +28,12 @@ from pmtmax.execution.slippage import estimate_slippage
 from pmtmax.http import CachedHttpClient
 from pmtmax.logging_utils import configure_logging
 from pmtmax.markets.clob_read_client import ClobReadClient
-from pmtmax.markets.discovery import MarketDiscoveryService
 from pmtmax.markets.gamma_client import GammaClient
+from pmtmax.markets.inventory import (
+    discover_temperature_event_refs_from_gamma,
+    fetch_temperature_event_pages,
+    snapshots_from_temperature_event_fetches,
+)
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.markets.repository import (
     bundled_market_snapshots,
@@ -131,9 +135,15 @@ def _load_snapshots(
 
         if active is not None or closed is not None:
             gamma = GammaClient(http, config.polymarket.gamma_base_url)
-            discovery = MarketDiscoveryService(gamma, max_pages=config.polymarket.max_pages)
-            discovered = discovery.discover(active=active, closed=closed)
-            snapshots = discovered.snapshots
+            refs = discover_temperature_event_refs_from_gamma(
+                gamma,
+                supported_cities=cities or config.app.supported_cities,
+                active=active,
+                closed=closed,
+                max_pages=config.polymarket.max_pages,
+            )
+            fetches = fetch_temperature_event_pages(http, refs, use_cache=False)
+            snapshots = snapshots_from_temperature_event_fetches(fetches)
             return _filter_snapshots_by_city(snapshots, cities)
 
         return bundled_market_snapshots(cities)
@@ -148,6 +158,62 @@ def _bootstrap_snapshots(*, markets_path: Path | None, cities: list[str] | None)
             raise FileNotFoundError(msg)
         return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
     return bundled_market_snapshots(cities)
+
+
+def _collection_preflight_report(snapshots: list[MarketSnapshot], env: EnvSettings) -> dict[str, object]:
+    """Summarize manual env requirements for a historical collection run."""
+
+    source_counts: dict[str, int] = {}
+    city_counts: dict[str, int] = {}
+    truth_track_counts: dict[str, int] = {}
+    research_priority_counts: dict[str, int] = {}
+    parsed_snapshots = 0
+    settlement_eligible_count = 0
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None:
+            continue
+        parsed_snapshots += 1
+        source_key = spec.adapter_key()
+        source_counts[source_key] = source_counts.get(source_key, 0) + 1
+        city_counts[spec.city] = city_counts.get(spec.city, 0) + 1
+        truth_track_counts[spec.truth_track] = truth_track_counts.get(spec.truth_track, 0) + 1
+        research_priority_counts[spec.research_priority] = research_priority_counts.get(spec.research_priority, 0) + 1
+        if spec.settlement_eligible:
+            settlement_eligible_count += 1
+
+    required_env: list[str] = []
+    optional_env: list[str] = []
+    missing_env: list[str] = []
+    messages: list[str] = []
+
+    if source_counts.get("wunderground", 0) > 0:
+        optional_env.append("PMTMAX_WU_API_KEY")
+        if env.wu_api_key:
+            messages.append("PMTMAX_WU_API_KEY is configured for optional Wunderground audit collection.")
+        else:
+            messages.append(
+                "Wunderground-family markets default to public airport archive collection. "
+                "Seoul/RKSI uses AMO AIR_CALP; other supported cities default to NOAA Global Hourly. "
+                "PMTMAX_WU_API_KEY is optional and only needed for same-source audit collection."
+            )
+
+    return {
+        "ready": not missing_env,
+        "markets_total": len(snapshots),
+        "markets_with_spec": parsed_snapshots,
+        "markets_without_spec": len(snapshots) - parsed_snapshots,
+        "cities": sorted(city_counts),
+        "city_counts": city_counts,
+        "source_counts": source_counts,
+        "truth_track_counts": truth_track_counts,
+        "research_priority_counts": research_priority_counts,
+        "settlement_eligible_count": settlement_eligible_count,
+        "required_env": required_env,
+        "optional_env": optional_env,
+        "missing_env": missing_env,
+        "messages": messages,
+    }
 
 
 def _synthetic_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) -> BookSnapshot:
@@ -281,9 +347,15 @@ def scan_markets(
 
     config, _, http, _, _, _ = _runtime()
     gamma = GammaClient(http, config.polymarket.gamma_base_url)
-    discovery = MarketDiscoveryService(gamma, max_pages=config.polymarket.max_pages)
-    result = discovery.discover(active=active, closed=closed)
-    snapshots = result.snapshots
+    refs = discover_temperature_event_refs_from_gamma(
+        gamma,
+        supported_cities=config.app.supported_cities,
+        active=active,
+        closed=closed,
+        max_pages=config.polymarket.max_pages,
+    )
+    fetches = fetch_temperature_event_pages(http, refs, use_cache=False)
+    snapshots = snapshots_from_temperature_event_fetches(fetches)
     if include_bundled:
         snapshots = snapshots + bundled_market_snapshots()
     save_market_snapshots(output, snapshots)
@@ -369,6 +441,18 @@ def build_dataset(
     console.print(
         f"Built dataset with {len(frame)} rows at {config.app.parquet_dir / 'gold' / f'{output_name}.parquet'}"
     )
+
+
+@app.command("collection-preflight")
+def collection_preflight(
+    markets_path: Path | None = None,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+) -> None:
+    """Report required manual env settings for historical collection inputs."""
+
+    _, env = load_settings()
+    snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+    console.print_json(data=_collection_preflight_report(snapshots, env))
 
 
 @app.command("backfill-markets")
@@ -493,10 +577,43 @@ def backfill_truth(
         raise
     finally:
         pipeline.warehouse.close()
+    status_counts: dict[str, int] = {}
+    if not result["bronze_truth_snapshots"].empty and "status" in result["bronze_truth_snapshots"].columns:
+        status_counts = {
+            str(key): int(value)
+            for key, value in result["bronze_truth_snapshots"]["status"].astype(str).value_counts().to_dict().items()
+        }
     console.print_json(
         data={
             "bronze_truth_snapshots": len(result["bronze_truth_snapshots"]),
             "silver_observations_daily": len(result["silver_observations_daily"]),
+            "status_counts": status_counts,
+        }
+    )
+
+
+@app.command("summarize-truth-coverage")
+def summarize_truth_coverage(
+    output: Path = Path("artifacts/truth_coverage.json"),
+) -> None:
+    """Summarize truth coverage, lagged markets, and archive-ready statuses."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    pipeline = _backfill_pipeline(config, http, openmeteo)
+    try:
+        result = pipeline.summarize_truth_coverage()
+    finally:
+        pipeline.warehouse.close()
+    payload = {
+        "summary": result["summary"].to_dict(orient="records"),
+        "details": result["details"].to_dict(orient="records"),
+    }
+    dump_json(output, payload)
+    console.print_json(
+        data={
+            "summary_rows": len(result["summary"]),
+            "detail_rows": len(result["details"]),
+            "output_path": str(output),
         }
     )
 

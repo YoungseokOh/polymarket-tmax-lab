@@ -1,0 +1,588 @@
+{
+  "Ankara": {
+    "aliases": [
+      "esenboga intl airport",
+      "ltac"
+    ],
+    "country": "Turkey",
+    "lat": 40.128,
+    "lon": 32.995,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "17128099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "LTAC",
+    "station_name": "Esenboga Intl Airport",
+    "timezone": "Europe/Istanbul",
+    "truth_track": "research_public"
+  },
+  "Atlanta": {
+    "aliases": [
+      "hartsfield-jackson international airport",
+      "katl"
+    ],
+    "country": "USA",
+    "lat": 33.63,
+    "lon": -84.442,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72219013874",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "KATL",
+    "station_name": "Hartsfield-Jackson International Airport",
+    "timezone": "America/New_York",
+    "truth_track": "research_public"
+  },
+  "Beijing": {
+    "aliases": [
+      "beijing capital international airport",
+      "zbaa"
+    ],
+    "country": "China",
+    "lat": 40.08,
+    "lon": 116.585,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "54511099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZBAA",
+    "station_name": "Beijing Capital International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  },
+  "Buenos Aires": {
+    "aliases": [
+      "ezeiza",
+      "minister pistarini intl airport",
+      "saez"
+    ],
+    "country": "Argentina",
+    "lat": -34.822,
+    "lon": -58.536,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "87576099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "SAEZ",
+    "station_name": "Minister Pistarini Intl Airport",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "truth_track": "research_public"
+  },
+  "Chengdu": {
+    "aliases": [
+      "chengdu shuangliu international airport",
+      "zuuu"
+    ],
+    "country": "China",
+    "lat": 30.579,
+    "lon": 103.947,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "56294099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZUUU",
+    "station_name": "Chengdu Shuangliu International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  },
+  "Chicago": {
+    "aliases": [
+      "chicago o'hare intl airport",
+      "kord"
+    ],
+    "country": "USA",
+    "lat": 41.96,
+    "lon": -87.932,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72530094846",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "KORD",
+    "station_name": "Chicago O'Hare Intl Airport",
+    "timezone": "America/Chicago",
+    "truth_track": "research_public"
+  },
+  "Chongqing": {
+    "aliases": [
+      "chongqing jiangbei international airport",
+      "zuck"
+    ],
+    "country": "China",
+    "lat": 29.719,
+    "lon": 106.642,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "57516099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZUCK",
+    "station_name": "Chongqing Jiangbei International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  },
+  "Dallas": {
+    "aliases": [
+      "dallas love field",
+      "kdal"
+    ],
+    "country": "USA",
+    "lat": 32.838,
+    "lon": -96.836,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72258313960",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "KDAL",
+    "station_name": "Dallas Love Field",
+    "timezone": "America/Chicago",
+    "truth_track": "research_public"
+  },
+  "Hong Kong": {
+    "aliases": [
+      "hong kong international airport",
+      "hka"
+    ],
+    "country": "Hong Kong",
+    "lat": 22.308,
+    "lon": 113.9185,
+    "official_source_name": "Hong Kong Observatory Daily Extract",
+    "public_truth_source_name": "Hong Kong Observatory Daily Extract",
+    "public_truth_station_id": "HKA",
+    "research_priority": "expansion",
+    "settlement_eligible": true,
+    "station_id": "HKA",
+    "station_name": "Hong Kong International Airport",
+    "timezone": "Asia/Hong_Kong",
+    "truth_track": "exact_public"
+  },
+  "Hong Kong WU": {
+    "aliases": [
+      "vhhh",
+      "hong kong intl airport"
+    ],
+    "city": "Hong Kong",
+    "country": "Hong Kong",
+    "lat": 22.309,
+    "lon": 113.915,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "45007099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "VHHH",
+    "station_name": "Hong Kong Intl Airport",
+    "timezone": "Asia/Hong_Kong",
+    "truth_track": "research_public"
+  },
+  "London": {
+    "aliases": [
+      "london city airport",
+      "eglc"
+    ],
+    "country": "United Kingdom",
+    "lat": 51.505,
+    "lon": 0.055,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "03772099999",
+    "research_priority": "core",
+    "settlement_eligible": false,
+    "station_id": "EGLC",
+    "station_name": "London City Airport",
+    "timezone": "Europe/London",
+    "truth_track": "research_public"
+  },
+  "Lucknow": {
+    "aliases": [
+      "chaudhary charan singh intl airport",
+      "vilk"
+    ],
+    "country": "India",
+    "lat": 26.761,
+    "lon": 80.889,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "42369099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "VILK",
+    "station_name": "Chaudhary Charan Singh Intl Airport",
+    "timezone": "Asia/Kolkata",
+    "truth_track": "research_public"
+  },
+  "Madrid": {
+    "aliases": [
+      "adolfo suarez madrid-barajas airport",
+      "lemd"
+    ],
+    "country": "Spain",
+    "lat": 40.494,
+    "lon": -3.567,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "08221099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "LEMD",
+    "station_name": "Adolfo Suarez Madrid-Barajas Airport",
+    "timezone": "Europe/Madrid",
+    "truth_track": "research_public"
+  },
+  "Miami": {
+    "aliases": [
+      "miami intl airport",
+      "kmia"
+    ],
+    "country": "USA",
+    "lat": 25.788,
+    "lon": -80.317,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72202012839",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "KMIA",
+    "station_name": "Miami Intl Airport",
+    "timezone": "America/New_York",
+    "truth_track": "research_public"
+  },
+  "Milan": {
+    "aliases": [
+      "malpensa intl airport",
+      "limc"
+    ],
+    "country": "Italy",
+    "lat": 45.631,
+    "lon": 8.728,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "16066099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "LIMC",
+    "station_name": "Malpensa Intl Airport",
+    "timezone": "Europe/Rome",
+    "truth_track": "research_public"
+  },
+  "Munich": {
+    "aliases": [
+      "munich airport",
+      "eddm"
+    ],
+    "country": "Germany",
+    "lat": 48.354,
+    "lon": 11.786,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "10866099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "EDDM",
+    "station_name": "Munich Airport",
+    "timezone": "Europe/Berlin",
+    "truth_track": "research_public"
+  },
+  "NYC": {
+    "aliases": [
+      "new york city",
+      "laguardia",
+      "laguardia airport",
+      "klga"
+    ],
+    "country": "USA",
+    "lat": 40.779,
+    "lon": -73.88,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72503014732",
+    "research_priority": "core",
+    "settlement_eligible": false,
+    "station_id": "KLGA",
+    "station_name": "LaGuardia Airport",
+    "timezone": "America/New_York",
+    "truth_track": "research_public"
+  },
+  "Paris": {
+    "aliases": [
+      "charles de gaulle airport",
+      "lfpg"
+    ],
+    "country": "France",
+    "lat": 49.013,
+    "lon": 2.55,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "07157099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "LFPG",
+    "station_name": "Charles de Gaulle Airport",
+    "timezone": "Europe/Paris",
+    "truth_track": "research_public"
+  },
+  "Sao Paulo": {
+    "aliases": [
+      "guarulhos",
+      "guarulhos international airport",
+      "sbgr"
+    ],
+    "country": "Brazil",
+    "lat": -23.432,
+    "lon": -46.47,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "83766099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "SBGR",
+    "station_name": "Sao Paulo-Guarulhos International Airport",
+    "timezone": "America/Sao_Paulo",
+    "truth_track": "research_public"
+  },
+  "Seattle": {
+    "aliases": [
+      "seatac",
+      "seattle-tacoma international airport",
+      "ksea"
+    ],
+    "country": "USA",
+    "lat": 47.445,
+    "lon": -122.314,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "72793024233",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "KSEA",
+    "station_name": "Seattle-Tacoma International Airport",
+    "timezone": "America/Los_Angeles",
+    "truth_track": "research_public"
+  },
+  "Seoul": {
+    "aliases": [
+      "incheon",
+      "incheon intl airport",
+      "rksi"
+    ],
+    "country": "South Korea",
+    "lat": 37.469,
+    "lon": 126.451,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "Aviation Meteorological Office AIR_CALP",
+    "public_truth_station_id": "RKSI",
+    "research_priority": "core",
+    "settlement_eligible": false,
+    "station_id": "RKSI",
+    "station_name": "Incheon Intl Airport",
+    "timezone": "Asia/Seoul",
+    "truth_track": "research_public"
+  },
+  "Shanghai": {
+    "aliases": [
+      "shanghai pudong international airport",
+      "zspd"
+    ],
+    "country": "China",
+    "lat": 31.143,
+    "lon": 121.805,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "58362099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZSPD",
+    "station_name": "Shanghai Pudong International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  },
+  "Shenzhen": {
+    "aliases": [
+      "shenzhen bao'an international airport",
+      "zgsz"
+    ],
+    "country": "China",
+    "lat": 22.639,
+    "lon": 113.811,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "59493099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZGSZ",
+    "station_name": "Shenzhen Bao'an International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  },
+  "Singapore": {
+    "aliases": [
+      "singapore changi airport",
+      "wsss"
+    ],
+    "country": "Singapore",
+    "lat": 1.35,
+    "lon": 103.994,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "48698099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "WSSS",
+    "station_name": "Singapore Changi Airport",
+    "timezone": "Asia/Singapore",
+    "truth_track": "research_public"
+  },
+  "Taipei": {
+    "aliases": [
+      "taipei station",
+      "466920",
+      "46692"
+    ],
+    "country": "Taiwan",
+    "lat": 25.0377,
+    "lon": 121.5149,
+    "official_source_name": "Central Weather Administration",
+    "public_truth_source_name": "Central Weather Administration",
+    "public_truth_station_id": "466920",
+    "research_priority": "expansion",
+    "settlement_eligible": true,
+    "station_id": "466920",
+    "station_name": "Taipei",
+    "timezone": "Asia/Taipei",
+    "truth_track": "exact_public"
+  },
+  "Taipei NOAA": {
+    "aliases": [
+      "rctp",
+      "taiwan taoyuan international airport"
+    ],
+    "city": "Taipei",
+    "country": "Taiwan",
+    "lat": 25.078,
+    "lon": 121.233,
+    "official_source_name": "NOAA Timeseries",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "46686099999",
+    "research_priority": "expansion",
+    "settlement_eligible": true,
+    "station_id": "RCTP",
+    "station_name": "Taiwan Taoyuan International Airport",
+    "timezone": "Asia/Taipei",
+    "truth_track": "exact_public"
+  },
+  "Tel Aviv": {
+    "aliases": [
+      "ben gurion intl airport",
+      "llbg"
+    ],
+    "country": "Israel",
+    "lat": 32.011,
+    "lon": 34.887,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "40180099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "LLBG",
+    "station_name": "Ben Gurion Intl Airport",
+    "timezone": "Asia/Jerusalem",
+    "truth_track": "research_public"
+  },
+  "Tokyo": {
+    "aliases": [
+      "haneda",
+      "tokyo haneda airport",
+      "rjtt"
+    ],
+    "country": "Japan",
+    "lat": 35.552,
+    "lon": 139.78,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "47671099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "RJTT",
+    "station_name": "Tokyo Haneda Airport",
+    "timezone": "Asia/Tokyo",
+    "truth_track": "research_public"
+  },
+  "Toronto": {
+    "aliases": [
+      "toronto pearson intl airport",
+      "cyyz"
+    ],
+    "country": "Canada",
+    "lat": 43.677,
+    "lon": -79.631,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "71624099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "CYYZ",
+    "station_name": "Toronto Pearson Intl Airport",
+    "timezone": "America/Toronto",
+    "truth_track": "research_public"
+  },
+  "Warsaw": {
+    "aliases": [
+      "warsaw chopin airport",
+      "epwa"
+    ],
+    "country": "Poland",
+    "lat": 52.166,
+    "lon": 20.967,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "12375099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "EPWA",
+    "station_name": "Warsaw Chopin Airport",
+    "timezone": "Europe/Warsaw",
+    "truth_track": "research_public"
+  },
+  "Wellington": {
+    "aliases": [
+      "wellington intl airport",
+      "nzwn"
+    ],
+    "country": "New Zealand",
+    "lat": -41.3,
+    "lon": 174.8,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "93436099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "NZWN",
+    "station_name": "Wellington Intl Airport",
+    "timezone": "Pacific/Auckland",
+    "truth_track": "research_public"
+  },
+  "Wuhan": {
+    "aliases": [
+      "wuhan tianhe international airport",
+      "zhhh"
+    ],
+    "country": "China",
+    "lat": 30.784,
+    "lon": 114.208,
+    "official_source_name": "Wunderground",
+    "public_truth_source_name": "NOAA Global Hourly",
+    "public_truth_station_id": "57494099999",
+    "research_priority": "expansion",
+    "settlement_eligible": false,
+    "station_id": "ZHHH",
+    "station_name": "Wuhan Tianhe International Airport",
+    "timezone": "Asia/Shanghai",
+    "truth_track": "research_public"
+  }
+}

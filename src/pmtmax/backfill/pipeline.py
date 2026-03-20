@@ -24,6 +24,7 @@ from pmtmax.utils import stable_hash
 from pmtmax.weather.features import build_hourly_feature_frame, target_day_features
 from pmtmax.weather.openmeteo_client import OpenMeteoClient
 from pmtmax.weather.truth_sources import make_truth_source
+from pmtmax.weather.truth_sources.base import TruthSourceLagError
 
 LOGGER = get_logger(__name__)
 
@@ -56,6 +57,14 @@ def _coerce_float(value: object) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _rows_for_market(frame: pd.DataFrame, market_id: str) -> pd.DataFrame:
+    """Return rows for one market or an empty frame when the key column is absent."""
+
+    if "market_id" not in frame.columns:
+        return pd.DataFrame()
+    return frame.loc[frame["market_id"] == market_id].copy()
 
 
 @dataclass
@@ -127,6 +136,11 @@ class BackfillPipeline:
                     "station_name": spec.station_name,
                     "station_lat": spec.station_lat,
                     "station_lon": spec.station_lon,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
+                    "public_truth_source_name": spec.public_truth_source_name,
+                    "public_truth_station_id": spec.public_truth_station_id,
+                    "research_priority": spec.research_priority,
                     "unit": spec.unit,
                     "precision_rule_json": spec.precision_rule.model_dump_json(),
                     "outcome_schema_json": json.dumps(
@@ -150,6 +164,11 @@ class BackfillPipeline:
                     "station_lat": spec.station_lat,
                     "station_lon": spec.station_lon,
                     "official_source_name": spec.official_source_name,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
+                    "public_truth_source_name": spec.public_truth_source_name,
+                    "public_truth_station_id": spec.public_truth_station_id,
+                    "research_priority": spec.research_priority,
                     **self._metadata_fields(source_priority=100),
                 }
             )
@@ -161,6 +180,8 @@ class BackfillPipeline:
                     "station_id": spec.station_id,
                     "city": spec.city,
                     "source_kind": spec.adapter_key(),
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
                     **self._metadata_fields(source_priority=100),
                 }
             )
@@ -453,18 +474,26 @@ class BackfillPipeline:
             try:
                 bundle = truth_source.fetch_observation_bundle(spec, spec.target_local_date)
             except Exception as exc:  # noqa: BLE001
+                status, latest_available_date = self._truth_failure_details(exc)
                 bronze_rows.append(
                     {
                         "market_id": spec.market_id,
                         "station_id": spec.station_id,
                         "city": spec.city,
                         "official_source_name": spec.official_source_name,
+                        "public_truth_source_name": spec.public_truth_source_name,
+                        "public_truth_station_id": spec.public_truth_station_id,
+                        "truth_track": spec.truth_track,
+                        "settlement_eligible": spec.settlement_eligible,
                         "target_local_date": pd.Timestamp(spec.target_local_date),
                         "fetched_at": pd.Timestamp(fetched_at),
-                        "status": "error",
+                        "status": status,
                         "raw_path": None,
                         "raw_hash": None,
                         "media_type": None,
+                        "latest_available_date": (
+                            pd.Timestamp(latest_available_date) if latest_available_date is not None else pd.NaT
+                        ),
                         "source_url": spec.official_source_url,
                         "error_message": str(exc),
                         **self._metadata_fields(source_priority=100),
@@ -477,7 +506,7 @@ class BackfillPipeline:
                 f"{spec.market_id}_{spec.target_local_date.isoformat()}.{extension}"
             )
             if bundle.media_type == "application/json":
-                artifact = self.warehouse.raw_store.write_json(relative_path, cast(dict[str, Any], bundle.raw_payload))
+                artifact = self.warehouse.raw_store.write_json(relative_path, bundle.raw_payload)
             else:
                 artifact = self.warehouse.raw_store.write_text(relative_path, str(bundle.raw_payload), bundle.media_type)
             bronze_rows.append(
@@ -486,12 +515,17 @@ class BackfillPipeline:
                     "station_id": spec.station_id,
                     "city": spec.city,
                     "official_source_name": spec.official_source_name,
+                    "public_truth_source_name": spec.public_truth_source_name,
+                    "public_truth_station_id": spec.public_truth_station_id,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
                     "target_local_date": pd.Timestamp(spec.target_local_date),
                     "fetched_at": pd.Timestamp(fetched_at),
                     "status": "ok",
                     "raw_path": artifact.relative_path,
                     "raw_hash": artifact.content_hash,
                     "media_type": artifact.media_type,
+                    "latest_available_date": pd.NaT,
                     "source_url": bundle.source_url,
                     "error_message": None,
                     **self._metadata_fields(created_at=fetched_at, source_priority=100),
@@ -504,6 +538,8 @@ class BackfillPipeline:
                     "city": spec.city,
                     "source": bundle.observation.source,
                     "official_source_name": spec.official_source_name,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
                     "target_local_date": pd.Timestamp(bundle.observation.local_date),
                     "daily_max": bundle.observation.daily_max,
                     "unit": bundle.observation.unit,
@@ -519,6 +555,52 @@ class BackfillPipeline:
         silver = self.warehouse.upsert_table("silver_observations_daily", pd.DataFrame(silver_rows))
         self.warehouse.write_manifest()
         return {"bronze_truth_snapshots": bronze, "silver_observations_daily": silver}
+
+    def summarize_truth_coverage(self) -> dict[str, pd.DataFrame]:
+        """Summarize truth fetch outcomes, lagged markets, and archive-ready statuses."""
+
+        bronze = self.warehouse.read_table("bronze_truth_snapshots")
+        if bronze.empty:
+            return {"summary": pd.DataFrame(), "details": pd.DataFrame()}
+
+        frame = bronze.copy()
+        for column in ("target_local_date", "latest_available_date", "fetched_at"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], errors="coerce")
+        if {"target_local_date", "latest_available_date"}.issubset(frame.columns):
+            frame["lag_days"] = (
+                frame["target_local_date"].dt.normalize() - frame["latest_available_date"].dt.normalize()
+            ).dt.days
+        else:
+            frame["lag_days"] = pd.NA
+
+        summary = (
+            frame.groupby(["status", "truth_track", "city", "official_source_name"], dropna=False)
+            .size()
+            .reset_index(name="count")
+            .sort_values(["status", "truth_track", "city", "official_source_name"], ignore_index=True)
+        )
+        detail_columns = [
+            "market_id",
+            "city",
+            "station_id",
+            "public_truth_station_id",
+            "official_source_name",
+            "public_truth_source_name",
+            "truth_track",
+            "settlement_eligible",
+            "target_local_date",
+            "latest_available_date",
+            "lag_days",
+            "status",
+            "source_url",
+            "error_message",
+        ]
+        details = frame.loc[:, [column for column in detail_columns if column in frame.columns]].sort_values(
+            ["status", "city", "target_local_date", "market_id"],
+            ignore_index=True,
+        )
+        return {"summary": summary, "details": details}
 
     def materialize_training_set(
         self,
@@ -542,8 +624,8 @@ class BackfillPipeline:
             spec = snapshot.spec
             if spec is None:
                 continue
-            market_forecasts = forecast_frame.loc[forecast_frame["market_id"] == spec.market_id].copy()
-            market_truth = truth_frame.loc[truth_frame["market_id"] == spec.market_id].copy()
+            market_forecasts = _rows_for_market(forecast_frame, spec.market_id)
+            market_truth = _rows_for_market(truth_frame, spec.market_id)
             if market_forecasts.empty or market_truth.empty:
                 LOGGER.warning(
                     "materialize_training_set_skip",
@@ -567,6 +649,8 @@ class BackfillPipeline:
                     "market_id": spec.market_id,
                     "station_id": spec.station_id,
                     "city": spec.city,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
                     "target_date": pd.Timestamp(spec.target_local_date),
                     "decision_horizon": horizon,
                     "decision_time_utc": pd.Timestamp(decision_point["decision_time_utc"]),
@@ -597,6 +681,9 @@ class BackfillPipeline:
                 )
 
         frame = pd.DataFrame(rows)
+        if frame.empty:
+            msg = self._empty_materialization_message(snapshots, forecast_frame, truth_frame)
+            raise ValueError(msg)
         if not frame.empty:
             numeric_columns = frame.select_dtypes(include=["number"]).columns
             frame.loc[:, numeric_columns] = frame.loc[:, numeric_columns].fillna(0.0)
@@ -620,6 +707,55 @@ class BackfillPipeline:
             )
         self.warehouse.write_manifest()
         return frame
+
+    def _empty_materialization_message(
+        self,
+        snapshots: list[MarketSnapshot],
+        forecast_frame: pd.DataFrame,
+        truth_frame: pd.DataFrame,
+    ) -> str:
+        """Build an actionable error when no gold rows can be materialized."""
+
+        missing_inputs: list[str] = []
+        if forecast_frame.empty or "market_id" not in forecast_frame.columns:
+            missing_inputs.append("silver_forecast_runs_hourly")
+        if truth_frame.empty or "market_id" not in truth_frame.columns:
+            missing_inputs.append("silver_observations_daily")
+
+        message = "No training rows materialized."
+        if missing_inputs:
+            message += f" Missing usable rows in: {', '.join(missing_inputs)}."
+        if any(snapshot.spec is not None and snapshot.spec.adapter_key() == "wunderground" for snapshot in snapshots):
+            message += (
+                " Wunderground-family markets require a documented same-airport public truth response "
+                "(for example, AMO AIR_CALP for Seoul/RKSI or NOAA Global Hourly for other supported cities) "
+                "or a local station snapshot for truth backfill."
+            )
+        truth_bronze = self.warehouse.read_table("bronze_truth_snapshots")
+        if not truth_bronze.empty and "status" in truth_bronze.columns:
+            market_ids = {snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None}
+            lagged = truth_bronze.loc[truth_bronze["status"].astype(str) == "lag"].copy()
+            if market_ids and "market_id" in lagged.columns:
+                lagged = lagged.loc[lagged["market_id"].astype(str).isin(market_ids)].copy()
+            if not lagged.empty:
+                details: list[str] = []
+                for _, row in lagged.head(3).iterrows():
+                    city = str(row.get("city") or row.get("market_id") or "unknown")
+                    station_id = str(row.get("station_id") or "unknown")
+                    latest = pd.to_datetime(row.get("latest_available_date"), errors="coerce")
+                    if pd.notna(latest):
+                        details.append(f"{city}/{station_id}: latest {latest.date().isoformat()}")
+                    else:
+                        details.append(f"{city}/{station_id}: archive lag")
+                message += f" Public archive lag detected: {'; '.join(details)}."
+                message += " Run `uv run pmtmax summarize-truth-coverage` for per-market lag details."
+        return message
+
+    @staticmethod
+    def _truth_failure_details(exc: Exception) -> tuple[str, dt.date | None]:
+        if isinstance(exc, TruthSourceLagError):
+            return "lag", exc.latest_available_date
+        return "error", None
 
     def _populate_feature_row(
         self,
@@ -685,6 +821,8 @@ class BackfillPipeline:
                     "market_id": spec.market_id,
                     "station_id": spec.station_id,
                     "city": spec.city,
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
                     "target_date": pd.Timestamp(spec.target_local_date),
                     "decision_horizon": horizon,
                     "decision_time_utc": pd.Timestamp(decision_point["decision_time_utc"]),

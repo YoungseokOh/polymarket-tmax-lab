@@ -8,15 +8,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
 from pmtmax.utils import load_yaml_with_extends
 
 
 class AppConfig(BaseModel):
     env: Literal["research", "paper", "live"] = "research"
     random_seed: int = 42
-    supported_cities: list[str] = Field(
-        default_factory=lambda: ["Seoul", "NYC", "London", "Hong Kong", "Taipei"]
-    )
+    supported_cities: list[str] = Field(default_factory=catalog_supported_cities)
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")

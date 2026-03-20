@@ -12,20 +12,25 @@ from dateutil import parser as date_parser
 from pmtmax.markets.market_spec import FinalizationPolicy, MarketSpec, PrecisionRule
 from pmtmax.markets.normalization import extract_clob_token_ids, extract_outcome_labels
 from pmtmax.markets.outcome_schema import infer_unit_from_label, parse_outcome_schema
-from pmtmax.markets.station_registry import canonical_city, lookup_station
+from pmtmax.markets.station_registry import (
+    canonical_city,
+    lookup_station,
+    lookup_station_by_station_id,
+)
 
 QUESTION_RE = re.compile(
     r"highest temperature in (?P<city>.+?) on (?P<date>[A-Za-z0-9 ,'-]+)\?",
     re.I,
 )
 RULE_DATE_RE = re.compile(r"on\s+(?P<date>\d{1,2}\s+[A-Za-z]{3}\s+'?\d{2,4})", re.I)
-STATION_RE = re.compile(r"recorded at the (?P<station>.+?) Station", re.I)
+STATION_RE = re.compile(r"recorded (?:at|by NOAA at) the (?P<station>.+?)(?: Station|\s+in degrees)", re.I)
 SOURCE_URL_RE = re.compile(r"https?://\S+")
 FINALIZED_RE = re.compile(r"can not resolve to \"yes\" until all data .* finalized", re.I)
 REVISION_RE = re.compile(r"revisions .* after data is finalized .* will not be considered", re.I)
 WHOLE_DEGREE_RE = re.compile(r"measures temperatures to whole degrees\s*(?P<unit>Celsius|Fahrenheit)", re.I)
 HKO_STATION_RE = re.compile(r"station\s+(?P<station>[A-Z]{2,4})", re.I)
 CWA_STATION_RE = re.compile(r"station\s+(?P<station>\d{5,6})", re.I)
+NOAA_SITE_RE = re.compile(r"[?&]site=(?P<station>[A-Z0-9]{4,6})", re.I)
 
 
 def extract_rule_text(html_or_text: str) -> str:
@@ -82,6 +87,8 @@ def _detect_source(raw_text: str) -> tuple[str, str]:
     lowered = raw_text.lower()
     if "wunderground" in lowered:
         source_name = "Wunderground"
+    elif "information from noaa" in lowered or "weather.gov/wrh/timeseries" in lowered:
+        source_name = "NOAA Timeseries"
     elif "hong kong observatory" in lowered:
         source_name = "Hong Kong Observatory Daily Extract"
     elif "central weather administration" in lowered or "cwa" in lowered:
@@ -98,6 +105,8 @@ def _parse_station(raw_text: str, source_name: str, market: dict[str, Any] | Non
         return match.group("station").strip()
     if source_name.startswith("Hong Kong Observatory") and (match := HKO_STATION_RE.search(raw_text)):
         return match.group("station").strip().upper()
+    if source_name == "NOAA Timeseries" and (match := NOAA_SITE_RE.search(raw_text)):
+        return match.group("station").strip().upper()
     if source_name == "Central Weather Administration" and (match := CWA_STATION_RE.search(raw_text)):
         return match.group("station").strip()
     if market and market.get("question"):
@@ -108,9 +117,11 @@ def _parse_station(raw_text: str, source_name: str, market: dict[str, Any] | Non
     raise ValueError(msg)
 
 
-def _resolve_timezone(city: str, explicit_timezone: str | None) -> str:
+def _resolve_timezone(city: str, explicit_timezone: str | None, station_id: str | None = None) -> str:
     if explicit_timezone and explicit_timezone != "UTC":
         return explicit_timezone
+    if station_id and (definition := lookup_station_by_station_id(station_id)):
+        return definition.timezone
     if definition := lookup_station(city):
         return definition.timezone
     return explicit_timezone or "UTC"
@@ -125,6 +136,9 @@ def _resolve_station_id(
 ) -> str:
     if source_name == "Wunderground" and source_url:
         return source_url.rstrip("/").split("/")[-1]
+    if source_name == "NOAA Timeseries" and source_url:
+        if station_match := NOAA_SITE_RE.search(source_url):
+            return station_match.group("station").upper()
     if source_name.startswith("Hong Kong Observatory"):
         if source_url:
             station_match = re.search(r"station=([A-Z0-9]+)", source_url)
@@ -150,10 +164,18 @@ def parse_market_spec(
     raw_text = extract_rule_text(html_or_text)
     question = _extract_question(raw_text, market)
     city = _parse_city(question)
-    resolved_timezone = _resolve_timezone(city, timezone)
     target_date = _parse_target_date(question, raw_text)
     source_name, source_url = _detect_source(raw_text)
     station_name = _parse_station(raw_text, source_name, market)
+    station_id = _resolve_station_id(raw_text, source_name, source_url, city, station_name)
+    definition = lookup_station_by_station_id(station_id) or lookup_station(city)
+    if source_name == "Wunderground" and definition is None:
+        msg = f"Unknown Wunderground station metadata for {city} / {station_id}"
+        raise ValueError(msg)
+    if definition is not None:
+        city = definition.city
+        station_name = definition.station_name
+    resolved_timezone = _resolve_timezone(city, timezone, station_id)
 
     token_ids = extract_clob_token_ids(market or {})
     outcome_labels = extract_outcome_labels(market or {})
@@ -180,13 +202,22 @@ def parse_market_spec(
         notes="Parsed from market rules",
     )
 
-    station_id = _resolve_station_id(raw_text, source_name, source_url, city, station_name)
-    definition = lookup_station(city)
     country = definition.country if definition else _infer_country(city)
     station_lat = definition.lat if definition else None
     station_lon = definition.lon if definition else None
-    if definition and station_name in {definition.station_id, "HKA"}:
-        station_name = definition.station_name
+    truth_track = "research_public" if source_name == "Wunderground" else "exact_public"
+    settlement_eligible = source_name != "Wunderground"
+    public_truth_source_name = source_name
+    public_truth_station_id = station_id
+    research_priority = "expansion"
+    if definition is not None:
+        research_priority = definition.research_priority
+        if source_name == "Wunderground":
+            public_truth_source_name = definition.public_truth_source_name or source_name
+            public_truth_station_id = definition.public_truth_station_id or station_id
+        else:
+            public_truth_source_name = definition.public_truth_source_name or source_name
+            public_truth_station_id = definition.public_truth_station_id or station_id
 
     return MarketSpec(
         market_id=str(market.get("id")) if market else question,
@@ -205,6 +236,11 @@ def parse_market_spec(
         station_name=station_name,
         station_lat=station_lat,
         station_lon=station_lon,
+        truth_track=cast(Any, truth_track),
+        settlement_eligible=settlement_eligible,
+        public_truth_source_name=public_truth_source_name,
+        public_truth_station_id=public_truth_station_id,
+        research_priority=cast(Any, research_priority),
         unit=unit,
         precision_rule=precision_rule,
         outcome_schema=parse_outcome_schema(outcome_labels),

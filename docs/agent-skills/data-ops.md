@@ -48,10 +48,12 @@ scripts/run_full_historical_batch.sh
 uv run python scripts/refresh_historical_event_urls.py
 uv run python scripts/build_historical_market_inventory.py
 uv run python scripts/validate_historical_market_inventory.py
+uv run pmtmax collection-preflight --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax init-warehouse
 uv run pmtmax backfill-markets --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of
 uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax summarize-truth-coverage
 uv run pmtmax materialize-training-set --markets-path configs/market_inventory/historical_temperature_snapshots.json --decision-horizon market_open --decision-horizon previous_evening --decision-horizon morning_of
 uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
@@ -62,11 +64,15 @@ uv run pmtmax compact-warehouse
 - closed-event candidates: `data/manifests/historical_event_candidates.json`
 - closed-event page fetches: `data/manifests/historical_event_page_fetches.json`
 - closed-event collection status: `data/manifests/historical_collection_status.json`
-- inventory report: `data/manifests/historical_inventory_report.json`
-- active supported-city watchlist: `artifacts/active_weather_watchlist.json`
+- inventory build report: `data/manifests/historical_inventory_build_report.json`
+- inventory validate report: `data/manifests/historical_inventory_validate_report.json`
+- active supported-city watchlist: `configs/market_inventory/active_temperature_watchlist.json`
 
-`refresh_historical_event_urls.py`는 Gamma grouped weather events에서 supported closed backlog를 찾아 candidate/page-fetch/status manifest를 남기고, `collected`만 append-only URL manifest에 publish한다.
+`refresh_historical_event_urls.py`는 Gamma grouped weather/temperature events에서 supported closed backlog를 찾아 candidate/page-fetch/status manifest를 남기고, `collected`만 append-only URL manifest에 publish한다.
 retryable 상태는 `truth_source_lag`, `truth_request_failed`로 남기고 다음 batch에서 다시 classify할 수 있다.
+`collection-preflight`는 curated snapshot 집합의 truth track과 수동 env 요구사항을 함께 요약한다. Wunderground-family markets는 기본적으로 같은 공항의 documented public truth를 사용하므로 `PMTMAX_WU_API_KEY`는 optional audit env로만 표시된다. 현재 Seoul / RKSI는 AMO `AIR_CALP`, 그 외 지원 도시들은 기본적으로 NOAA Global Hourly를 사용한다.
+`build_historical_market_inventory.py`는 canonical snapshot output을 truth-ready subset으로만 만든다. `truth_source_lag`, `truth_blocked`, `truth_request_failed`는 snapshot JSON에 들어가지 않고 inventory report issue로 남는다.
+`backfill-truth`에 `lag` 상태가 보이면 public archive가 target date보다 뒤처진 것이다. 이때 `summarize-truth-coverage`가 station별 최신 archive 일자를 JSON으로 내보내므로 truth-ready subset을 따로 고르거나 재시도 시점을 판단할 수 있다.
 `build_active_weather_watchlist.py`는 supported active grouped events를 parse-ready 상태로 정리하지만 canonical warehouse는 건드리지 않는다.
 `run_historical_refresh_pipeline.sh`는 refresh 전용 shell wrapper고, `run_full_historical_batch.sh`는 refresh 이후 warehouse rebuild까지 포함하는 shell wrapper다.
 

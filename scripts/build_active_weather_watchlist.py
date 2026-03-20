@@ -15,7 +15,7 @@ from pmtmax.markets.inventory import (
 )
 from pmtmax.utils import dump_json
 
-DEFAULT_OUTPUT = Path("artifacts/active_weather_watchlist.json")
+DEFAULT_OUTPUT = Path("configs/market_inventory/active_temperature_watchlist.json")
 
 
 def main() -> None:

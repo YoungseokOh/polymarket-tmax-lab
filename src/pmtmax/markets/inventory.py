@@ -162,6 +162,7 @@ class HistoricalInventoryReport(BaseModel):
     supported_cities: list[str] = Field(default_factory=list)
     city_counts: dict[str, int] = Field(default_factory=dict)
     duplicate_market_ids: list[str] = Field(default_factory=list)
+    issue_counts: dict[str, int] = Field(default_factory=dict)
     issues: list[InventoryIssue] = Field(default_factory=list)
 
 
@@ -176,6 +177,9 @@ class HistoricalCollectionStatusEntry(BaseModel):
     target_local_date: date | None = None
     official_source_family: str | None = None
     official_source_name: str | None = None
+    truth_track: str | None = None
+    settlement_eligible: bool | None = None
+    research_priority: str | None = None
     market_id: str | None = None
     status: HistoricalCollectionStatus
     status_reason: str = ""
@@ -209,6 +213,10 @@ class ActiveWeatherWatchEntry(BaseModel):
     city: str | None = None
     target_local_date: date | None = None
     official_source_family: str | None = None
+    official_source_name: str | None = None
+    truth_track: str | None = None
+    settlement_eligible: bool | None = None
+    research_priority: str | None = None
     market_id: str | None = None
     parse_ready: bool = False
     status: WatchlistStatus
@@ -462,27 +470,31 @@ def discover_temperature_event_refs_from_gamma(
     active: bool | None = None,
     closed: bool | None = None,
     tag_slug: str = "weather",
+    fallback_tag_slugs: list[str] | None = None,
     max_pages: int = 20,
     page_size: int = 100,
 ) -> list[TemperatureEventRef]:
     """Query Gamma grouped events and return supported temperature refs."""
 
-    refs: list[TemperatureEventRef] = []
-    for page in range(max_pages):
-        offset = page * page_size
-        batch = gamma.fetch_events(
-            active=active,
-            closed=closed,
-            tag_slug=tag_slug,
-            limit=page_size,
-            offset=offset,
-        )
-        if not batch:
-            break
-        refs.extend(discover_temperature_event_refs(batch, supported_cities=supported_cities))
-        if len(batch) < page_size:
-            break
-    return refs
+    refs_by_url: dict[str, TemperatureEventRef] = {}
+    tag_slugs = [tag_slug, *(fallback_tag_slugs or ["temperature"])]
+    for current_tag in dict.fromkeys(tag_slugs):
+        for page in range(max_pages):
+            offset = page * page_size
+            batch = gamma.fetch_events(
+                active=active,
+                closed=closed,
+                tag_slug=current_tag,
+                limit=page_size,
+                offset=offset,
+            )
+            if not batch:
+                break
+            for ref in discover_temperature_event_refs(batch, supported_cities=supported_cities):
+                refs_by_url.setdefault(ref.url, ref)
+            if len(batch) < page_size:
+                break
+    return sorted(refs_by_url.values(), key=lambda ref: (ref.city, ref.url))
 
 
 def fetch_temperature_event_pages(
@@ -503,6 +515,63 @@ def fetch_temperature_event_pages(
             continue
         fetches.append(HistoricalEventFetch(ref=ref, fetched_at=fetched_at, html=html, fetch_error=None))
     return fetches
+
+
+def snapshots_from_temperature_event_fetches(fetches: list[HistoricalEventFetch]) -> list[MarketSnapshot]:
+    """Parse fetched grouped event pages into MarketSnapshot objects."""
+
+    snapshots: list[MarketSnapshot] = []
+    for fetch in fetches:
+        if fetch.fetch_error:
+            snapshots.append(
+                MarketSnapshot(
+                    captured_at=fetch.fetched_at,
+                    market={
+                        "id": fetch.ref.event_id,
+                        "slug": fetch.ref.slug,
+                        "question": fetch.ref.title,
+                        "sourceUrl": fetch.ref.url,
+                    },
+                    spec=None,
+                    parse_error=fetch.fetch_error,
+                )
+            )
+            continue
+        if fetch.html is None:
+            snapshots.append(
+                MarketSnapshot(
+                    captured_at=fetch.fetched_at,
+                    market={
+                        "id": fetch.ref.event_id,
+                        "slug": fetch.ref.slug,
+                        "question": fetch.ref.title,
+                        "sourceUrl": fetch.ref.url,
+                    },
+                    spec=None,
+                    parse_error="missing_event_html",
+                )
+            )
+            continue
+        try:
+            snapshot = snapshot_from_temperature_event_page(
+                url=fetch.ref.url,
+                html=fetch.html,
+                captured_at=fetch.fetched_at,
+            )
+        except Exception as exc:  # noqa: BLE001
+            snapshot = MarketSnapshot(
+                captured_at=fetch.fetched_at,
+                market={
+                    "id": fetch.ref.event_id,
+                    "slug": fetch.ref.slug,
+                    "question": fetch.ref.title,
+                    "sourceUrl": fetch.ref.url,
+                },
+                spec=None,
+                parse_error=str(exc),
+            )
+        snapshots.append(snapshot)
+    return snapshots
 
 
 def probe_truth_readiness(snapshot: MarketSnapshot, http: CachedHttpClient) -> TruthProbeResult:
@@ -526,6 +595,82 @@ def probe_truth_readiness(snapshot: MarketSnapshot, http: CachedHttpClient) -> T
     return TruthProbeResult(status="ready", detail="")
 
 
+def _coerce_truth_result(value: TruthProbeResult | str | None) -> TruthProbeResult:
+    if isinstance(value, TruthProbeResult):
+        return value
+    if value is None:
+        return TruthProbeResult(status="ready", detail="")
+    return TruthProbeResult(status="truth_blocked", detail=str(value))
+
+
+def _filter_truth_ready_snapshots(
+    snapshots: list[MarketSnapshot],
+    *,
+    truth_probe: Callable[[MarketSnapshot], TruthProbeResult | str | None] | None,
+    truth_workers: int = 1,
+    truth_per_source_limit: int | None = None,
+) -> tuple[list[MarketSnapshot], list[InventoryIssue]]:
+    """Return only truth-ready snapshots and issues for lagged or blocked entries."""
+
+    if truth_probe is None:
+        return snapshots, []
+
+    issues: list[InventoryIssue] = []
+    ready_snapshots: list[MarketSnapshot] = []
+    candidates = [snapshot for snapshot in snapshots if snapshot.spec is not None]
+    if not candidates:
+        return ready_snapshots, issues
+
+    if truth_workers <= 1:
+        truth_results = [_coerce_truth_result(truth_probe(snapshot)) for snapshot in candidates]
+    else:
+        truth_results = [TruthProbeResult(status="truth_blocked", detail="unreachable")] * len(candidates)
+        semaphores: dict[str, Semaphore] = {}
+        if truth_per_source_limit and truth_per_source_limit > 0:
+            families = {
+                snapshot.spec.adapter_key() if snapshot.spec is not None else "unknown"
+                for snapshot in candidates
+            }
+            semaphores = {family: Semaphore(truth_per_source_limit) for family in families}
+
+        def _probe_with_limits(snapshot: MarketSnapshot) -> TruthProbeResult | str | None:
+            if not semaphores or snapshot.spec is None:
+                return truth_probe(snapshot)
+            family = snapshot.spec.adapter_key()
+            with semaphores[family]:
+                return truth_probe(snapshot)
+
+        with ThreadPoolExecutor(max_workers=truth_workers) as executor:
+            future_to_index = {
+                executor.submit(_probe_with_limits, snapshot): index
+                for index, snapshot in enumerate(candidates)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    truth_results[index] = _coerce_truth_result(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    truth_results[index] = TruthProbeResult(status="truth_blocked", detail=str(exc))
+
+    for snapshot, truth_result in zip(candidates, truth_results, strict=True):
+        spec = snapshot.spec
+        if spec is None:
+            continue
+        if truth_result.status == "ready":
+            ready_snapshots.append(snapshot)
+            continue
+        issues.append(
+            InventoryIssue(
+                url=str(snapshot.market.get("sourceUrl") or ""),
+                reason=truth_result.status,
+                detail=truth_result.detail,
+                market_id=spec.market_id,
+                city=spec.city,
+            )
+        )
+    return ready_snapshots, issues
+
+
 def _collection_entry(
     ref: TemperatureEventRef,
     *,
@@ -546,6 +691,9 @@ def _collection_entry(
         target_local_date=spec.target_local_date if spec is not None else None,
         official_source_family=spec.adapter_key() if spec is not None else None,
         official_source_name=spec.official_source_name if spec is not None else None,
+        truth_track=spec.truth_track if spec is not None else None,
+        settlement_eligible=spec.settlement_eligible if spec is not None else None,
+        research_priority=spec.research_priority if spec is not None else None,
         market_id=spec.market_id if spec is not None else None,
         status=status,
         status_reason=detail or status,
@@ -572,7 +720,11 @@ def _watch_entry(
         url=ref.url,
         city=spec.city if spec is not None else ref.city,
         target_local_date=spec.target_local_date if spec is not None else None,
-        official_source_family=spec.official_source_name if spec is not None else None,
+        official_source_family=spec.adapter_key() if spec is not None else None,
+        official_source_name=spec.official_source_name if spec is not None else None,
+        truth_track=spec.truth_track if spec is not None else None,
+        settlement_eligible=spec.settlement_eligible if spec is not None else None,
+        research_priority=spec.research_priority if spec is not None else None,
         market_id=spec.market_id if spec is not None else None,
         parse_ready=status == "ready",
         status=status,
@@ -658,6 +810,7 @@ def _is_truth_source_lag_error(message: str) -> bool:
         "no wunderground historical observations found",
         "no wunderground historical temperature values found",
         "could not parse wunderground daily max",
+        "no noaa global hourly rows",
         "could not parse cwa daily max",
         "missing airtemperature.maximum",
         "no record for ",
@@ -1257,6 +1410,9 @@ def validate_historical_inventory(
     supported_cities: list[str],
     source_manifest: str | None = None,
     source_urls: list[str] | None = None,
+    truth_probe: Callable[[MarketSnapshot], TruthProbeResult | str | None] | None = None,
+    truth_workers: int = 1,
+    truth_per_source_limit: int | None = None,
 ) -> HistoricalInventoryReport:
     """Validate a curated historical snapshot inventory."""
 
@@ -1265,6 +1421,7 @@ def validate_historical_inventory(
     city_counts: dict[str, int] = {}
     seen_market_ids: set[str] = set()
     supported = {city.lower() for city in supported_cities}
+    structurally_valid_snapshots: list[MarketSnapshot] = []
 
     for snapshot in snapshots:
         market_id = str(snapshot.market.get("id") or "")
@@ -1340,6 +1497,18 @@ def validate_historical_inventory(
                     city=spec.city,
                 )
             )
+            continue
+        structurally_valid_snapshots.append(snapshot)
+
+    _, truth_issues = _filter_truth_ready_snapshots(
+        structurally_valid_snapshots,
+        truth_probe=truth_probe,
+        truth_workers=truth_workers,
+        truth_per_source_limit=truth_per_source_limit,
+    )
+    issues.extend(truth_issues)
+
+    issue_counts = dict(sorted(Counter(issue.reason for issue in issues).items()))
 
     return HistoricalInventoryReport(
         generated_at=datetime.now(tz=UTC),
@@ -1350,6 +1519,7 @@ def validate_historical_inventory(
         supported_cities=supported_cities,
         city_counts=city_counts,
         duplicate_market_ids=sorted(set(duplicate_market_ids)),
+        issue_counts=issue_counts,
         issues=issues,
     )
 
@@ -1360,6 +1530,9 @@ def build_historical_inventory_from_pages(
     supported_cities: list[str],
     source_manifest: str | None = None,
     as_of_date: date | None = None,
+    truth_probe: Callable[[MarketSnapshot], TruthProbeResult | str | None] | None = None,
+    truth_workers: int = 1,
+    truth_per_source_limit: int | None = None,
 ) -> tuple[list[MarketSnapshot], HistoricalInventoryReport]:
     """Build a curated historical inventory from fetched event pages."""
 
@@ -1425,6 +1598,14 @@ def build_historical_inventory_from_pages(
             continue
         snapshots.append(snapshot)
 
+    snapshots, truth_issues = _filter_truth_ready_snapshots(
+        snapshots,
+        truth_probe=truth_probe,
+        truth_workers=truth_workers,
+        truth_per_source_limit=truth_per_source_limit,
+    )
+    issues.extend(truth_issues)
+
     report = validate_historical_inventory(
         snapshots,
         supported_cities=supported_cities,
@@ -1433,4 +1614,5 @@ def build_historical_inventory_from_pages(
     )
     report.total_inputs = len(pages)
     report.issues.extend(issues)
+    report.issue_counts = dict(sorted(Counter(issue.reason for issue in report.issues).items()))
     return snapshots, report

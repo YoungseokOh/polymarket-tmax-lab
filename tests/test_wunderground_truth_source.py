@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from pmtmax.examples import example_market_specs
 from pmtmax.weather.truth_sources.wunderground import WundergroundTruthSource
 
@@ -22,6 +24,14 @@ class _FakeHttp:
                 {"valid_time_gmt": 1773757800, "temp": 5},
             ],
         }
+
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        return "<html>fixture</html>"
+
+
+class _BrokenHtmlHttp(_FakeHttp):
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        return "<html>missing temperatureMax</html>"
 
 
 def test_wunderground_truth_source_uses_cached_html_snapshot_when_available() -> None:
@@ -51,3 +61,14 @@ def test_wunderground_truth_source_fetches_official_historical_api_for_live_data
         "startDate": "20260317",
         "endDate": "20260317",
     }
+
+
+def test_wunderground_truth_source_surfaces_api_key_guidance_when_html_fallback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PMTMAX_WU_API_KEY", raising=False)
+    spec = example_market_specs(["Seoul"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
+    source = WundergroundTruthSource(_BrokenHtmlHttp())  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="PMTMAX_WU_API_KEY"):
+        source.fetch_observation_bundle(spec, date(2026, 3, 17))

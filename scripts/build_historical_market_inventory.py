@@ -12,13 +12,16 @@ from pmtmax.markets.inventory import (
     HistoricalEventPage,
     build_historical_inventory_from_pages,
     preserve_existing_capture_times,
+    probe_truth_readiness,
 )
 from pmtmax.markets.repository import load_market_snapshots, save_market_snapshots
 from pmtmax.utils import dump_json, load_json
 
 DEFAULT_INPUT = Path("configs/market_inventory/historical_temperature_event_urls.json")
 DEFAULT_OUTPUT = Path("configs/market_inventory/historical_temperature_snapshots.json")
-DEFAULT_REPORT = Path("data/manifests/historical_inventory_report.json")
+DEFAULT_REPORT = Path("data/manifests/historical_inventory_build_report.json")
+DEFAULT_TRUTH_WORKERS = 4
+DEFAULT_TRUTH_PER_SOURCE_LIMIT = 2
 
 
 def main() -> None:
@@ -41,6 +44,18 @@ def main() -> None:
         action="store_true",
         help="Disable the shared HTTP cache while fetching event pages.",
     )
+    parser.add_argument(
+        "--truth-workers",
+        type=int,
+        default=DEFAULT_TRUTH_WORKERS,
+        help="Bounded concurrency for truth-readiness probes while building the curated inventory.",
+    )
+    parser.add_argument(
+        "--truth-per-source-limit",
+        type=int,
+        default=DEFAULT_TRUTH_PER_SOURCE_LIMIT,
+        help="Maximum concurrent truth probes per official source family.",
+    )
     args = parser.parse_args()
 
     config, _ = load_settings()
@@ -55,14 +70,16 @@ def main() -> None:
             )
             for url in urls
         ]
+        snapshots, report = build_historical_inventory_from_pages(
+            pages,
+            supported_cities=config.app.supported_cities,
+            source_manifest=str(args.input),
+            truth_probe=lambda snapshot: probe_truth_readiness(snapshot, http),
+            truth_workers=args.truth_workers,
+            truth_per_source_limit=args.truth_per_source_limit,
+        )
     finally:
         http.close()
-
-    snapshots, report = build_historical_inventory_from_pages(
-        pages,
-        supported_cities=config.app.supported_cities,
-        source_manifest=str(args.input),
-    )
     existing_snapshot_paths: list[Path] = []
     if args.output.exists():
         existing_snapshot_paths.append(args.output)
@@ -80,7 +97,7 @@ def main() -> None:
     dump_json(args.report, report.model_dump(mode="json"))
     print(
         f"Built {len(snapshots)} curated snapshots from {len(urls)} URLs -> {args.output} "
-        f"(issues: {len(report.issues)})"
+        f"(issues: {len(report.issues)}, issue_counts: {report.issue_counts})"
     )
 
 

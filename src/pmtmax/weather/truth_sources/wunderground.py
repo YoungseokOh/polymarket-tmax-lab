@@ -55,14 +55,25 @@ class WundergroundTruthSource(TruthSource):
                 source_url=url,
             )
 
+        historical_error: Exception | None = None
         try:
             payload, source_url = self._fetch_historical_payload(spec, target_date)
             value = self._parse_historical_max(payload)
             raw_payload: dict[str, object] | str = payload
             media_type = "application/json"
-        except Exception:
+        except Exception as exc:
+            historical_error = exc
             html = self.http.get_text(url, use_cache=True)
-            value = self._parse_daily_max(html)
+            try:
+                value = self._parse_daily_max(html)
+            except ValueError as parse_exc:
+                if not self.api_key and isinstance(historical_error, RuntimeError):
+                    msg = (
+                        f"{parse_exc}. Set {WU_API_KEY_ENV} for Weather.com historical API access "
+                        "or provide a same-source local snapshot."
+                    )
+                    raise RuntimeError(msg) from parse_exc
+                raise
             raw_payload = html
             media_type = "text/html"
             source_url = url

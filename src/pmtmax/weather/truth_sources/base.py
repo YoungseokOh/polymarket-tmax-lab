@@ -12,9 +12,17 @@ from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.storage.schemas import ObservationRecord
 
 
+class TruthSourceLagError(ValueError):
+    """Raised when a truth source is known to lag behind the target settlement date."""
+
+    def __init__(self, message: str, *, latest_available_date: date | None = None) -> None:
+        super().__init__(message)
+        self.latest_available_date = latest_available_date
+
+
 class TruthFetchBundle(BaseModel):
     observation: ObservationRecord
-    raw_payload: dict[str, Any] | str
+    raw_payload: dict[str, Any] | list[dict[str, Any]] | str
     media_type: str
     source_url: str
 

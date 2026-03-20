@@ -189,7 +189,12 @@ This staged pipeline discovers supported closed grouped events, persists the can
 ```bash
 uv run python scripts/build_historical_market_inventory.py
 uv run python scripts/validate_historical_market_inventory.py
+uv run pmtmax collection-preflight --markets-path configs/market_inventory/historical_temperature_snapshots.json
 ```
+
+`collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path, with Seoul / RKSI using AMO `AIR_CALP` and other supported cities using NOAA Global Hourly, so `PMTMAX_WU_API_KEY` is optional and only used for same-source audit collection.
+If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with a public archive lag message, run `uv run pmtmax summarize-truth-coverage` to inspect the latest archive date NOAA advertised for each lagged station.
+`build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
 
 3. Start from a clean canonical warehouse if you want to replace the existing seed data.
 
@@ -205,6 +210,7 @@ uv run pmtmax backfill-forecasts \
   --single-run-horizon previous_evening \
   --single-run-horizon morning_of
 uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax summarize-truth-coverage
 uv run pmtmax materialize-training-set \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --decision-horizon market_open \
@@ -227,7 +233,7 @@ The staged closed-event manifests live in:
 uv run python scripts/build_active_weather_watchlist.py
 ```
 
-This writes `artifacts/active_weather_watchlist.json` without mutating the canonical warehouse.
+This writes `configs/market_inventory/active_temperature_watchlist.json` without mutating the canonical warehouse.
 
 `uv run pmtmax build-dataset` remains available as a wrapper that runs the backfill
 and materialization steps in one command. Research mode defaults to strict Open-Meteo
@@ -334,7 +340,9 @@ The live broker fails closed if flags or credentials are missing.
 - Open-Meteo Single Runs support exists as an exact-run hook, but the main research pipeline still treats generic archive rows and exact single-run rows as different quality tiers.
 - Some model/location pairs are genuinely unsupported by Open-Meteo coverage. In strict mode those rows are skipped and recorded in `bronze_forecast_requests` instead of being silently replaced.
 - Bundled historical market snapshots provide a reproducible backtest path for Seoul, NYC, Hong Kong, and Taipei even when no active temperature markets are currently listed.
-- The Wunderground adapter uses the official Weather.com historical observation endpoint only when `PMTMAX_WU_API_KEY` is set, and otherwise falls back to same-source station pages or cached local snapshots.
+- Active grouped-event discovery now follows Polymarket `weather` and `temperature` event tags instead of relying on `/markets` pagination alone.
+- The checked-in station catalog covers the current active airport-city universe, with Seoul, NYC, and London marked as the core trading cities.
+- Wunderground-family markets keep their official station/source metadata, but default research truth collection uses documented public airport observations for the same station. Seoul / RKSI uses Korea's Aviation Meteorological Office `AIR_CALP` daily-extremes feed; other supported WU cities currently default to NOAA Global Hourly. `PMTMAX_WU_API_KEY` is optional for same-source audit collection only.
 - The CWA adapter is cache-first but can use the official CODiS station API as an exact-source override for Taipei station data. It still does not substitute another source or station.
 - Advanced models beyond the det2prob path are practical public-data approximations of the cited papers, not paper-faithful reproductions of closed or richer operational inputs.
 - Firebase sync is a backup mirror for raw/parquet/manifests only. DuckDB remains the local canonical warehouse and is not mirrored.
