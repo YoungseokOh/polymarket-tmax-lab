@@ -5,12 +5,14 @@
 ### Research backtest
 - available across the full historical market set
 - uses exact truth and no-lookahead forecast reconstruction
-- evaluates point skill, probabilistic skill, fair-vs-market edge, and counterfactual EV
+- has two pricing paths:
+  - `synthetic`: uses the bundled research book around captured outcome prices
+  - `real_history`: uses official Polymarket historical token prices at each decision timestamp
 
 ### Execution replay
-- requires exact archived L2 snapshots
-- v1 includes the code path and fixture-driven tests
-- older history without public exact L2 remains research-only for execution analysis
+- still requires exact archived L2 snapshots
+- older history without public exact L2 remains outside the exact replay subset
+- `real_history` is decision-time evaluation, not exact historical book replay
 
 ## Decision Horizons
 - market open
@@ -30,9 +32,6 @@
 - average edge captured
 
 ## Guardrails In Backtests
-- minimum liquidity
-- spread threshold
-- stale forecast skip
-- city-level exposure cap
-- global exposure cap
-
+- `synthetic` keeps spread/liquidity sizing logic
+- `real_history` skips decision rows when official market price history is missing or stale
+- `real_history` uses flat notional entry and holds to settlement because historical L2 depth is not public

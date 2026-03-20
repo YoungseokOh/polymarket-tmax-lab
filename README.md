@@ -72,6 +72,15 @@ uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax backtest --model-name gaussian_emos
 ```
 
+To evaluate against official historical Polymarket prices instead of the synthetic
+book, first backfill price history and materialize the decision-time panel, then run:
+
+```bash
+uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax materialize-backtest-panel
+uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
+```
+
 6. Emit paper-trading signals:
 
 ```bash
@@ -193,7 +202,9 @@ uv run pmtmax collection-preflight --markets-path configs/market_inventory/histo
 ```
 
 `collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path, with Seoul / RKSI using AMO `AIR_CALP` and other supported cities using NOAA Global Hourly, so `PMTMAX_WU_API_KEY` is optional and only used for same-source audit collection.
+When you run `build_historical_market_inventory.py` against the canonical checked-in manifests, it also syncs `data/manifests/historical_collection_status.json` so the `collected` count matches the current curated snapshot inventory.
 If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with a public archive lag message, run `uv run pmtmax summarize-truth-coverage` to inspect the latest archive date NOAA advertised for each lagged station.
+The default research CLI no longer reads `tests/fixtures/truth`; fixture truth remains test/demo-only unless you wire it explicitly in code.
 `build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
 
 3. Start from a clean canonical warehouse if you want to replace the existing seed data.
@@ -211,11 +222,17 @@ uv run pmtmax backfill-forecasts \
   --single-run-horizon morning_of
 uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax summarize-truth-coverage
+uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-training-set \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --decision-horizon market_open \
   --decision-horizon previous_evening \
   --decision-horizon morning_of
+uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax materialize-backtest-panel \
+  --dataset-path data/parquet/gold/historical_training_set.parquet \
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
 ```
@@ -278,11 +295,28 @@ uv run pmtmax archive-legacy-runs --execute
 ```bash
 uv run pmtmax backtest \
   --dataset-path data/parquet/gold/historical_training_set.parquet \
-  --model-path artifacts/models/gaussian_emos.pkl \
   --model-name gaussian_emos
 ```
 
-Outputs are written under `artifacts/`.
+This default path uses the synthetic research book. To evaluate the same historical
+dataset against official Polymarket prices, build the panel first:
+
+```bash
+uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax materialize-backtest-panel \
+  --dataset-path data/parquet/gold/historical_training_set.parquet \
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax backtest \
+  --dataset-path data/parquet/gold/historical_training_set.parquet \
+  --panel-path data/parquet/gold/historical_backtest_panel.parquet \
+  --pricing-source real_history \
+  --model-name gaussian_emos
+```
+
+Synthetic outputs are written to `artifacts/backtest_metrics.json` and
+`artifacts/backtest_trades.json`. Official-price runs write
+`artifacts/backtest_metrics_real_history.json` and
+`artifacts/backtest_trades_real_history.json`.
 
 ## Paper Trading Workflow
 ```bash

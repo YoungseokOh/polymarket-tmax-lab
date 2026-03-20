@@ -93,7 +93,7 @@ def _backfill_pipeline(config: Any, http: CachedHttpClient, openmeteo: OpenMeteo
         openmeteo=openmeteo,
         warehouse=warehouse,
         models=config.weather.models,
-        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        truth_snapshot_dir=None,
         forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
     )
 
@@ -116,6 +116,12 @@ def _filter_snapshots_by_city(snapshots: list[MarketSnapshot], cities: list[str]
         for snapshot in snapshots
         if snapshot.spec is not None and snapshot.spec.city.lower() in wanted
     ]
+
+
+def _market_ids_from_snapshots(snapshots: list[MarketSnapshot]) -> set[str]:
+    """Return parsed market ids for a target snapshot set."""
+
+    return {snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None}
 
 
 def _load_snapshots(
@@ -301,6 +307,246 @@ def _signal_from_forecast(
         rationale=f"Top modeled outcome is {outcome_label} with p={fair_probability:.3f}",
         mode=mode,
     )
+
+
+def _summarize_backtest_metrics(
+    prediction_rows: list[dict[str, object]],
+    trade_rows: list[dict[str, object]],
+    *,
+    extra_metrics: dict[str, float] | None = None,
+) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
+    """Build common predictive and trade metrics for a backtest run."""
+
+    prediction_frame = pd.DataFrame(prediction_rows)
+    trade_frame = pd.DataFrame(trade_rows)
+    trade_summary = summarize_trade_log(trade_frame)
+    metrics = {
+        "mae": mae(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
+        "rmse": rmse(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
+        "nll": gaussian_nll(
+            prediction_frame["y_true"].to_numpy(),
+            prediction_frame["y_pred"].to_numpy(),
+            prediction_frame["std"].to_numpy(),
+        ),
+        "avg_brier": float(prediction_frame["brier"].mean()),
+        "avg_crps": float(prediction_frame["crps"].mean()),
+        **trade_summary,
+    }
+    if extra_metrics:
+        metrics.update(extra_metrics)
+    return metrics, prediction_frame, trade_frame
+
+
+def _run_synthetic_backtest(
+    frame: pd.DataFrame,
+    *,
+    model_name: str,
+    artifacts_dir: Path,
+    bankroll: float,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    """Run the existing synthetic-book research backtest."""
+
+    broker = PaperBroker(bankroll=bankroll)
+    prediction_rows: list[dict[str, object]] = []
+    trade_rows: list[dict[str, object]] = []
+    for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
+        artifact = train_model(model_name, train, artifacts_dir)
+        row = test.iloc[0]
+        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+        snapshot = MarketSnapshot(
+            captured_at=datetime.now(tz=UTC),
+            market={"id": spec.market_id},
+            spec=spec,
+            outcome_prices=json.loads(str(row.get("market_prices_json", "{}"))),
+            clob_token_ids=spec.token_ids,
+        )
+        forecast = predict_market(Path(artifact.path), model_name, spec, test)
+        winning_label = str(row["winning_outcome"])
+        prediction_rows.append(
+            {
+                "target_date": row["target_date"],
+                "city": spec.city,
+                "y_true": row["realized_daily_max"],
+                "y_pred": forecast.mean,
+                "std": forecast.std,
+                "brier": brier_score(forecast.outcome_probabilities, winning_label),
+                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
+            }
+        )
+
+        outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
+        token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
+        book = _synthetic_book(snapshot, outcome_label, token_id)
+        signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
+        size_notional = capped_kelly(signal.edge, signal.confidence, broker.bankroll)
+        size = size_notional / max(signal.executable_price, 1e-6)
+        if size <= 0:
+            continue
+        fill = broker.simulate_fill(
+            signal,
+            spread=book.best_ask() - book.best_bid(),
+            liquidity=(book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0),
+            size=size,
+        )
+        if fill is None:
+            continue
+        realized_pnl = settle_position(
+            Position(
+                outcome_label=fill.outcome_label,
+                price=fill.price,
+                size=fill.size,
+                side=fill.side,
+            ),
+            winning_label,
+            fee_paid=estimate_fee(fill.price * fill.size),
+        )
+        trade_rows.append(
+            {
+                "market_id": fill.market_id,
+                "city": spec.city,
+                "decision_horizon": str(row["decision_horizon"]),
+                "outcome_label": fill.outcome_label,
+                "winning_outcome": winning_label,
+                "price": fill.price,
+                "size": fill.size,
+                "edge": signal.edge,
+                "realized_pnl": realized_pnl,
+                "pricing_source": "synthetic",
+            }
+        )
+
+    metrics, _, _ = _summarize_backtest_metrics(prediction_rows, trade_rows)
+    return metrics, trade_rows
+
+
+def _run_real_history_backtest(
+    frame: pd.DataFrame,
+    panel: pd.DataFrame,
+    *,
+    model_name: str,
+    artifacts_dir: Path,
+    flat_stake: float,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    """Run a decision-time backtest using official historical market prices."""
+
+    if flat_stake <= 0:
+        raise typer.BadParameter("flat_stake must be positive.")
+    required_panel_columns = {
+        "market_id",
+        "decision_horizon",
+        "outcome_label",
+        "coverage_status",
+        "market_price",
+    }
+    missing_panel = required_panel_columns.difference(panel.columns)
+    if missing_panel:
+        msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
+        raise typer.BadParameter(msg)
+
+    working_panel = panel.copy()
+    working_panel["market_id"] = working_panel["market_id"].astype(str)
+    working_panel["decision_horizon"] = working_panel["decision_horizon"].astype(str)
+    working_panel["outcome_label"] = working_panel["outcome_label"].astype(str)
+    working_panel["coverage_status"] = working_panel["coverage_status"].astype(str)
+    working_panel["market_price"] = pd.to_numeric(working_panel["market_price"], errors="coerce")
+    if "price_ts" in working_panel.columns:
+        working_panel["price_ts"] = pd.to_datetime(working_panel["price_ts"], errors="coerce", utc=True)
+    if "price_age_seconds" in working_panel.columns:
+        working_panel["price_age_seconds"] = pd.to_numeric(working_panel["price_age_seconds"], errors="coerce")
+
+    prediction_rows: list[dict[str, object]] = []
+    trade_rows: list[dict[str, object]] = []
+    priced_decision_rows = 0
+    skipped_missing_price = 0
+    skipped_stale_price = 0
+    skipped_non_positive_edge = 0
+    price_ages: list[float] = []
+
+    for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
+        artifact = train_model(model_name, train, artifacts_dir)
+        row = test.iloc[0]
+        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+        forecast = predict_market(Path(artifact.path), model_name, spec, test)
+        winning_label = str(row["winning_outcome"])
+        prediction_rows.append(
+            {
+                "target_date": row["target_date"],
+                "city": spec.city,
+                "y_true": row["realized_daily_max"],
+                "y_pred": forecast.mean,
+                "std": forecast.std,
+                "brier": brier_score(forecast.outcome_probabilities, winning_label),
+                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
+            }
+        )
+
+        outcome_label, fair_probability = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
+        panel_row = working_panel.loc[
+            (working_panel["market_id"] == spec.market_id)
+            & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
+            & (working_panel["outcome_label"] == outcome_label)
+        ].copy()
+        if panel_row.empty:
+            skipped_missing_price += 1
+            continue
+        selected = panel_row.iloc[-1]
+        coverage_status = str(selected["coverage_status"])
+        if coverage_status == "stale":
+            skipped_stale_price += 1
+            continue
+        if coverage_status != "ok":
+            skipped_missing_price += 1
+            continue
+        market_price = float(selected["market_price"])
+        fee_per_share = estimate_fee(market_price)
+        edge = compute_edge(fair_probability, market_price, fee_per_share, 0.0)
+        if edge <= 0:
+            skipped_non_positive_edge += 1
+            continue
+        size = flat_stake / max(market_price, 1e-6)
+        priced_decision_rows += 1
+        age_seconds = selected.get("price_age_seconds")
+        if age_seconds is not None and pd.notna(age_seconds):
+            price_ages.append(float(age_seconds))
+        realized_pnl = settle_position(
+            Position(
+                outcome_label=outcome_label,
+                price=market_price,
+                size=size,
+                side="buy",
+            ),
+            winning_label,
+            fee_paid=estimate_fee(flat_stake),
+        )
+        trade_rows.append(
+            {
+                "market_id": spec.market_id,
+                "city": spec.city,
+                "decision_horizon": str(row["decision_horizon"]),
+                "outcome_label": outcome_label,
+                "winning_outcome": winning_label,
+                "price": market_price,
+                "size": size,
+                "edge": edge,
+                "price_ts": selected.get("price_ts"),
+                "price_age_seconds": age_seconds,
+                "realized_pnl": realized_pnl,
+                "pricing_source": "real_history",
+            }
+        )
+
+    metrics, _, _ = _summarize_backtest_metrics(
+        prediction_rows,
+        trade_rows,
+        extra_metrics={
+            "priced_decision_rows": float(priced_decision_rows),
+            "skipped_missing_price": float(skipped_missing_price),
+            "skipped_stale_price": float(skipped_stale_price),
+            "skipped_non_positive_edge": float(skipped_non_positive_edge),
+            "avg_price_age_seconds": float(sum(price_ages) / len(price_ages)) if price_ages else 0.0,
+        },
+    )
+    return metrics, trade_rows
 
 
 @app.command("init-warehouse")
@@ -592,6 +838,61 @@ def backfill_truth(
     )
 
 
+@app.command("backfill-price-history")
+def backfill_price_history(
+    markets_path: Path | None = None,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    interval: str = "max",
+    fidelity: int = 60,
+) -> None:
+    """Backfill Polymarket official outcome-token price history into bronze/silver tables."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+    pipeline = _backfill_pipeline(config, http, openmeteo)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    run = pipeline.warehouse.start_run(
+        command="backfill-price-history",
+        config_hash=_config_hash(
+            config,
+            "backfill-price-history",
+            markets_path=markets_path,
+            cities=cities,
+            interval=interval,
+            fidelity=fidelity,
+        ),
+    )
+    pipeline.run_id = run.run_id
+    try:
+        result = pipeline.backfill_price_history(
+            snapshots,
+            clob=clob,
+            interval=interval,
+            fidelity=fidelity,
+            use_cache=True,
+        )
+        pipeline.warehouse.finish_run(run, status="completed")
+    except Exception as exc:  # noqa: BLE001
+        pipeline.warehouse.finish_run(run, status="failed", notes=str(exc))
+        raise
+    finally:
+        pipeline.warehouse.close()
+        http.close()
+    status_counts: dict[str, int] = {}
+    if not result["bronze_price_history_requests"].empty and "status" in result["bronze_price_history_requests"].columns:
+        status_counts = {
+            str(key): int(value)
+            for key, value in result["bronze_price_history_requests"]["status"].astype(str).value_counts().to_dict().items()
+        }
+    console.print_json(
+        data={
+            "bronze_price_history_requests": len(result["bronze_price_history_requests"]),
+            "silver_price_timeseries": len(result["silver_price_timeseries"]),
+            "status_counts": status_counts,
+        }
+    )
+
+
 @app.command("summarize-truth-coverage")
 def summarize_truth_coverage(
     output: Path = Path("artifacts/truth_coverage.json"),
@@ -614,6 +915,121 @@ def summarize_truth_coverage(
             "summary_rows": len(result["summary"]),
             "detail_rows": len(result["details"]),
             "output_path": str(output),
+        }
+    )
+
+
+@app.command("summarize-price-history-coverage")
+def summarize_price_history_coverage(
+    markets_path: Path | None = None,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    output: Path = Path("artifacts/price_history_coverage.json"),
+) -> None:
+    """Summarize request-level and decision-time official price-history coverage."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+    pipeline = _backfill_pipeline(config, http, openmeteo)
+    try:
+        result = pipeline.summarize_price_history_coverage(_market_ids_from_snapshots(snapshots) or None)
+    finally:
+        pipeline.warehouse.close()
+        http.close()
+    payload = {
+        "request_summary": result["request_summary"].to_dict(orient="records"),
+        "request_details": result["request_details"].to_dict(orient="records"),
+        "panel_summary": result["panel_summary"].to_dict(orient="records"),
+        "market_summary": result["market_summary"].to_dict(orient="records"),
+        "details": result["details"].to_dict(orient="records"),
+    }
+    dump_json(output, payload)
+    console.print_json(
+        data={
+            "request_summary_rows": len(result["request_summary"]),
+            "panel_summary_rows": len(result["panel_summary"]),
+            "detail_rows": len(result["details"]),
+            "output_path": str(output),
+        }
+    )
+
+
+@app.command("summarize-dataset-readiness")
+def summarize_dataset_readiness(
+    markets_path: Path | None = None,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    output: Path = Path("artifacts/dataset_readiness.json"),
+) -> None:
+    """Summarize snapshot, forecast, truth, and gold-row readiness for a target inventory."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+    pipeline = _backfill_pipeline(config, http, openmeteo)
+    try:
+        result = pipeline.summarize_dataset_readiness(snapshots)
+    finally:
+        pipeline.warehouse.close()
+    payload = {
+        "summary": result["summary"].to_dict(orient="records"),
+        "details": result["details"].to_dict(orient="records"),
+    }
+    dump_json(output, payload)
+    console.print_json(
+        data={
+            "summary_rows": len(result["summary"]),
+            "detail_rows": len(result["details"]),
+            "output_path": str(output),
+        }
+    )
+
+
+@app.command("materialize-backtest-panel")
+def materialize_backtest_panel(
+    dataset_path: Path = Path("data/parquet/gold/historical_training_set.parquet"),
+    markets_path: Path | None = None,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    output_name: str = "historical_backtest_panel",
+    max_price_age_minutes: int = 720,
+) -> None:
+    """Materialize a decision-time official-price backtest panel from a gold training dataset."""
+
+    frame = pd.read_parquet(dataset_path)
+    if markets_path is not None or cities:
+        snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+        market_ids = _market_ids_from_snapshots(snapshots)
+        frame = frame.loc[frame["market_id"].astype(str).isin(market_ids)].copy()
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    pipeline = _backfill_pipeline(config, http, openmeteo)
+    run = pipeline.warehouse.start_run(
+        command="materialize-backtest-panel",
+        config_hash=_config_hash(
+            config,
+            "materialize-backtest-panel",
+            dataset_path=dataset_path,
+            markets_path=markets_path,
+            cities=cities,
+            output_name=output_name,
+            max_price_age_minutes=max_price_age_minutes,
+        ),
+    )
+    pipeline.run_id = run.run_id
+    try:
+        panel = pipeline.materialize_backtest_panel(
+            frame,
+            output_name=output_name,
+            max_price_age_minutes=max_price_age_minutes,
+        )
+        pipeline.warehouse.finish_run(run, status="completed", notes=f"Materialized {len(panel)} panel rows.")
+    except Exception as exc:  # noqa: BLE001
+        pipeline.warehouse.finish_run(run, status="failed", notes=str(exc))
+        raise
+    finally:
+        pipeline.warehouse.close()
+        http.close()
+    console.print_json(
+        data={
+            "gold_backtest_panel": len(panel),
+            "output_path": str(config.app.parquet_dir / "gold" / f"{output_name}.parquet"),
+            "max_price_age_minutes": max_price_age_minutes,
         }
     )
 
@@ -1090,8 +1506,11 @@ def backtest(
     model_name: str = "gaussian_emos",
     artifacts_dir: Path = Path("artifacts/models"),
     bankroll: float = 10_000.0,
+    pricing_source: Literal["synthetic", "real_history"] = "synthetic",
+    panel_path: Path = Path("data/parquet/gold/historical_backtest_panel.parquet"),
+    flat_stake: float = 1.0,
 ) -> None:
-    """Run a rolling-origin research backtest with outcome-level pricing."""
+    """Run a rolling-origin backtest with synthetic or official historical pricing."""
 
     frame = pd.read_parquet(dataset_path)
     required_columns = {"market_spec_json", "market_prices_json", "winning_outcome", "realized_daily_max"}
@@ -1102,90 +1521,46 @@ def backtest(
     if len(frame) < 2:
         raise typer.BadParameter("Need at least two rows to backtest.")
 
-    broker = PaperBroker(bankroll=bankroll)
-    prediction_rows: list[dict[str, object]] = []
-    trade_rows: list[dict[str, object]] = []
-    for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
-        artifact = train_model(model_name, train, artifacts_dir)
-        row = test.iloc[0]
-        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
-        snapshot = MarketSnapshot(
-            captured_at=datetime.now(tz=UTC),
-            market={"id": spec.market_id},
-            spec=spec,
-            outcome_prices=json.loads(str(row.get("market_prices_json", "{}"))),
-            clob_token_ids=spec.token_ids,
+    if pricing_source == "synthetic":
+        metrics, trade_rows = _run_synthetic_backtest(
+            frame,
+            model_name=model_name,
+            artifacts_dir=artifacts_dir,
+            bankroll=bankroll,
         )
-        forecast = predict_market(Path(artifact.path), model_name, spec, test)
-        winning_label = str(row["winning_outcome"])
-        prediction_rows.append(
-            {
-                "target_date": row["target_date"],
-                "city": spec.city,
-                "y_true": row["realized_daily_max"],
-                "y_pred": forecast.mean,
-                "std": forecast.std,
-                "brier": brier_score(forecast.outcome_probabilities, winning_label),
-                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
-            }
+        metrics_output = Path("artifacts/backtest_metrics.json")
+        trades_output = Path("artifacts/backtest_trades.json")
+    else:
+        if not panel_path.exists():
+            msg = (
+                f"Backtest panel does not exist: {panel_path}. "
+                "Run `uv run pmtmax materialize-backtest-panel` first."
+            )
+            raise typer.BadParameter(msg)
+        panel = pd.read_parquet(panel_path)
+        panel_required = {"market_id", "decision_horizon", "outcome_label", "coverage_status", "market_price"}
+        missing_panel = panel_required.difference(panel.columns)
+        if missing_panel:
+            msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
+            raise typer.BadParameter(msg)
+        if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
+            msg = (
+                "Backtest panel has no coverage_status=ok rows. "
+                "Run `uv run pmtmax summarize-price-history-coverage` to inspect gaps."
+            )
+            raise typer.BadParameter(msg)
+        metrics, trade_rows = _run_real_history_backtest(
+            frame,
+            panel,
+            model_name=model_name,
+            artifacts_dir=artifacts_dir,
+            flat_stake=flat_stake,
         )
+        metrics_output = Path("artifacts/backtest_metrics_real_history.json")
+        trades_output = Path("artifacts/backtest_trades_real_history.json")
 
-        outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-        token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
-        book = _synthetic_book(snapshot, outcome_label, token_id)
-        signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
-        size_notional = capped_kelly(signal.edge, signal.confidence, broker.bankroll)
-        size = size_notional / max(signal.executable_price, 1e-6)
-        if size <= 0:
-            continue
-        fill = broker.simulate_fill(
-            signal,
-            spread=book.best_ask() - book.best_bid(),
-            liquidity=(book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0),
-            size=size,
-        )
-        if fill is None:
-            continue
-        realized_pnl = settle_position(
-            Position(
-                outcome_label=fill.outcome_label,
-                price=fill.price,
-                size=fill.size,
-                side=fill.side,
-            ),
-            winning_label,
-            fee_paid=estimate_fee(fill.price * fill.size),
-        )
-        trade_rows.append(
-            {
-                "market_id": fill.market_id,
-                "city": spec.city,
-                "outcome_label": fill.outcome_label,
-                "winning_outcome": winning_label,
-                "price": fill.price,
-                "size": fill.size,
-                "edge": signal.edge,
-                "realized_pnl": realized_pnl,
-            }
-        )
-
-    prediction_frame = pd.DataFrame(prediction_rows)
-    trade_frame = pd.DataFrame(trade_rows)
-    trade_summary = summarize_trade_log(trade_frame)
-    metrics = {
-        "mae": mae(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
-        "rmse": rmse(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
-        "nll": gaussian_nll(
-            prediction_frame["y_true"].to_numpy(),
-            prediction_frame["y_pred"].to_numpy(),
-            prediction_frame["std"].to_numpy(),
-        ),
-        "avg_brier": float(prediction_frame["brier"].mean()),
-        "avg_crps": float(prediction_frame["crps"].mean()),
-        **trade_summary,
-    }
-    dump_json(Path("artifacts/backtest_metrics.json"), metrics)
-    dump_json(Path("artifacts/backtest_trades.json"), trade_rows)
+    dump_json(metrics_output, metrics)
+    dump_json(trades_output, trade_rows)
     console.print_json(data=metrics)
 
 
@@ -1209,8 +1584,8 @@ def paper_trader(
         openmeteo=openmeteo,
         duckdb_store=None,
         parquet_store=None,
-        snapshot_dir=Path("tests/fixtures/truth"),
-        fixture_dir=Path("tests/fixtures/openmeteo"),
+        snapshot_dir=None,
+        fixture_dir=None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
@@ -1295,8 +1670,8 @@ def live_trader(
         openmeteo=openmeteo,
         duckdb_store=None,
         parquet_store=None,
-        snapshot_dir=Path("tests/fixtures/truth"),
-        fixture_dir=Path("tests/fixtures/openmeteo"),
+        snapshot_dir=None,
+        fixture_dir=None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
 

@@ -394,25 +394,34 @@ def preserve_existing_capture_times(
 ) -> list[MarketSnapshot]:
     """Reuse stable capture timestamps for unchanged curated snapshots."""
 
-    by_url: dict[str, datetime] = {}
-    by_market_id: dict[str, datetime] = {}
+    by_url: dict[str, MarketSnapshot] = {}
+    by_market_id: dict[str, MarketSnapshot] = {}
     for snapshot in existing_snapshots:
         url = str(snapshot.market.get("sourceUrl") or "").strip()
         if url:
-            by_url[url] = snapshot.captured_at
+            by_url[url] = snapshot
         market_id = snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id") or "").strip()
         if market_id:
-            by_market_id[market_id] = snapshot.captured_at
+            by_market_id[market_id] = snapshot
 
     preserved: list[MarketSnapshot] = []
     for snapshot in snapshots:
         url = str(snapshot.market.get("sourceUrl") or "").strip()
         market_id = snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id") or "").strip()
-        captured_at = by_url.get(url) or by_market_id.get(market_id) or snapshot.captured_at
-        if captured_at == snapshot.captured_at:
+        existing_snapshot = by_url.get(url) or by_market_id.get(market_id)
+        if existing_snapshot is None:
             preserved.append(snapshot)
             continue
-        preserved.append(snapshot.model_copy(update={"captured_at": captured_at}))
+        updated_snapshot = snapshot
+        if existing_snapshot.captured_at != snapshot.captured_at:
+            updated_snapshot = updated_snapshot.model_copy(update={"captured_at": existing_snapshot.captured_at})
+        if existing_snapshot.spec is not None and updated_snapshot.spec is not None:
+            existing_notes = existing_snapshot.spec.notes
+            if existing_notes and updated_snapshot.spec.notes != existing_notes:
+                updated_snapshot = updated_snapshot.model_copy(
+                    update={"spec": updated_snapshot.spec.model_copy(update={"notes": existing_notes})}
+                )
+        preserved.append(updated_snapshot)
     return preserved
 
 
@@ -766,6 +775,25 @@ def _ref_from_candidate_entry(entry: HistoricalEventCandidateEntry) -> Temperatu
     )
 
 
+def _ref_from_snapshot(snapshot: MarketSnapshot) -> TemperatureEventRef:
+    spec = snapshot.spec
+    market = snapshot.market
+    slug = str(market.get("slug") or (spec.slug if spec is not None else market.get("id") or "")).strip()
+    url = str(market.get("sourceUrl") or event_url_from_slug(slug)).strip()
+    title = str(market.get("question") or (spec.question if spec is not None else slug)).strip()
+    city = spec.city if spec is not None else ""
+    event_id = str(market.get("eventId") or (spec.event_id if spec is not None else market.get("id") or slug)).strip()
+    return TemperatureEventRef(
+        event_id=event_id or slug,
+        slug=slug,
+        title=title,
+        url=url,
+        city=city,
+        active=False,
+        closed=True,
+    )
+
+
 def _fetch_entry_from_candidate(
     entry: HistoricalEventCandidateEntry,
     *,
@@ -1052,6 +1080,73 @@ def merge_historical_collection_status_reports(
         supported_cities=supported_cities,
         total_discovered=total_discovered,
         processed_this_run=updated_report.processed_this_run,
+        collected_urls=[entry.url for entry in entries if entry.status == "collected"],
+        status_counts=_status_counts(entries),
+        entries=entries,
+    )
+
+
+def sync_historical_collection_status_report(
+    snapshots: list[MarketSnapshot],
+    *,
+    supported_cities: list[str],
+    source_manifest: str | None = None,
+    candidate_report: HistoricalEventCandidateReport | None = None,
+    existing_report: HistoricalCollectionStatusReport | None = None,
+    generated_at: datetime | None = None,
+) -> HistoricalCollectionStatusReport:
+    """Promote the current curated snapshot set into the canonical collection status report."""
+
+    now = generated_at or datetime.now(tz=UTC)
+    merged: dict[str, HistoricalCollectionStatusEntry] = {}
+    if existing_report is not None:
+        merged.update({entry.url: entry for entry in existing_report.entries})
+    candidate_by_url = {entry.url: entry for entry in (candidate_report.entries if candidate_report is not None else [])}
+
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None:
+            continue
+        ref = _ref_from_snapshot(snapshot)
+        existing_entry = merged.get(ref.url)
+        candidate_entry = candidate_by_url.get(ref.url)
+        discovered_at = (
+            candidate_entry.discovered_at
+            if candidate_entry is not None
+            else (existing_entry.discovered_at if existing_entry is not None else snapshot.captured_at)
+        )
+        last_attempted_at = snapshot.captured_at
+        attempt_count = max(existing_entry.attempt_count if existing_entry is not None else 0, 1)
+        merged[ref.url] = _collection_entry(
+            ref,
+            status="collected",
+            snapshot=snapshot,
+            discovered_at=discovered_at,
+            last_attempted_at=last_attempted_at,
+            attempt_count=attempt_count,
+        )
+
+    entries = sorted(merged.values(), key=_status_entry_sort_key)
+    total_discovered = (
+        candidate_report.total_discovered
+        if candidate_report is not None
+        else (existing_report.total_discovered if existing_report is not None else len(entries))
+    )
+    final_manifest = (
+        source_manifest
+        or (existing_report.source_manifest if existing_report is not None else None)
+    )
+    final_supported_cities = (
+        supported_cities
+        or (candidate_report.supported_cities if candidate_report is not None else [])
+        or (existing_report.supported_cities if existing_report is not None else [])
+    )
+    return HistoricalCollectionStatusReport(
+        generated_at=now,
+        source_manifest=final_manifest,
+        supported_cities=final_supported_cities,
+        total_discovered=total_discovered,
+        processed_this_run=len(entries),
         collected_urls=[entry.url for entry in entries if entry.status == "collected"],
         status_counts=_status_counts(entries),
         entries=entries,

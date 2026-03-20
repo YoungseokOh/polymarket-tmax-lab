@@ -32,10 +32,12 @@ class PaperBroker:
         """Simulate a conservative fill if edge stays positive after costs."""
 
         notional = signal.executable_price * size
-        fee = estimate_fee(notional)
+        total_fee = estimate_fee(notional)
+        # compute_edge operates in per-share probability/price units, so use a 1-share fee estimate here.
+        fee_per_share = estimate_fee(signal.executable_price)
         slippage = estimate_slippage(signal.executable_price, spread, liquidity, size)
-        edge = compute_edge(signal.fair_probability, signal.executable_price, fee, slippage)
-        if edge <= 0 or self.bankroll < notional + fee:
+        edge = compute_edge(signal.fair_probability, signal.executable_price, fee_per_share, slippage)
+        if edge <= 0 or self.bankroll < notional + total_fee:
             return None
         fill = ExecutionFill(
             market_id=signal.market_id,
@@ -56,7 +58,7 @@ class PaperBroker:
             avg_price=fill.price,
             size=size,
         )
-        self.bankroll -= notional + fee
+        self.bankroll -= notional + total_fee
         return fill
 
     def inventory_frame(self) -> pd.DataFrame:

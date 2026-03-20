@@ -27,6 +27,7 @@ from pmtmax.markets.inventory import (
     merge_historical_event_candidates,
     preserve_existing_capture_times,
     snapshot_from_temperature_event_page,
+    sync_historical_collection_status_report,
     validate_historical_inventory,
 )
 from pmtmax.markets.repository import bundled_market_snapshots
@@ -218,7 +219,7 @@ def test_build_historical_inventory_from_pages_filters_truth_unready_snapshots()
     assert any(issue.reason == "truth_source_lag" and issue.city == "Seoul" for issue in report.issues)
 
 
-def test_preserve_existing_capture_times_reuses_previous_snapshot_timestamp() -> None:
+def test_preserve_existing_capture_times_reuses_previous_snapshot_timestamp_and_notes() -> None:
     fresh_snapshot = snapshot_from_temperature_event_page(
         url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
         html=_event_page_html(
@@ -230,11 +231,18 @@ def test_preserve_existing_capture_times_reuses_previous_snapshot_timestamp() ->
         ),
         captured_at=datetime(2026, 3, 19, tzinfo=UTC),
     )
-    existing_snapshot = fresh_snapshot.model_copy(update={"captured_at": datetime(2026, 3, 1, tzinfo=UTC)})
+    existing_snapshot = fresh_snapshot.model_copy(
+        update={
+            "captured_at": datetime(2026, 3, 1, tzinfo=UTC),
+            "spec": fresh_snapshot.spec.model_copy(update={"notes": "Parsed at 2026-03-01T00:00:00+00:00"}),  # type: ignore[union-attr]
+        }
+    )
 
     preserved = preserve_existing_capture_times([fresh_snapshot], existing_snapshots=[existing_snapshot])
 
     assert preserved[0].captured_at == datetime(2026, 3, 1, tzinfo=UTC)
+    assert preserved[0].spec is not None
+    assert preserved[0].spec.notes == "Parsed at 2026-03-01T00:00:00+00:00"
 
 
 def test_validate_historical_inventory_flags_examples_and_duplicates() -> None:
@@ -413,6 +421,110 @@ def test_merge_historical_event_candidates_preserves_first_seen_and_adds_new_ref
     assert seoul.event_id == "evt-seoul-updated"
     assert london.first_seen_at == datetime(2026, 3, 19, tzinfo=UTC)
     assert merged.candidate_count == 2
+
+
+def test_sync_historical_collection_status_report_promotes_curated_snapshots() -> None:
+    snapshot = snapshot_from_temperature_event_page(
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
+        html=_event_page_html(
+            title="Highest temperature in Seoul on December 11?",
+            slug="highest-temperature-in-seoul-on-december-11",
+            event_id="evt-seoul",
+            active=False,
+            closed=True,
+        ),
+        captured_at=datetime(2026, 3, 19, tzinfo=UTC),
+    )
+    candidate_report = HistoricalEventCandidateReport(
+        generated_at=datetime(2026, 3, 19, tzinfo=UTC),
+        supported_cities=["Seoul", "London"],
+        total_discovered=2,
+        candidate_count=2,
+        city_counts={"London": 1, "Seoul": 1},
+        entries=[
+            HistoricalEventCandidateEntry(
+                event_id="evt-seoul",
+                slug="highest-temperature-in-seoul-on-december-11",
+                title="Highest temperature in Seoul on December 11?",
+                url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
+                city="Seoul",
+                active=False,
+                closed=True,
+                discovered_at=datetime(2026, 3, 18, tzinfo=UTC),
+                first_seen_at=datetime(2026, 3, 18, tzinfo=UTC),
+                last_seen_at=datetime(2026, 3, 19, tzinfo=UTC),
+            ),
+            HistoricalEventCandidateEntry(
+                event_id="evt-london",
+                slug="highest-temperature-in-london-on-december-11",
+                title="Highest temperature in London on December 11?",
+                url="https://polymarket.com/event/highest-temperature-in-london-on-december-11",
+                city="London",
+                active=False,
+                closed=True,
+                discovered_at=datetime(2026, 3, 18, tzinfo=UTC),
+                first_seen_at=datetime(2026, 3, 18, tzinfo=UTC),
+                last_seen_at=datetime(2026, 3, 19, tzinfo=UTC),
+            ),
+        ],
+    )
+    existing_report = HistoricalCollectionStatusReport(
+        generated_at=datetime(2026, 3, 19, tzinfo=UTC),
+        source_manifest="configs/market_inventory/historical_temperature_event_urls.json",
+        supported_cities=["Seoul", "London"],
+        total_discovered=2,
+        processed_this_run=2,
+        collected_urls=[],
+        status_counts={"truth_source_lag": 1, "parse_failed": 1},
+        entries=[
+            HistoricalCollectionStatusEntry(
+                event_id="evt-seoul",
+                slug="highest-temperature-in-seoul-on-december-11",
+                title="Highest temperature in Seoul on December 11?",
+                url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-11",
+                city="Seoul",
+                market_id="evt-seoul",
+                status="truth_source_lag",
+                status_reason="truth_source_lag",
+                discovered_at=datetime(2026, 3, 18, tzinfo=UTC),
+                last_attempted_at=datetime(2026, 3, 19, tzinfo=UTC),
+                attempt_count=1,
+                terminal=False,
+                detail="lag",
+            ),
+            HistoricalCollectionStatusEntry(
+                event_id="evt-london",
+                slug="highest-temperature-in-london-on-december-11",
+                title="Highest temperature in London on December 11?",
+                url="https://polymarket.com/event/highest-temperature-in-london-on-december-11",
+                city="London",
+                market_id="evt-london",
+                status="parse_failed",
+                status_reason="parse_failed",
+                discovered_at=datetime(2026, 3, 18, tzinfo=UTC),
+                last_attempted_at=datetime(2026, 3, 19, tzinfo=UTC),
+                attempt_count=1,
+                terminal=True,
+                detail="not_historical",
+            ),
+        ],
+    )
+
+    synced = sync_historical_collection_status_report(
+        [snapshot],
+        supported_cities=["Seoul", "London"],
+        source_manifest="configs/market_inventory/historical_temperature_event_urls.json",
+        candidate_report=candidate_report,
+        existing_report=existing_report,
+    )
+
+    assert synced.total_discovered == 2
+    assert synced.processed_this_run == 2
+    assert synced.status_counts == {"collected": 1, "parse_failed": 1}
+    assert synced.collected_urls == ["https://polymarket.com/event/highest-temperature-in-seoul-on-december-11"]
+    seoul_entry = next(entry for entry in synced.entries if entry.city == "Seoul")
+    assert seoul_entry.status == "collected"
+    assert seoul_entry.attempt_count == 1
 
 
 class _FakeFetchHttp:

@@ -15,6 +15,7 @@ import pandas as pd
 from pmtmax.backtest.dataset_builder import HORIZON_OFFSETS
 from pmtmax.http import CachedHttpClient
 from pmtmax.logging_utils import get_logger
+from pmtmax.markets.clob_read_client import ClobReadClient
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.markets.station_registry import lookup_station
 from pmtmax.modeling.bin_mapper import infer_winning_label
@@ -65,6 +66,19 @@ def _rows_for_market(frame: pd.DataFrame, market_id: str) -> pd.DataFrame:
     if "market_id" not in frame.columns:
         return pd.DataFrame()
     return frame.loc[frame["market_id"] == market_id].copy()
+
+
+def _normalize_price_history_points(payload: dict[str, Any]) -> list[dict[str, object]]:
+    """Normalize Polymarket price history payloads into timestamp/price pairs."""
+
+    normalized: list[dict[str, object]] = []
+    for point in cast(list[dict[str, object]], payload.get("history", [])):
+        timestamp = pd.to_datetime(point.get("t"), unit="s", errors="coerce", utc=True)
+        price = pd.to_numeric(point.get("p"), errors="coerce")
+        if pd.isna(timestamp) or pd.isna(price):
+            continue
+        normalized.append({"timestamp": pd.Timestamp(timestamp), "price": float(price)})
+    return normalized
 
 
 @dataclass
@@ -601,6 +615,449 @@ class BackfillPipeline:
             ignore_index=True,
         )
         return {"summary": summary, "details": details}
+
+    def summarize_dataset_readiness(self, snapshots: list[MarketSnapshot]) -> dict[str, pd.DataFrame]:
+        """Summarize forecast/truth/gold readiness for a target snapshot set."""
+
+        valid_snapshots = [snapshot for snapshot in snapshots if snapshot.spec is not None]
+        if not valid_snapshots:
+            return {"summary": pd.DataFrame(), "details": pd.DataFrame()}
+
+        base = pd.DataFrame(
+            [
+                {
+                    "market_id": snapshot.spec.market_id,
+                    "city": snapshot.spec.city,
+                    "station_id": snapshot.spec.station_id,
+                    "target_local_date": pd.Timestamp(snapshot.spec.target_local_date),
+                    "truth_track": snapshot.spec.truth_track,
+                    "settlement_eligible": snapshot.spec.settlement_eligible,
+                    "official_source_name": snapshot.spec.official_source_name,
+                    "public_truth_source_name": snapshot.spec.public_truth_source_name,
+                }
+                for snapshot in valid_snapshots
+            ]
+        )
+        market_ids = set(base["market_id"].astype(str))
+
+        forecast = self.warehouse.read_table("silver_forecast_runs_hourly")
+        forecast_counts = pd.DataFrame(columns=["market_id", "forecast_row_count", "forecast_model_count"])
+        if not forecast.empty and "market_id" in forecast.columns:
+            filtered_forecast = forecast.loc[forecast["market_id"].astype(str).isin(market_ids)].copy()
+            if not filtered_forecast.empty:
+                forecast_counts = (
+                    filtered_forecast.groupby("market_id", dropna=False)
+                    .agg(
+                        forecast_row_count=("market_id", "size"),
+                        forecast_model_count=("model_name", lambda series: series.dropna().astype(str).nunique()),
+                    )
+                    .reset_index()
+                )
+
+        truth_bronze = self.warehouse.read_table("bronze_truth_snapshots")
+        truth_latest = pd.DataFrame(
+            columns=[
+                "market_id",
+                "truth_status",
+                "latest_available_date",
+                "truth_error_message",
+            ]
+        )
+        if not truth_bronze.empty and "market_id" in truth_bronze.columns:
+            filtered_truth = truth_bronze.loc[truth_bronze["market_id"].astype(str).isin(market_ids)].copy()
+            if not filtered_truth.empty:
+                sort_columns = [column for column in ("fetched_at", "created_at") if column in filtered_truth.columns]
+                if sort_columns:
+                    filtered_truth = filtered_truth.sort_values(["market_id", *sort_columns], ignore_index=True)
+                truth_latest = (
+                    filtered_truth.drop_duplicates(subset=["market_id"], keep="last")
+                    .loc[
+                        :,
+                        [
+                            column
+                            for column in ("market_id", "status", "latest_available_date", "error_message")
+                            if column in filtered_truth.columns
+                        ],
+                    ]
+                    .rename(
+                        columns={
+                            "status": "truth_status",
+                            "error_message": "truth_error_message",
+                        }
+                    )
+                )
+
+        truth_silver = self.warehouse.read_table("silver_observations_daily")
+        truth_counts = pd.DataFrame(columns=["market_id", "truth_daily_count"])
+        if not truth_silver.empty and "market_id" in truth_silver.columns:
+            filtered_truth_daily = truth_silver.loc[truth_silver["market_id"].astype(str).isin(market_ids)].copy()
+            if not filtered_truth_daily.empty:
+                truth_counts = (
+                    filtered_truth_daily.groupby("market_id", dropna=False)
+                    .size()
+                    .reset_index(name="truth_daily_count")
+                )
+
+        gold = self.warehouse.read_table("gold_training_examples_tabular")
+        if gold.empty:
+            gold = self.warehouse.read_table("gold_training_examples")
+        gold_counts = pd.DataFrame(columns=["market_id", "gold_row_count", "gold_horizon_count"])
+        if not gold.empty and "market_id" in gold.columns:
+            filtered_gold = gold.loc[gold["market_id"].astype(str).isin(market_ids)].copy()
+            if not filtered_gold.empty:
+                gold_counts = (
+                    filtered_gold.groupby("market_id", dropna=False)
+                    .agg(
+                        gold_row_count=("market_id", "size"),
+                        gold_horizon_count=("decision_horizon", lambda series: series.dropna().astype(str).nunique()),
+                    )
+                    .reset_index()
+                )
+
+        details = (
+            base.merge(forecast_counts, on="market_id", how="left")
+            .merge(truth_latest, on="market_id", how="left")
+            .merge(truth_counts, on="market_id", how="left")
+            .merge(gold_counts, on="market_id", how="left")
+        )
+        for numeric_column in (
+            "forecast_row_count",
+            "forecast_model_count",
+            "truth_daily_count",
+            "gold_row_count",
+            "gold_horizon_count",
+        ):
+            if numeric_column in details.columns:
+                details[numeric_column] = details[numeric_column].fillna(0).astype(int)
+        details["forecast_ready"] = details["forecast_row_count"] > 0
+        details["truth_ready"] = details["truth_daily_count"] > 0
+        details["gold_ready"] = details["gold_row_count"] > 0
+
+        def _readiness_status(row: pd.Series) -> str:
+            truth_status = str(row.get("truth_status") or "")
+            if bool(row.get("gold_ready")):
+                return "ready"
+            if truth_status == "lag":
+                return "truth_lag"
+            if truth_status == "error":
+                return "truth_error"
+            if not bool(row.get("forecast_ready")):
+                return "missing_forecast"
+            if not bool(row.get("truth_ready")):
+                return "missing_truth"
+            return "gold_missing"
+
+        details["readiness_status"] = details.apply(_readiness_status, axis=1)
+        details = details.sort_values(["city", "target_local_date", "market_id"], ignore_index=True)
+
+        summary = (
+            details.groupby("city", dropna=False)
+            .agg(
+                snapshot_count=("market_id", "size"),
+                forecast_ready_count=("forecast_ready", "sum"),
+                truth_ok_count=("truth_ready", "sum"),
+                truth_lag_count=("truth_status", lambda series: (series.fillna("").astype(str) == "lag").sum()),
+                truth_error_count=("truth_status", lambda series: (series.fillna("").astype(str) == "error").sum()),
+                gold_market_count=("gold_ready", "sum"),
+                gold_row_count=("gold_row_count", "sum"),
+            )
+            .reset_index()
+            .sort_values("city", ignore_index=True)
+        )
+        return {"summary": summary, "details": details}
+
+    def backfill_price_history(
+        self,
+        snapshots: list[MarketSnapshot],
+        *,
+        clob: ClobReadClient,
+        interval: str = "max",
+        fidelity: int = 60,
+        use_cache: bool = True,
+    ) -> dict[str, pd.DataFrame]:
+        """Persist Polymarket official token price history for a historical market set."""
+
+        bronze_rows: list[dict[str, object]] = []
+        silver_rows: list[dict[str, object]] = []
+        for snapshot in snapshots:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            token_ids = spec.token_ids or snapshot.clob_token_ids
+            for outcome_label, token_id in zip(spec.outcome_labels(), token_ids, strict=False):
+                requested_at = dt.datetime.now(tz=dt.UTC)
+                raw_path: str | None = None
+                raw_hash: str | None = None
+                error_message: str | None = None
+                http_status_code: int | None = None
+                history: list[dict[str, object]] = []
+                status = "empty"
+                try:
+                    payload = clob.get_prices_history(
+                        token_id,
+                        interval=interval,
+                        fidelity=fidelity,
+                        use_cache=use_cache,
+                    )
+                    history = _normalize_price_history_points(payload)
+                    artifact = self.warehouse.raw_store.write_json(
+                        (
+                            "prices/history/"
+                            f"{spec.city.lower().replace(' ', '_')}/"
+                            f"{requested_at.strftime('%Y%m%dT%H%M%SZ')}_{spec.market_id}_{token_id}.json"
+                        ),
+                        payload,
+                    )
+                    raw_path = artifact.relative_path
+                    raw_hash = artifact.content_hash
+                    status = "ok" if history else "empty"
+                except httpx.HTTPStatusError as exc:
+                    http_status_code = exc.response.status_code
+                    error_message = str(exc)
+                    status = "http_error"
+                except Exception as exc:  # noqa: BLE001
+                    error_message = str(exc)
+                    status = "error"
+
+                earliest_ts = pd.NaT
+                latest_ts = pd.NaT
+                if history:
+                    timestamps = [pd.Timestamp(cast(pd.Timestamp, row["timestamp"])) for row in history]
+                    earliest_ts = min(timestamps)
+                    latest_ts = max(timestamps)
+                    for point in history:
+                        silver_rows.append(
+                            {
+                                "market_id": spec.market_id,
+                                "token_id": token_id,
+                                "outcome_label": outcome_label,
+                                "city": spec.city,
+                                "station_id": spec.station_id,
+                                "target_local_date": pd.Timestamp(spec.target_local_date),
+                                "timestamp": pd.Timestamp(cast(pd.Timestamp, point["timestamp"])),
+                                "price": float(point["price"]),
+                                "interval_used": interval,
+                                "source": "polymarket_official",
+                                **self._metadata_fields(created_at=requested_at, source_priority=100),
+                            }
+                        )
+
+                bronze_rows.append(
+                    {
+                        "market_id": spec.market_id,
+                        "event_id": spec.event_id,
+                        "city": spec.city,
+                        "station_id": spec.station_id,
+                        "target_local_date": pd.Timestamp(spec.target_local_date),
+                        "token_id": token_id,
+                        "outcome_label": outcome_label,
+                        "requested_at": pd.Timestamp(requested_at),
+                        "status": status,
+                        "interval_requested": interval,
+                        "interval_used": interval,
+                        "fidelity": fidelity,
+                        "point_count": len(history),
+                        "first_price_ts": earliest_ts,
+                        "last_price_ts": latest_ts,
+                        "http_status_code": http_status_code,
+                        "error_message": error_message,
+                        "raw_path": raw_path,
+                        "raw_hash": raw_hash,
+                        **self._metadata_fields(created_at=requested_at, source_priority=100),
+                    }
+                )
+
+        bronze = self.warehouse.upsert_table("bronze_price_history_requests", pd.DataFrame(bronze_rows))
+        silver = self.warehouse.upsert_table("silver_price_timeseries", pd.DataFrame(silver_rows))
+        self.warehouse.write_manifest()
+        return {"bronze_price_history_requests": bronze, "silver_price_timeseries": silver}
+
+    def materialize_backtest_panel(
+        self,
+        dataset: pd.DataFrame,
+        *,
+        output_name: str = "historical_backtest_panel",
+        max_price_age_minutes: int = 720,
+    ) -> pd.DataFrame:
+        """Build a token-level decision-time market-price panel from official history."""
+
+        if dataset.empty:
+            raise ValueError("Dataset is empty; nothing to materialize.")
+        if "market_spec_json" not in dataset.columns or "decision_time_utc" not in dataset.columns:
+            msg = "Dataset must include market_spec_json and decision_time_utc columns."
+            raise ValueError(msg)
+
+        timeseries = self.warehouse.read_table("silver_price_timeseries")
+        if not timeseries.empty:
+            timeseries = timeseries.copy()
+            timeseries["timestamp"] = pd.to_datetime(timeseries["timestamp"], errors="coerce", utc=True)
+            if "price" in timeseries.columns:
+                timeseries["price"] = pd.to_numeric(timeseries["price"], errors="coerce")
+        max_age_seconds = float(max_price_age_minutes * 60)
+        rows: list[dict[str, object]] = []
+        for _, dataset_row in dataset.iterrows():
+            spec = MarketSpec.model_validate_json(str(dataset_row["market_spec_json"]))
+            decision_ts = pd.to_datetime(dataset_row["decision_time_utc"], errors="coerce", utc=True)
+            if pd.isna(decision_ts):
+                continue
+            market_timeseries = _rows_for_market(timeseries, spec.market_id).sort_values("timestamp", ignore_index=True)
+            token_ids = spec.token_ids
+            for outcome_label, token_id in zip(spec.outcome_labels(), token_ids, strict=False):
+                panel_row: dict[str, object] = {
+                    "market_id": spec.market_id,
+                    "token_id": token_id,
+                    "outcome_label": outcome_label,
+                    "city": spec.city,
+                    "station_id": spec.station_id,
+                    "target_date": pd.Timestamp(spec.target_local_date),
+                    "decision_horizon": str(dataset_row.get("decision_horizon")),
+                    "decision_time_utc": decision_ts,
+                    "winning_outcome": dataset_row.get("winning_outcome"),
+                    "realized_daily_max": dataset_row.get("realized_daily_max"),
+                    "market_price": pd.NA,
+                    "price_ts": pd.NaT,
+                    "price_age_seconds": pd.NA,
+                    "interval_used": None,
+                    "coverage_status": "missing",
+                    **self._metadata_fields(source_priority=100),
+                }
+                if not market_timeseries.empty and "token_id" in market_timeseries.columns:
+                    token_history = market_timeseries.loc[
+                        market_timeseries["token_id"].astype(str) == token_id
+                    ].copy()
+                else:
+                    token_history = pd.DataFrame()
+                if token_history.empty:
+                    rows.append(panel_row)
+                    continue
+                prior = token_history.loc[token_history["timestamp"] <= decision_ts].copy()
+                if prior.empty:
+                    rows.append(panel_row)
+                    continue
+                latest = prior.sort_values("timestamp", ignore_index=True).iloc[-1]
+                price_ts = pd.to_datetime(latest.get("timestamp"), errors="coerce", utc=True)
+                price = pd.to_numeric(latest.get("price"), errors="coerce")
+                if pd.isna(price_ts) or pd.isna(price):
+                    rows.append(panel_row)
+                    continue
+                age_seconds = max((decision_ts - price_ts).total_seconds(), 0.0)
+                panel_row["market_price"] = float(price)
+                panel_row["price_ts"] = price_ts
+                panel_row["price_age_seconds"] = float(age_seconds)
+                panel_row["interval_used"] = latest.get("interval_used")
+                panel_row["coverage_status"] = "ok" if age_seconds <= max_age_seconds else "stale"
+                rows.append(panel_row)
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            raise ValueError("No backtest panel rows materialized.")
+        self.warehouse.write_gold_table(
+            "gold_backtest_panel",
+            frame,
+            relative_path=f"gold/{output_name}.parquet",
+        )
+        self.warehouse.write_manifest()
+        return frame
+
+    def summarize_price_history_coverage(self, market_ids: set[str] | None = None) -> dict[str, pd.DataFrame]:
+        """Summarize official price-history fetch coverage and decision-time panel readiness."""
+
+        bronze = self.warehouse.read_table("bronze_price_history_requests")
+        panel = self.warehouse.read_table("gold_backtest_panel")
+        if market_ids:
+            wanted = {str(market_id) for market_id in market_ids}
+            if not bronze.empty and "market_id" in bronze.columns:
+                bronze = bronze.loc[bronze["market_id"].astype(str).isin(wanted)].copy()
+            if not panel.empty and "market_id" in panel.columns:
+                panel = panel.loc[panel["market_id"].astype(str).isin(wanted)].copy()
+
+        request_summary = pd.DataFrame()
+        request_details = pd.DataFrame()
+        if not bronze.empty:
+            request_summary = (
+                bronze.groupby(["status", "city"], dropna=False)
+                .agg(
+                    request_count=("token_id", "size"),
+                    market_count=("market_id", lambda series: series.astype(str).nunique()),
+                    total_points=("point_count", "sum"),
+                )
+                .reset_index()
+                .sort_values(["status", "city"], ignore_index=True)
+            )
+            request_details = bronze.loc[
+                :,
+                [
+                    column
+                    for column in (
+                        "market_id",
+                        "city",
+                        "target_local_date",
+                        "token_id",
+                        "outcome_label",
+                        "status",
+                        "point_count",
+                        "first_price_ts",
+                        "last_price_ts",
+                        "http_status_code",
+                        "error_message",
+                    )
+                    if column in bronze.columns
+                ],
+            ].sort_values(["city", "target_local_date", "market_id", "outcome_label"], ignore_index=True)
+
+        panel_summary = pd.DataFrame()
+        market_summary = pd.DataFrame()
+        panel_details = pd.DataFrame()
+        if not panel.empty:
+            panel_summary = (
+                panel.groupby(["city", "decision_horizon", "coverage_status"], dropna=False)
+                .agg(
+                    token_count=("token_id", "size"),
+                    market_count=("market_id", lambda series: series.astype(str).nunique()),
+                )
+                .reset_index()
+                .sort_values(["city", "decision_horizon", "coverage_status"], ignore_index=True)
+            )
+            market_summary = (
+                panel.groupby(["city", "market_id", "decision_horizon"], dropna=False)
+                .agg(
+                    token_count=("token_id", "size"),
+                    ok_token_count=("coverage_status", lambda series: (series.astype(str) == "ok").sum()),
+                    stale_token_count=("coverage_status", lambda series: (series.astype(str) == "stale").sum()),
+                    missing_token_count=("coverage_status", lambda series: (series.astype(str) == "missing").sum()),
+                )
+                .reset_index()
+                .sort_values(["city", "decision_horizon", "market_id"], ignore_index=True)
+            )
+            market_summary["market_ready"] = market_summary["ok_token_count"] > 0
+            panel_details = panel.loc[
+                :,
+                [
+                    column
+                    for column in (
+                        "market_id",
+                        "city",
+                        "target_date",
+                        "decision_horizon",
+                        "token_id",
+                        "outcome_label",
+                        "coverage_status",
+                        "market_price",
+                        "price_ts",
+                        "price_age_seconds",
+                        "interval_used",
+                    )
+                    if column in panel.columns
+                ],
+            ].sort_values(["city", "target_date", "decision_horizon", "outcome_label"], ignore_index=True)
+
+        return {
+            "request_summary": request_summary,
+            "request_details": request_details,
+            "panel_summary": panel_summary,
+            "market_summary": market_summary,
+            "details": panel_details,
+        }
 
     def materialize_training_set(
         self,

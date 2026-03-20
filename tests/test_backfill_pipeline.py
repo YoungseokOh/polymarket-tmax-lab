@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -53,6 +53,24 @@ class _LagTruthHttp:
                 '"20250824","113","601","248","1342","302"\n'
             )
         return '"TM","STN_ID","TMP_MNM_TM","TMP_MNM","TMP_MAX_TM","TMP_MAX"\n'
+
+
+class _FakeClobClient:
+    def __init__(self, payloads: dict[str, dict[str, object]]) -> None:
+        self.payloads = payloads
+
+    def get_prices_history(
+        self,
+        market: str,
+        *,
+        interval: str = "max",
+        fidelity: int | None = 60,
+        use_cache: bool = True,
+    ) -> dict[str, object]:
+        assert interval == "max"
+        assert fidelity == 60
+        assert use_cache is True
+        return self.payloads.get(market, {"history": []})
 
 
 def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> None:
@@ -174,6 +192,48 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
     availability = pipeline.summarize_forecast_availability(top_k=2)
     assert not availability["summary"].empty
     assert not availability["recommended"].empty
+
+
+def test_summarize_dataset_readiness_reports_city_level_progress(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "readiness.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025", "ecmwf_aifs025_single"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets(snapshots, source_name="readiness_test")
+    pipeline.backfill_forecasts(
+        snapshots,
+        allow_fixture_fallback=True,
+        strict_archive=False,
+    )
+    pipeline.backfill_truth(snapshots)
+    pipeline.materialize_training_set(
+        snapshots,
+        output_name="readiness_training_set",
+        decision_horizons=["market_open", "morning_of"],
+    )
+
+    readiness = pipeline.summarize_dataset_readiness(snapshots)
+
+    assert readiness["summary"].iloc[0]["city"] == "Seoul"
+    assert int(readiness["summary"].iloc[0]["snapshot_count"]) == 1
+    assert int(readiness["summary"].iloc[0]["forecast_ready_count"]) == 1
+    assert int(readiness["summary"].iloc[0]["truth_ok_count"]) == 1
+    assert int(readiness["summary"].iloc[0]["gold_market_count"]) == 1
+    assert int(readiness["summary"].iloc[0]["gold_row_count"]) == 2
+    assert readiness["details"].iloc[0]["readiness_status"] == "ready"
 
 
 def test_backfill_pipeline_fails_closed_when_truth_rows_are_missing(tmp_path: Path) -> None:
@@ -303,3 +363,70 @@ def test_empty_materialization_message_filters_truth_lag_to_requested_snapshots(
 
     assert "Seoul/RKSI: latest 2025-08-24" in message
     assert "NYC/KLGA" not in message
+
+
+def test_backfill_price_history_and_panel_materialization_capture_coverage_states(tmp_path: Path) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    spec = snapshot.spec
+    assert spec is not None
+    token_ids = spec.token_ids
+    payloads = {
+        token_ids[0]: {
+            "history": [
+                {"t": int(datetime(2025, 1, 1, 8, 0, tzinfo=UTC).timestamp()), "p": 0.42},
+                {"t": int(datetime(2025, 1, 1, 9, 0, tzinfo=UTC).timestamp()), "p": 0.55},
+            ]
+        },
+        token_ids[1]: {
+            "history": [
+                {"t": int(datetime(2025, 1, 1, 0, 0, tzinfo=UTC).timestamp()), "p": 0.10},
+            ]
+        },
+    }
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "prices.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    history_tables = pipeline.backfill_price_history([snapshot], clob=_FakeClobClient(payloads))
+
+    assert len(history_tables["bronze_price_history_requests"]) == len(token_ids)
+    assert set(history_tables["bronze_price_history_requests"]["status"].astype(str)) == {"ok", "empty"}
+    assert len(history_tables["silver_price_timeseries"]) == 3
+
+    dataset = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "city": spec.city,
+                "target_date": pd.Timestamp(spec.target_local_date),
+                "decision_horizon": "morning_of",
+                "decision_time_utc": pd.Timestamp(datetime(2025, 1, 1, 9, 30, tzinfo=UTC)),
+                "market_spec_json": spec.model_dump_json(),
+                "winning_outcome": spec.outcome_labels()[0],
+                "realized_daily_max": 10.0,
+            }
+        ]
+    )
+    panel = pipeline.materialize_backtest_panel(
+        dataset,
+        output_name="test_backtest_panel",
+        max_price_age_minutes=60,
+    )
+    summary = pipeline.summarize_price_history_coverage({spec.market_id})
+
+    assert len(panel) == len(token_ids)
+    assert set(panel["coverage_status"].astype(str)) == {"missing", "ok", "stale"}
+    assert set(summary["panel_summary"]["coverage_status"].astype(str)) == {"missing", "ok", "stale"}
+    assert bool(summary["market_summary"].iloc[0]["market_ready"]) is True

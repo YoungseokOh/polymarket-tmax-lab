@@ -54,7 +54,11 @@ uv run pmtmax backfill-markets --markets-path configs/market_inventory/historica
 uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of
 uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax summarize-truth-coverage
+uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-training-set --markets-path configs/market_inventory/historical_temperature_snapshots.json --decision-horizon market_open --decision-horizon previous_evening --decision-horizon morning_of
+uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax materialize-backtest-panel --dataset-path data/parquet/gold/historical_training_set.parquet --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
 ```
@@ -71,8 +75,13 @@ uv run pmtmax compact-warehouse
 `refresh_historical_event_urls.py`는 Gamma grouped weather/temperature events에서 supported closed backlog를 찾아 candidate/page-fetch/status manifest를 남기고, `collected`만 append-only URL manifest에 publish한다.
 retryable 상태는 `truth_source_lag`, `truth_request_failed`로 남기고 다음 batch에서 다시 classify할 수 있다.
 `collection-preflight`는 curated snapshot 집합의 truth track과 수동 env 요구사항을 함께 요약한다. Wunderground-family markets는 기본적으로 같은 공항의 documented public truth를 사용하므로 `PMTMAX_WU_API_KEY`는 optional audit env로만 표시된다. 현재 Seoul / RKSI는 AMO `AIR_CALP`, 그 외 지원 도시들은 기본적으로 NOAA Global Hourly를 사용한다.
-`build_historical_market_inventory.py`는 canonical snapshot output을 truth-ready subset으로만 만든다. `truth_source_lag`, `truth_blocked`, `truth_request_failed`는 snapshot JSON에 들어가지 않고 inventory report issue로 남는다.
+`build_historical_market_inventory.py`는 canonical snapshot output을 truth-ready subset으로만 만든다. `truth_source_lag`, `truth_blocked`, `truth_request_failed`는 snapshot JSON에 들어가지 않고 inventory report issue로 남는다. canonical 경로로 실행하면 `historical_collection_status.json`도 함께 sync해서 `collected` count가 현재 curated snapshot inventory와 맞도록 갱신한다.
 `backfill-truth`에 `lag` 상태가 보이면 public archive가 target date보다 뒤처진 것이다. 이때 `summarize-truth-coverage`가 station별 최신 archive 일자를 JSON으로 내보내므로 truth-ready subset을 따로 고르거나 재시도 시점을 판단할 수 있다.
+`summarize-dataset-readiness`는 snapshot 수집 성공과 warehouse materialization 성공을 분리해서 보여준다. 도시별 `snapshot_count`, `forecast_ready_count`, `truth_ok_count`, `truth_lag_count`, `gold_market_count`, `gold_row_count`와 market-level readiness detail을 함께 확인할 수 있다.
+`backfill-price-history`는 official CLOB token history를 `bronze_price_history_requests`와 `silver_price_timeseries`에 적재한다. 성공 응답이 비어도 `empty` 상태로 남겨서 coverage gap을 숨기지 않는다.
+`materialize-backtest-panel`은 gold training set의 각 decision timestamp마다 outcome token별 최신 공식 가격을 붙여 `gold_backtest_panel`을 만든다. `coverage_status=ok|stale|missing`이 모두 기록되고, real-history backtest는 `ok`만 사용한다.
+`summarize-price-history-coverage`는 request-level 상태와 decision-time panel coverage를 함께 JSON으로 내보낸다. 따라서 “공식 가격이 실제로 남아 있는 market/date” subset을 바로 확인할 수 있다.
+기본 research CLI는 더 이상 `tests/fixtures/truth`를 자동 주입하지 않는다. fixture truth는 테스트나 명시적 demo wiring에서만 사용한다.
 `build_active_weather_watchlist.py`는 supported active grouped events를 parse-ready 상태로 정리하지만 canonical warehouse는 건드리지 않는다.
 `run_historical_refresh_pipeline.sh`는 refresh 전용 shell wrapper고, `run_full_historical_batch.sh`는 refresh 이후 warehouse rebuild까지 포함하는 shell wrapper다.
 

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from pmtmax.cli.main import _bootstrap_snapshots, _collection_preflight_report, _load_snapshots, summarize_truth_coverage
+from pmtmax.cli.main import (
+    backtest,
+    _bootstrap_snapshots,
+    _collection_preflight_report,
+    _load_snapshots,
+    materialize_backtest_panel,
+    summarize_dataset_readiness,
+    summarize_price_history_coverage,
+    summarize_truth_coverage,
+)
 from pmtmax.config.settings import EnvSettings
 from pmtmax.markets.repository import bundled_market_snapshots
 
@@ -70,3 +80,204 @@ def test_summarize_truth_coverage_command_writes_output(
     payload = json.loads(output.read_text())
     assert payload["summary"][0]["status"] == "lag"
     assert payload["details"][0]["station_id"] == "RKSI"
+
+
+def test_summarize_dataset_readiness_command_writes_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeWarehouse:
+        def close(self) -> None:
+            return None
+
+    class _FakePipeline:
+        warehouse = _FakeWarehouse()
+
+        def summarize_dataset_readiness(self, snapshots: list[object]) -> dict[str, pd.DataFrame]:
+            assert snapshots == ["snapshot"]
+            return {
+                "summary": pd.DataFrame(
+                    [{"city": "Seoul", "snapshot_count": 1, "truth_ok_count": 1, "gold_row_count": 2}]
+                ),
+                "details": pd.DataFrame(
+                    [{"city": "Seoul", "market_id": "101025", "readiness_status": "ready", "gold_row_count": 2}]
+                ),
+            }
+
+    monkeypatch.setattr("pmtmax.cli.main._runtime", lambda include_stores=False: (None, None, None, None, None, None))
+    monkeypatch.setattr("pmtmax.cli.main._bootstrap_snapshots", lambda markets_path=None, cities=None: ["snapshot"])
+    monkeypatch.setattr("pmtmax.cli.main._backfill_pipeline", lambda config, http, openmeteo: _FakePipeline())
+
+    output = tmp_path / "dataset_readiness.json"
+    summarize_dataset_readiness(markets_path=tmp_path / "snapshots.json", output=output)
+    payload = json.loads(output.read_text())
+    assert payload["summary"][0]["city"] == "Seoul"
+    assert payload["details"][0]["readiness_status"] == "ready"
+
+
+def test_summarize_price_history_coverage_command_writes_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeHttp:
+        def close(self) -> None:
+            return None
+
+    class _FakeWarehouse:
+        def close(self) -> None:
+            return None
+
+    class _FakePipeline:
+        warehouse = _FakeWarehouse()
+
+        def summarize_price_history_coverage(self, market_ids: set[str] | None = None) -> dict[str, pd.DataFrame]:
+            assert market_ids == {"101025"}
+            return {
+                "request_summary": pd.DataFrame([{"status": "ok", "city": "Seoul", "request_count": 3}]),
+                "request_details": pd.DataFrame([{"market_id": "101025", "outcome_label": "11°C"}]),
+                "panel_summary": pd.DataFrame([{"city": "Seoul", "decision_horizon": "morning_of", "coverage_status": "ok"}]),
+                "market_summary": pd.DataFrame([{"market_id": "101025", "market_ready": True}]),
+                "details": pd.DataFrame([{"market_id": "101025", "coverage_status": "ok"}]),
+            }
+
+    class _Snapshot:
+        def __init__(self) -> None:
+            self.spec = type("_Spec", (), {"market_id": "101025"})()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (None, None, _FakeHttp(), None, None, None),
+    )
+    monkeypatch.setattr("pmtmax.cli.main._bootstrap_snapshots", lambda markets_path=None, cities=None: [_Snapshot()])
+    monkeypatch.setattr("pmtmax.cli.main._backfill_pipeline", lambda config, http, openmeteo: _FakePipeline())
+
+    output = tmp_path / "price_history_coverage.json"
+    summarize_price_history_coverage(markets_path=tmp_path / "snapshots.json", output=output)
+    payload = json.loads(output.read_text())
+    assert payload["request_summary"][0]["status"] == "ok"
+    assert payload["panel_summary"][0]["coverage_status"] == "ok"
+
+
+def test_materialize_backtest_panel_command_filters_market_ids_and_writes_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeHttp:
+        def close(self) -> None:
+            return None
+
+    class _FakeWarehouse:
+        def close(self) -> None:
+            return None
+
+        def start_run(self, **_: object) -> object:
+            return type("_Run", (), {"run_id": "run-1"})()
+
+        def finish_run(self, run: object, *, status: str, notes: str = "") -> object:
+            assert status == "completed"
+            return run
+
+    class _FakePipeline:
+        warehouse = _FakeWarehouse()
+        run_id: str | None = None
+
+        def materialize_backtest_panel(
+            self,
+            frame: pd.DataFrame,
+            *,
+            output_name: str = "historical_backtest_panel",
+            max_price_age_minutes: int = 720,
+        ) -> pd.DataFrame:
+            assert list(frame["market_id"].astype(str)) == ["101025"]
+            assert output_name == "historical_backtest_panel"
+            assert max_price_age_minutes == 720
+            return pd.DataFrame([{"market_id": "101025", "coverage_status": "ok"}])
+
+    dataset_path = tmp_path / "training.parquet"
+    pd.DataFrame(
+        [
+            {"market_id": "101025", "market_spec_json": "{}", "decision_time_utc": pd.Timestamp(datetime.now(tz=UTC))},
+            {"market_id": "34779", "market_spec_json": "{}", "decision_time_utc": pd.Timestamp(datetime.now(tz=UTC))},
+        ]
+    ).to_parquet(dataset_path)
+
+    class _Snapshot:
+        def __init__(self, market_id: str) -> None:
+            self.spec = type("_Spec", (), {"market_id": market_id})()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (
+            type("_Config", (), {"app": type("_App", (), {"parquet_dir": tmp_path})()})(),
+            None,
+            _FakeHttp(),
+            None,
+            None,
+            None,
+        ),
+    )
+    monkeypatch.setattr("pmtmax.cli.main._config_hash", lambda *args, **kwargs: "hash")
+    monkeypatch.setattr(
+        "pmtmax.cli.main._bootstrap_snapshots",
+        lambda markets_path=None, cities=None: [_Snapshot("101025")],
+    )
+    monkeypatch.setattr("pmtmax.cli.main._backfill_pipeline", lambda config, http, openmeteo: _FakePipeline())
+
+    materialize_backtest_panel(dataset_path=dataset_path, markets_path=tmp_path / "snapshots.json")
+
+
+def test_backtest_real_history_writes_separate_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "training.parquet"
+    panel_path = tmp_path / "panel.parquet"
+    pd.DataFrame(
+        [
+            {
+                "market_id": "101025",
+                "market_spec_json": "{}",
+                "market_prices_json": "{}",
+                "winning_outcome": "11°C",
+                "realized_daily_max": 11.0,
+            },
+            {
+                "market_id": "101026",
+                "market_spec_json": "{}",
+                "market_prices_json": "{}",
+                "winning_outcome": "12°C",
+                "realized_daily_max": 12.0,
+            },
+        ]
+    ).to_parquet(dataset_path)
+    pd.DataFrame(
+        [
+            {
+                "market_id": "101025",
+                "decision_horizon": "morning_of",
+                "outcome_label": "11°C",
+                "coverage_status": "ok",
+                "market_price": 0.5,
+            }
+        ]
+    ).to_parquet(panel_path)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "pmtmax.cli.main._run_real_history_backtest",
+        lambda frame, panel, *, model_name, artifacts_dir, flat_stake: (
+            {"mae": 1.0, "rmse": 1.0, "nll": 1.0, "avg_brier": 0.1, "avg_crps": 0.2, "num_trades": 1.0, "pnl": 0.5, "hit_rate": 1.0, "avg_edge": 0.1},
+            [{"market_id": "101025", "pricing_source": "real_history"}],
+        ),
+    )
+
+    backtest(
+        dataset_path=dataset_path,
+        panel_path=panel_path,
+        pricing_source="real_history",
+    )
+
+    metrics = json.loads((tmp_path / "artifacts" / "backtest_metrics_real_history.json").read_text())
+    trades = json.loads((tmp_path / "artifacts" / "backtest_trades_real_history.json").read_text())
+    assert metrics["num_trades"] == 1.0
+    assert trades[0]["pricing_source"] == "real_history"

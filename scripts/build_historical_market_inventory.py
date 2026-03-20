@@ -9,10 +9,13 @@ from pathlib import Path
 from pmtmax.config.settings import load_settings
 from pmtmax.http import CachedHttpClient
 from pmtmax.markets.inventory import (
+    HistoricalCollectionStatusReport,
+    HistoricalEventCandidateReport,
     HistoricalEventPage,
     build_historical_inventory_from_pages,
     preserve_existing_capture_times,
     probe_truth_readiness,
+    sync_historical_collection_status_report,
 )
 from pmtmax.markets.repository import load_market_snapshots, save_market_snapshots
 from pmtmax.utils import dump_json, load_json
@@ -20,6 +23,8 @@ from pmtmax.utils import dump_json, load_json
 DEFAULT_INPUT = Path("configs/market_inventory/historical_temperature_event_urls.json")
 DEFAULT_OUTPUT = Path("configs/market_inventory/historical_temperature_snapshots.json")
 DEFAULT_REPORT = Path("data/manifests/historical_inventory_build_report.json")
+DEFAULT_CANDIDATE_REPORT = Path("data/manifests/historical_event_candidates.json")
+DEFAULT_STATUS_REPORT = Path("data/manifests/historical_collection_status.json")
 DEFAULT_TRUTH_WORKERS = 4
 DEFAULT_TRUTH_PER_SOURCE_LIMIT = 2
 
@@ -38,6 +43,18 @@ def main() -> None:
         type=Path,
         default=DEFAULT_REPORT,
         help="Where to write the inventory build report JSON.",
+    )
+    parser.add_argument(
+        "--candidate-report",
+        type=Path,
+        default=None,
+        help="Optional candidate manifest used to sync the canonical collection status report.",
+    )
+    parser.add_argument(
+        "--status-report",
+        type=Path,
+        default=None,
+        help="Optional collection status report path to sync after rebuilding the curated inventory.",
     )
     parser.add_argument(
         "--no-cache",
@@ -95,9 +112,31 @@ def main() -> None:
         )
     save_market_snapshots(args.output, snapshots)
     dump_json(args.report, report.model_dump(mode="json"))
+
+    default_canonical_build = args.input == DEFAULT_INPUT and args.output == DEFAULT_OUTPUT
+    candidate_report_path = args.candidate_report or (DEFAULT_CANDIDATE_REPORT if default_canonical_build else None)
+    status_report_path = args.status_report or (DEFAULT_STATUS_REPORT if default_canonical_build else None)
+    synced_status_path: Path | None = None
+    if status_report_path is not None:
+        candidate_report = None
+        if candidate_report_path is not None and candidate_report_path.exists():
+            candidate_report = HistoricalEventCandidateReport.model_validate(load_json(candidate_report_path))
+        existing_status_report = None
+        if status_report_path.exists():
+            existing_status_report = HistoricalCollectionStatusReport.model_validate(load_json(status_report_path))
+        synced_status = sync_historical_collection_status_report(
+            snapshots,
+            supported_cities=config.app.supported_cities,
+            source_manifest=str(args.input),
+            candidate_report=candidate_report,
+            existing_report=existing_status_report,
+        )
+        dump_json(status_report_path, synced_status.model_dump(mode="json"))
+        synced_status_path = status_report_path
     print(
         f"Built {len(snapshots)} curated snapshots from {len(urls)} URLs -> {args.output} "
-        f"(issues: {len(report.issues)}, issue_counts: {report.issue_counts})"
+        f"(issues: {len(report.issues)}, issue_counts: {report.issue_counts}, "
+        f"status_report: {synced_status_path or 'not-synced'})"
     )
 
 

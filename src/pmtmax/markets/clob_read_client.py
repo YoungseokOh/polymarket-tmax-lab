@@ -37,13 +37,27 @@ class ClobReadClient:
     def get_prices_history(
         self,
         market: str,
+        *,
+        interval: str | None = "max",
         start_ts: int | None = None,
         end_ts: int | None = None,
-        fidelity: int = 60,
+        fidelity: int | None = 60,
+        use_cache: bool = True,
     ) -> dict[str, Any]:
         """Fetch public price history."""
 
-        params: dict[str, Any] = {"market": market, "fidelity": fidelity}
+        if interval is not None and (start_ts is not None or end_ts is not None):
+            msg = "interval cannot be combined with start_ts or end_ts"
+            raise ValueError(msg)
+        if interval is None and start_ts is None and end_ts is None:
+            msg = "Provide either interval or a start/end timestamp window"
+            raise ValueError(msg)
+
+        params: dict[str, Any] = {"market": market}
+        if interval is not None:
+            params["interval"] = interval
+        if fidelity is not None:
+            params["fidelity"] = fidelity
         if start_ts is not None:
             params["startTs"] = start_ts
         if end_ts is not None:
@@ -51,7 +65,7 @@ class ClobReadClient:
         payload = self.http.get_json(
             f"{self.base_url}/prices-history",
             params=params,
-            use_cache=False,
+            use_cache=use_cache,
         )
         return cast(dict[str, Any], payload)
 
