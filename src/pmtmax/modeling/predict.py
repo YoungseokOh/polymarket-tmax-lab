@@ -19,7 +19,12 @@ def predict_market(model_path: Path, model_name: str, spec: MarketSpec, frame: p
     """Load a model, generate a probabilistic forecast, and map to market outcomes."""
 
     model = load_model(model_path)
-    prediction = model.predict(sanitize_model_frame(frame))
+    clean = sanitize_model_frame(frame)
+    if hasattr(model, "feature_names"):
+        for col in model.feature_names:
+            if col not in clean.columns:
+                clean[col] = 0.0
+    prediction = model.predict(clean)
     if len(prediction) == 2:
         mean_arr, std_arr = prediction
         mean = float(np.asarray(mean_arr).reshape(-1)[0])
