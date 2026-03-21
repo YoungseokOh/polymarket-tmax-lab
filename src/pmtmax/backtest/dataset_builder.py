@@ -167,14 +167,18 @@ class DatasetBuilder:
                     target_date=target_date,
                 )
             else:
-                payload = self.openmeteo.forecast(
-                    latitude=latitude,
-                    longitude=longitude,
-                    model=model,
-                    hourly=HOURLY,
-                    forecast_days=forecast_days,
-                    timezone=timezone,
-                )
+                try:
+                    payload = self.openmeteo.forecast(
+                        latitude=latitude,
+                        longitude=longitude,
+                        model=model,
+                        hourly=HOURLY,
+                        forecast_days=forecast_days,
+                        timezone=timezone,
+                    )
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug("Forecast unavailable for model %s at (%s, %s), skipping", model, latitude, longitude)
+                    continue
             package = build_hourly_feature_frame(payload)
             features = target_day_features(package, target_date)
             for key, value in features.items():

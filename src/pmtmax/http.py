@@ -19,7 +19,7 @@ def _is_retriable_http_error(exc: BaseException) -> bool:
     """Return whether an HTTP exception should be retried."""
 
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
     return isinstance(exc, httpx.HTTPError)
 
 
@@ -49,8 +49,8 @@ class CachedHttpClient:
 
     @retry(
         retry=retry_if_exception(_is_retriable_http_error),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
     def get_json(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True) -> Any:

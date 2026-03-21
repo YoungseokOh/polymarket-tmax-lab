@@ -31,7 +31,14 @@ def default_feature_names(frame: pd.DataFrame) -> list[str]:
     """Infer the default modeling features from a dataset."""
 
     excluded = {"market_id", "station_id", "target_date", "realized_daily_max", "winning_outcome"}
-    return [column for column in frame.columns if column not in excluded and pd.api.types.is_numeric_dtype(frame[column])]
+    return [
+        column
+        for column in frame.columns
+        if column not in excluded
+        and pd.api.types.is_numeric_dtype(frame[column])
+        and not column.startswith("kma_ldps_")
+        and not column.endswith("_num_hours")
+    ]
 
 
 def train_model(model_name: str, frame: pd.DataFrame, artifacts_dir: Path) -> ModelArtifact:

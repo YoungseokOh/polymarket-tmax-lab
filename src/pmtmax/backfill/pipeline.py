@@ -1316,8 +1316,13 @@ class BackfillPipeline:
             (market_forecasts["endpoint_kind"].astype(str) == "single_run")
             & (market_forecasts["decision_horizon"].astype(str) == horizon)
         ].copy()
-        if not single_run.empty:
+        if not single_run.empty and "temperature_2m" in single_run.columns and (single_run["temperature_2m"] != 0.0).any():
             return single_run
+        historical = market_forecasts.loc[
+            market_forecasts["endpoint_kind"].astype(str) == "historical_forecast"
+        ].copy()
+        if not historical.empty:
+            return historical
         generic = market_forecasts.loc[market_forecasts["decision_horizon"].isna()].copy()
         return generic if not generic.empty else market_forecasts
 

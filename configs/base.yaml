@@ -60,7 +60,6 @@ weather:
     - ecmwf_ifs04
     - ecmwf_aifs025_single
     - kma_gdps
-    - kma_ldps
     - gfs_seamless
 
 metar:

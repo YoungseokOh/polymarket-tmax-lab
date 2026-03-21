@@ -1586,6 +1586,7 @@ def paper_trader(
         parquet_store=None,
         snapshot_dir=None,
         fixture_dir=None,
+        models=config.weather.models or None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
@@ -1672,6 +1673,7 @@ def live_trader(
         parquet_store=None,
         snapshot_dir=None,
         fixture_dir=None,
+        models=config.weather.models or None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
 
@@ -1764,7 +1766,8 @@ def scan_daemon(
     )
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
-        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None, snapshot_dir=None, fixture_dir=None
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None, snapshot_dir=None, fixture_dir=None,
+        models=config.weather.models or None,
     )
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
     refresh_interval = config.scanner.snapshot_refresh_interval
