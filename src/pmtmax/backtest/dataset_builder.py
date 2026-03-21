@@ -32,7 +32,7 @@ HORIZON_OFFSETS: dict[str, tuple[int, int]] = {
     "morning_of": (0, 6),
     "hourly_refresh": (0, 9),
 }
-MODELS = ["ecmwf_ifs025", "ecmwf_aifs025_single", "kma_gdps"]
+DEFAULT_MODELS = ["ecmwf_ifs025", "ecmwf_aifs025_single", "kma_gdps"]
 HOURLY = ["temperature_2m", "dew_point_2m", "relative_humidity_2m", "wind_speed_10m", "cloud_cover"]
 
 
@@ -61,6 +61,7 @@ class DatasetBuilder:
     parquet_store: ParquetStore | None
     snapshot_dir: Path | None = None
     fixture_dir: Path | None = None
+    models: list[str] | None = None
 
     def build(
         self,
@@ -155,7 +156,7 @@ class DatasetBuilder:
         city: str,
         forecast_days: int = 1,
     ) -> None:
-        for model in MODELS:
+        for model in (self.models or DEFAULT_MODELS):
             if historical:
                 payload = self._historical_payload(
                     city=city,

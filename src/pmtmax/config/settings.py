@@ -44,6 +44,12 @@ class WeatherConfig(BaseModel):
     models: list[str] = Field(default_factory=list)
 
 
+class MetarConfig(BaseModel):
+    base_url: str = "https://aviationweather.gov/api/data"
+    enabled: bool = True
+    stale_minutes: int = 30
+
+
 class BacktestConfig(BaseModel):
     decision_horizons: list[str] = Field(default_factory=list)
     default_edge_threshold: float = 0.03
@@ -60,10 +66,20 @@ class ExecutionConfig(BaseModel):
     min_liquidity: float = 250.0
     max_spread_bps: int = 700
     stale_forecast_minutes: int = 180
+    stop_loss_pct: float = 0.20
+    trailing_stop_rise_pct: float = 0.20
+    forecast_exit_buffer: float = 0.05
 
 
 class ModelsConfig(BaseModel):
     benchmark_ladder: list[str] = Field(default_factory=list)
+
+
+class ScannerConfig(BaseModel):
+    interval_seconds: int = 60
+    max_cycles: int = 0
+    state_path: Path = Path("artifacts/scanner_state.json")
+    snapshot_refresh_interval: int = 10
 
 
 class FirebaseConfig(BaseModel):
@@ -77,9 +93,11 @@ class RepoConfig(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     polymarket: PolymarketConfig = Field(default_factory=PolymarketConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    metar: MetarConfig = Field(default_factory=MetarConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     firebase: FirebaseConfig = Field(default_factory=FirebaseConfig)
 
 

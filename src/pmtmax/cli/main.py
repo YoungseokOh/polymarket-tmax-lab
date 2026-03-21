@@ -1734,6 +1734,170 @@ def collect_l2(
     console.print(f"Wrote {output}")
 
 
+@app.command("scan-daemon")
+def scan_daemon(
+    model_path: Path = typer.Argument(..., help="Path to trained model artifact"),
+    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    interval: int = typer.Option(60, help="Seconds between scan cycles"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    bankroll: float = typer.Option(10_000.0, help="Starting bankroll"),
+    max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+) -> None:
+    """Run a continuous scanning daemon that monitors markets and manages positions."""
+
+    import logging
+
+    from pmtmax.execution.scanner import ContinuousScanner
+
+    logger = logging.getLogger("pmtmax.cli.scan_daemon")
+
+    config, _env, http, _duckdb, _parquet, openmeteo = _runtime(include_stores=False)
+
+    broker = PaperBroker(
+        bankroll=bankroll,
+        stop_loss_pct=config.execution.stop_loss_pct,
+        trailing_stop_rise_pct=config.execution.trailing_stop_rise_pct,
+        forecast_exit_buffer=config.execution.forecast_exit_buffer,
+    )
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None, snapshot_dir=None, fixture_dir=None
+    )
+    edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    refresh_interval = config.scanner.snapshot_refresh_interval
+
+    # -- snapshot management --------------------------------------------------
+    snapshot_cache: list[MarketSnapshot] = []
+
+    def _refresh_snapshots() -> list[MarketSnapshot]:
+        if markets_path is not None:
+            if not snapshot_cache:
+                return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
+            return snapshot_cache
+        gamma = GammaClient(http, config.polymarket.gamma_base_url)
+        refs = discover_temperature_event_refs_from_gamma(
+            gamma,
+            supported_cities=cities or config.app.supported_cities,
+            active=True,
+            closed=False,
+            max_pages=config.polymarket.max_pages,
+        )
+        fetches = fetch_temperature_event_pages(http, refs, use_cache=False)
+        return _filter_snapshots_by_city(snapshots_from_temperature_event_fetches(fetches), cities)
+
+    snapshot_cache = _refresh_snapshots()
+    logger.info("Initial snapshot load: %d markets", len(snapshot_cache))
+
+    # -- callback: price_fetcher ----------------------------------------------
+    def _price_fetcher() -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for token_id in list(broker.positions):
+            try:
+                resp = clob.get_price(token_id, side="buy")
+                prices[token_id] = float(resp.get("price", 0.0))
+            except Exception:  # noqa: BLE001
+                logger.warning("price fetch failed for %s", token_id)
+        return prices
+
+    # -- callback: forecast_fetcher -------------------------------------------
+    def _forecast_fetcher() -> dict[str, ProbForecast]:
+        forecasts: dict[str, ProbForecast] = {}
+        seen_market_ids = {pos.market_id for pos in broker.positions.values()}
+        for snapshot in snapshot_cache:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            if spec.market_id not in seen_market_ids:
+                continue
+            try:
+                feature_frame = builder.build_live_row(spec, horizon=horizon)
+                forecast = predict_market(model_path, model_name, spec, feature_frame)
+                forecasts[spec.market_id] = forecast
+            except Exception:  # noqa: BLE001
+                logger.warning("forecast failed for market %s", spec.market_id)
+        return forecasts
+
+    # -- callback: entry_evaluator --------------------------------------------
+    current_exposure_by_city: dict[str, float] = {}
+
+    def _entry_evaluator(brk: PaperBroker) -> None:
+        nonlocal snapshot_cache
+
+        # Refresh snapshots periodically
+        if scanner._cycle > 0 and scanner._cycle % refresh_interval == 0:
+            try:
+                snapshot_cache = _refresh_snapshots()
+                logger.info("Refreshed snapshots: %d markets (cycle %d)", len(snapshot_cache), scanner._cycle)
+            except Exception:  # noqa: BLE001
+                logger.warning("Snapshot refresh failed at cycle %d, keeping cached", scanner._cycle)
+
+        held_market_ids = {pos.market_id for pos in brk.positions.values()}
+
+        for snapshot in snapshot_cache:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            if spec.target_local_date < datetime.now(tz=UTC).date():
+                continue
+            if spec.market_id in held_market_ids:
+                continue
+            try:
+                feature_frame = builder.build_live_row(spec, horizon=horizon)
+                forecast = predict_market(model_path, model_name, spec, feature_frame)
+            except Exception:  # noqa: BLE001
+                logger.warning("forecast failed for %s — skipping entry", spec.market_id)
+                continue
+            if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
+                continue
+            outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
+            token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
+            book = _fetch_book(clob, snapshot, token_id, outcome_label)
+            signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
+            spread = book.best_ask() - book.best_bid()
+            liquidity = (book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0)
+            if signal.edge < edge_threshold:
+                continue
+            if not spread_ok(book.best_bid(), book.best_ask(), config.execution.max_spread_bps):
+                continue
+            if liquidity < config.execution.min_liquidity:
+                continue
+            size_notional = capped_kelly(signal.edge, signal.confidence, brk.bankroll)
+            size = size_notional / max(signal.executable_price, 1e-6)
+            current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
+            if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
+                continue
+            if not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
+                continue
+            fill = brk.simulate_fill(signal, spread=spread, liquidity=liquidity, size=size)
+            if fill is not None:
+                current_exposure_by_city[spec.city] = current_city_exposure + size_notional
+                logger.info("Entry fill: %s %s edge=%.4f", spec.city, outcome_label, signal.edge)
+
+    # -- wire up scanner and run ----------------------------------------------
+    state_path = config.scanner.state_path
+    effective_interval = interval or config.scanner.interval_seconds
+    effective_max_cycles = max_cycles if max_cycles > 0 else config.scanner.max_cycles
+
+    scanner = ContinuousScanner(
+        config=config,
+        broker=broker,
+        interval_seconds=effective_interval,
+        max_cycles=effective_max_cycles,
+        state_path=state_path,
+        price_fetcher=_price_fetcher,
+        forecast_fetcher=_forecast_fetcher,
+        entry_evaluator=_entry_evaluator,
+    )
+
+    console.print(f"Starting scan daemon: interval={effective_interval}s, max_cycles={effective_max_cycles}")
+    console.print(f"Monitoring {len(snapshot_cache)} markets, refresh every {refresh_interval} cycles")
+    scanner.run_loop()
+    console.print("Scan daemon stopped.")
+
+
 def run() -> None:
     """Entrypoint for the console script."""
 

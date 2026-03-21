@@ -28,6 +28,27 @@ def test_historical_forecast_uses_generic_forecast_archive_endpoint(tmp_path) ->
 
 
 @respx.mock
+def test_forecast_accepts_gfs_seamless_model(tmp_path) -> None:
+    route = respx.get("https://api.open-meteo.com/v1/forecast").mock(
+        return_value=httpx.Response(200, json={"hourly": {"time": [], "temperature_2m": []}})
+    )
+    client = OpenMeteoClient(CachedHttpClient(tmp_path / "cache"), "https://api.open-meteo.com", "https://historical-forecast-api.open-meteo.com")
+
+    client.forecast(
+        latitude=40.7128,
+        longitude=-74.0060,
+        model="gfs_seamless",
+        hourly=["temperature_2m"],
+        forecast_days=2,
+        timezone="America/New_York",
+    )
+
+    assert route.called
+    request = route.calls[0].request
+    assert "gfs_seamless" in str(request.url)
+
+
+@respx.mock
 def test_single_run_uses_single_runs_host(tmp_path) -> None:
     route = respx.get("https://single-runs-api.open-meteo.com/v1/forecast").mock(
         return_value=httpx.Response(200, json={"hourly": {"time": [], "temperature_2m": []}})

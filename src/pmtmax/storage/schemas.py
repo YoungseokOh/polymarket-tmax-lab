@@ -54,6 +54,15 @@ class ObservationRecord(BaseModel):
     revision_status: Literal["preliminary", "final"] = "final"
 
 
+class MetarObservation(BaseModel):
+    station_id: str
+    observed_at: datetime
+    temp_c: float
+    dew_point_c: float | None = None
+    wind_speed_kt: float | None = None
+    raw_metar: str = ""
+
+
 class CalibrationMetadata(BaseModel):
     model_name: str
     calibration_method: str
@@ -185,6 +194,11 @@ class PaperPosition(BaseModel):
     size: float
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
+    high_water_mark: float = 0.0
+    trailing_stop_active: bool = False
+    opened_at: datetime | None = None
+    closed_at: datetime | None = None
+    close_reason: str | None = None
 
 
 class PreflightReport(BaseModel):
