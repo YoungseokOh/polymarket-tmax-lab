@@ -89,6 +89,29 @@ class FirebaseConfig(BaseModel):
     credentials_json: str = ""
 
 
+class MonitoringConfig(BaseModel):
+    l2_interval_seconds: int = 900
+    l2_settlement_window_hours: float = 48.0
+    l2_output_dir: Path = Path("data/l2_timeseries")
+
+
+class TelegramConfig(BaseModel):
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+
+
+class MarketMakingConfig(BaseModel):
+    enabled: bool = False
+    base_half_spread: float = 0.02
+    skew_factor: float = 0.5
+    base_size: float = 10.0
+    requote_threshold: float = 0.01
+    max_position_per_outcome: float = 100.0
+    max_total_exposure: float = 1000.0
+    max_loss: float = 500.0
+
+
 class RepoConfig(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     polymarket: PolymarketConfig = Field(default_factory=PolymarketConfig)
@@ -99,6 +122,9 @@ class RepoConfig(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     firebase: FirebaseConfig = Field(default_factory=FirebaseConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    market_making: MarketMakingConfig = Field(default_factory=MarketMakingConfig)
 
 
 class EnvSettings(BaseSettings):
@@ -139,6 +165,8 @@ class EnvSettings(BaseSettings):
     firebase_bucket_name: str = ""
     firebase_prefix: str = "pmtmax"
     firebase_credentials_json: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
 
 def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSettings]:
@@ -171,4 +199,8 @@ def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSetti
     config.firebase.bucket_name = env.firebase_bucket_name or config.firebase.bucket_name
     config.firebase.prefix = env.firebase_prefix or config.firebase.prefix
     config.firebase.credentials_json = env.firebase_credentials_json or config.firebase.credentials_json
+    config.telegram.bot_token = env.telegram_bot_token or config.telegram.bot_token
+    config.telegram.chat_id = env.telegram_chat_id or config.telegram.chat_id
+    if config.telegram.bot_token and config.telegram.chat_id:
+        config.telegram.enabled = True
     return config, env

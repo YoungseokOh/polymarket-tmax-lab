@@ -263,3 +263,56 @@ class RemoteSyncManifest(BaseModel):
     uploaded_files: list[str] = Field(default_factory=list)
     skipped_files: list[str] = Field(default_factory=list)
     dry_run: bool = True
+
+
+# -- Track A: L2 monitoring ------------------------------------------------
+
+
+class L2TimeSeriesRecord(BaseModel):
+    market_id: str
+    token_id: str
+    outcome_label: str
+    city: str
+    target_local_date: date
+    captured_at: datetime
+    hours_to_settlement: float
+    best_bid: float
+    best_ask: float
+    spread: float
+    bid_depth: float
+    ask_depth: float
+    num_bid_levels: int
+    num_ask_levels: int
+
+
+# -- Track B: forecast information service ---------------------------------
+
+
+class OutcomeMispricing(BaseModel):
+    outcome_label: str
+    model_prob: float
+    market_price: float
+    edge: float
+
+
+class ForecastSummary(BaseModel):
+    market_id: str
+    city: str
+    target_local_date: date
+    question: str
+    generated_at: datetime
+    model_name: str
+    mean_f: float
+    std_f: float
+    top_outcomes: list[dict[str, float]] = Field(default_factory=list)
+    mispricings: list[OutcomeMispricing] = Field(default_factory=list)
+
+
+# -- Track C: market making ------------------------------------------------
+
+
+class RiskLimits(BaseModel):
+    max_position_per_outcome: float = 100.0
+    max_total_exposure: float = 1000.0
+    max_loss: float = 500.0
+    max_orders_per_cycle: int = 20

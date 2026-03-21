@@ -54,11 +54,17 @@ from pmtmax.storage.lab_bootstrap import (
     restore_warehouse_from_seed,
 )
 from pmtmax.storage.parquet_store import ParquetStore
+from pmtmax.markets.book_utils import (
+    book_snapshot_from_payload as _book_snapshot_from_payload,
+    fetch_book as _fetch_book,
+    synthetic_book as _synthetic_book,
+)
 from pmtmax.storage.schemas import (
     BookLevel,
     BookSnapshot,
     LegacyRunInventory,
     MarketSnapshot,
+    RiskLimits,
     TradeSignal,
 )
 from pmtmax.storage.warehouse import DataWarehouse, backup_duckdb_file, ordered_legacy_paths
@@ -222,91 +228,44 @@ def _collection_preflight_report(snapshots: list[MarketSnapshot], env: EnvSettin
     }
 
 
-def _synthetic_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) -> BookSnapshot:
-    price = snapshot.outcome_prices.get(outcome_label, 0.5)
-    bid = max(price - 0.02, 0.01)
-    ask = min(price + 0.02, 0.99)
-    return BookSnapshot(
-        market_id=snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id")),
-        token_id=token_id,
-        outcome_label=outcome_label,
-        source="fixture",
-        timestamp=snapshot.captured_at,
-        bids=[BookLevel(price=bid, size=100.0)],
-        asks=[BookLevel(price=ask, size=100.0)],
-    )
-
-
-def _book_snapshot_from_payload(
-    *,
-    snapshot: MarketSnapshot,
-    token_id: str,
-    outcome_label: str,
-    payload: dict[str, Any] | None,
-) -> BookSnapshot:
-    if payload is None:
-        return _synthetic_book(snapshot, outcome_label, token_id)
-    bids = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("bids", [])[:5]]
-    asks = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("asks", [])[:5]]
-    timestamp = payload.get("timestamp")
-    parsed_ts = None
-    if timestamp:
-        try:
-            parsed_ts = datetime.fromtimestamp(int(str(timestamp)) / 1000.0, tz=UTC)
-        except ValueError:
-            parsed_ts = None
-    return BookSnapshot(
-        market_id=snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id")),
-        token_id=token_id,
-        outcome_label=outcome_label,
-        source="clob",
-        timestamp=parsed_ts,
-        bids=bids,
-        asks=asks,
-    )
-
-
-def _fetch_book(
-    clob: ClobReadClient,
-    snapshot: MarketSnapshot,
-    token_id: str,
-    outcome_label: str,
-) -> BookSnapshot:
-    try:
-        payload = clob.get_book(token_id)
-    except Exception:  # noqa: BLE001
-        payload = None
-    return _book_snapshot_from_payload(snapshot=snapshot, token_id=token_id, outcome_label=outcome_label, payload=payload)
-
-
-def _signal_from_forecast(
+def _best_signal_across_outcomes(
     snapshot: MarketSnapshot,
     forecast_probs: dict[str, float],
-    book: BookSnapshot,
+    books: dict[str, BookSnapshot],
     *,
     mode: Literal["paper", "live"],
-) -> TradeSignal:
-    outcome_label, fair_probability = max(forecast_probs.items(), key=lambda item: item[1])
-    executable_price = book.best_ask()
-    spread = max(book.best_ask() - book.best_bid(), 0.0)
-    visible_liquidity = (book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0)
-    fee = estimate_fee(executable_price)
-    slippage = estimate_slippage(executable_price, spread, visible_liquidity, 1.0)
-    edge = compute_edge(fair_probability, executable_price, fee, slippage)
-    return TradeSignal(
-        market_id=snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id")),
-        token_id=book.token_id,
-        outcome_label=outcome_label,
-        side="buy",
-        fair_probability=fair_probability,
-        executable_price=executable_price,
-        fee_estimate=fee,
-        slippage_estimate=slippage,
-        edge=edge,
-        confidence=fair_probability,
-        rationale=f"Top modeled outcome is {outcome_label} with p={fair_probability:.3f}",
-        mode=mode,
-    )
+) -> TradeSignal | None:
+    """Scan all outcomes and return the signal with the highest edge."""
+    market_id = snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id"))
+    best_signal: TradeSignal | None = None
+    best_edge = 0.0
+    for outcome_label, fair_prob in forecast_probs.items():
+        book = books.get(outcome_label)
+        if book is None:
+            continue
+        executable_price = book.best_ask()
+        spread = max(book.best_ask() - book.best_bid(), 0.0)
+        visible_liq = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
+        fee = estimate_fee(executable_price)
+        slippage = estimate_slippage(executable_price, spread, visible_liq, 1.0)
+        edge = compute_edge(fair_prob, executable_price, fee, slippage)
+        if edge > best_edge:
+            best_edge = edge
+            best_signal = TradeSignal(
+                market_id=market_id,
+                token_id=book.token_id,
+                outcome_label=outcome_label,
+                side="buy",
+                fair_probability=fair_prob,
+                executable_price=executable_price,
+                fee_estimate=fee,
+                slippage_estimate=slippage,
+                edge=edge,
+                confidence=fair_prob,
+                rationale=f"Best edge outcome {outcome_label} p={fair_prob:.3f}",
+                mode=mode,
+            )
+    return best_signal
 
 
 def _summarize_backtest_metrics(
@@ -374,18 +333,23 @@ def _run_synthetic_backtest(
             }
         )
 
-        outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-        token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
-        book = _synthetic_book(snapshot, outcome_label, token_id)
-        signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
-        size_notional = capped_kelly(signal.edge, signal.confidence, broker.bankroll)
+        outcome_labels = list(forecast.outcome_probabilities.keys())
+        books: dict[str, BookSnapshot] = {}
+        for ol in outcome_labels:
+            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
+            books[ol] = _synthetic_book(snapshot, ol, tid)
+        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
+        if signal is None:
+            continue
+        book = books[signal.outcome_label]
+        size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
         size = size_notional / max(signal.executable_price, 1e-6)
         if size <= 0:
             continue
         fill = broker.simulate_fill(
             signal,
             spread=book.best_ask() - book.best_bid(),
-            liquidity=(book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0),
+            liquidity=sum(l.size for l in book.bids) + sum(l.size for l in book.asks),
             size=size,
         )
         if fill is None:
@@ -480,32 +444,42 @@ def _run_real_history_backtest(
             }
         )
 
-        outcome_label, fair_probability = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-        panel_row = working_panel.loc[
-            (working_panel["market_id"] == spec.market_id)
-            & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
-            & (working_panel["outcome_label"] == outcome_label)
-        ].copy()
-        if panel_row.empty:
-            skipped_missing_price += 1
-            continue
-        selected = panel_row.iloc[-1]
-        coverage_status = str(selected["coverage_status"])
-        if coverage_status == "stale":
-            skipped_stale_price += 1
-            continue
-        if coverage_status != "ok":
-            skipped_missing_price += 1
-            continue
-        market_price = float(selected["market_price"])
-        fee_per_share = estimate_fee(market_price)
-        edge = compute_edge(fair_probability, market_price, fee_per_share, 0.0)
-        if edge <= 0:
+        best_edge = 0.0
+        best_candidate: dict[str, object] | None = None
+        for outcome_label, fair_probability in forecast.outcome_probabilities.items():
+            panel_row = working_panel.loc[
+                (working_panel["market_id"] == spec.market_id)
+                & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
+                & (working_panel["outcome_label"] == outcome_label)
+            ].copy()
+            if panel_row.empty:
+                continue
+            selected = panel_row.iloc[-1]
+            coverage_status = str(selected["coverage_status"])
+            if coverage_status != "ok":
+                continue
+            market_price = float(selected["market_price"])
+            fee_per_share = estimate_fee(market_price)
+            edge = compute_edge(fair_probability, market_price, fee_per_share, 0.0)
+            if edge > best_edge:
+                best_edge = edge
+                best_candidate = {
+                    "outcome_label": outcome_label,
+                    "fair_probability": fair_probability,
+                    "market_price": market_price,
+                    "edge": edge,
+                    "selected": selected,
+                }
+        if best_candidate is None:
             skipped_non_positive_edge += 1
             continue
+        outcome_label = str(best_candidate["outcome_label"])
+        market_price = float(best_candidate["market_price"])  # type: ignore[arg-type]
+        edge = float(best_candidate["edge"])  # type: ignore[arg-type]
+        selected = best_candidate["selected"]
         size = flat_stake / max(market_price, 1e-6)
         priced_decision_rows += 1
-        age_seconds = selected.get("price_age_seconds")
+        age_seconds = selected.get("price_age_seconds")  # type: ignore[union-attr]
         if age_seconds is not None and pd.notna(age_seconds):
             price_ages.append(float(age_seconds))
         realized_pnl = settle_position(
@@ -528,7 +502,7 @@ def _run_real_history_backtest(
                 "price": market_price,
                 "size": size,
                 "edge": edge,
-                "price_ts": selected.get("price_ts"),
+                "price_ts": selected.get("price_ts"),  # type: ignore[union-attr]
                 "price_age_seconds": age_seconds,
                 "realized_pnl": realized_pnl,
                 "pricing_source": "real_history",
@@ -1603,12 +1577,16 @@ def paper_trader(
         forecast = predict_market(model_path, model_name, spec, feature_frame)
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
             continue
-        outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-        token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
-        book = _fetch_book(clob, snapshot, token_id, outcome_label)
-        signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
+        books: dict[str, BookSnapshot] = {}
+        for ol in forecast.outcome_probabilities:
+            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
+            books[ol] = _fetch_book(clob, snapshot, tid, ol)
+        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
+        if signal is None:
+            continue
+        book = books[signal.outcome_label]
         spread = book.best_ask() - book.best_bid()
-        liquidity = (book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0)
+        liquidity = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
         reason = "accepted"
         fill_payload: dict[str, object] | None = None
         if signal.edge < edge_threshold:
@@ -1618,7 +1596,7 @@ def paper_trader(
         elif liquidity < config.execution.min_liquidity:
             reason = "liquidity_too_low"
         else:
-            size_notional = capped_kelly(signal.edge, signal.confidence, broker.bankroll)
+            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
             if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
@@ -1684,11 +1662,14 @@ def live_trader(
             continue
         feature_frame = builder.build_live_row(spec, horizon=horizon)
         forecast = predict_market(model_path, model_name, spec, feature_frame)
-        outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-        token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
-        book = _fetch_book(clob, snapshot, token_id, outcome_label)
-        signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="live")
-        size_notional = capped_kelly(signal.edge, signal.confidence, 1000.0)
+        books: dict[str, BookSnapshot] = {}
+        for ol in forecast.outcome_probabilities:
+            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
+            books[ol] = _fetch_book(clob, snapshot, tid, ol)
+        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="live")
+        if signal is None:
+            continue
+        size_notional = capped_kelly(signal.edge, signal.fair_probability, 1000.0, signal.executable_price)
         size = size_notional / max(signal.executable_price, 1e-6)
         if size <= 0:
             continue
@@ -1855,19 +1836,23 @@ def scan_daemon(
                 continue
             if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
                 continue
-            outcome_label, _ = max(forecast.outcome_probabilities.items(), key=lambda item: item[1])
-            token_id = spec.token_ids[spec.outcome_labels().index(outcome_label)] if spec.token_ids else outcome_label
-            book = _fetch_book(clob, snapshot, token_id, outcome_label)
-            signal = _signal_from_forecast(snapshot, forecast.outcome_probabilities, book, mode="paper")
+            books: dict[str, BookSnapshot] = {}
+            for ol in forecast.outcome_probabilities:
+                tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
+                books[ol] = _fetch_book(clob, snapshot, tid, ol)
+            signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
+            if signal is None:
+                continue
+            book = books[signal.outcome_label]
             spread = book.best_ask() - book.best_bid()
-            liquidity = (book.bids[0].size if book.bids else 0.0) + (book.asks[0].size if book.asks else 0.0)
+            liquidity = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
             if signal.edge < edge_threshold:
                 continue
             if not spread_ok(book.best_bid(), book.best_ask(), config.execution.max_spread_bps):
                 continue
             if liquidity < config.execution.min_liquidity:
                 continue
-            size_notional = capped_kelly(signal.edge, signal.confidence, brk.bankroll)
+            size_notional = capped_kelly(signal.edge, signal.fair_probability, brk.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
             if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
@@ -1877,7 +1862,7 @@ def scan_daemon(
             fill = brk.simulate_fill(signal, spread=spread, liquidity=liquidity, size=size)
             if fill is not None:
                 current_exposure_by_city[spec.city] = current_city_exposure + size_notional
-                logger.info("Entry fill: %s %s edge=%.4f", spec.city, outcome_label, signal.edge)
+                logger.info("Entry fill: %s %s edge=%.4f", spec.city, signal.outcome_label, signal.edge)
 
     # -- wire up scanner and run ----------------------------------------------
     state_path = config.scanner.state_path
@@ -1899,6 +1884,463 @@ def scan_daemon(
     console.print(f"Monitoring {len(snapshot_cache)} markets, refresh every {refresh_interval} cycles")
     scanner.run_loop()
     console.print("Scan daemon stopped.")
+
+
+# ===========================================================================
+# Track A: L2 monitoring commands
+# ===========================================================================
+
+
+@app.command("monitor-l2")
+def monitor_l2(
+    interval: int = typer.Option(1800, help="Seconds between collection cycles"),
+    window_hours: float = typer.Option(48.0, help="Only collect markets settling within this window"),
+    max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+) -> None:
+    """Continuously monitor L2 order books for markets near settlement."""
+
+    import signal as sig
+    import time
+
+    from pmtmax.monitoring.l2_monitor import append_records_jsonl, collect_l2_snapshots
+
+    config, _, http, _, _, _ = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    output_dir = config.monitoring.l2_output_dir
+    effective_interval = interval or config.monitoring.l2_interval_seconds
+    effective_window = window_hours or config.monitoring.l2_settlement_window_hours
+
+    running = True
+
+    def _shutdown(signum: int, frame: object) -> None:
+        nonlocal running
+        running = False
+
+    sig.signal(sig.SIGINT, _shutdown)
+    sig.signal(sig.SIGTERM, _shutdown)
+
+    cycle = 0
+    console.print(f"L2 monitor: interval={effective_interval}s, window={effective_window}h, max_cycles={max_cycles}")
+
+    while running:
+        snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+        records = collect_l2_snapshots(clob, snapshots, settlement_window_hours=effective_window)
+
+        if records:
+            path = append_records_jsonl(records, output_dir)
+            console.print(f"Cycle {cycle}: {len(records)} records → {path}")
+
+            table = Table(title=f"L2 Snapshot — Cycle {cycle}")
+            table.add_column("City")
+            table.add_column("Outcome")
+            table.add_column("Bid")
+            table.add_column("Ask")
+            table.add_column("Spread")
+            table.add_column("Hours Left")
+            for r in records[:20]:
+                table.add_row(
+                    r.city,
+                    r.outcome_label,
+                    f"{r.best_bid:.4f}",
+                    f"{r.best_ask:.4f}",
+                    f"{r.spread:.4f}",
+                    f"{r.hours_to_settlement:.1f}",
+                )
+            console.print(table)
+        else:
+            console.print(f"Cycle {cycle}: no markets within {effective_window}h window")
+
+        cycle += 1
+        if 0 < max_cycles <= cycle:
+            break
+        if running:
+            time.sleep(effective_interval)
+
+    console.print("L2 monitor stopped.")
+
+
+@app.command("analyze-l2")
+def analyze_l2(
+    data_dir: Path = typer.Option(Path("data/l2_timeseries"), help="L2 data directory"),
+    output: Path = typer.Option(Path("artifacts/l2_analysis.json"), help="Output analysis JSON"),
+) -> None:
+    """Analyze collected L2 time-series data by hours-to-settlement buckets."""
+
+    from pmtmax.monitoring.l2_monitor import analyze_l2_timeseries
+
+    config, _, _, _, _, _ = _runtime(include_stores=False)
+    effective_dir = data_dir if data_dir != Path("data/l2_timeseries") else config.monitoring.l2_output_dir
+    analysis = analyze_l2_timeseries(effective_dir)
+
+    dump_json(output, analysis)
+
+    table = Table(title="L2 Analysis by Hours-to-Settlement")
+    table.add_column("Bucket")
+    table.add_column("Count")
+    table.add_column("Median Spread")
+    table.add_column("Mean Bid Depth")
+    table.add_column("Mean Ask Depth")
+    table.add_column("Tradeable %")
+    for bucket in analysis.get("buckets", []):
+        table.add_row(
+            bucket["bucket"],
+            str(bucket["count"]),
+            f"{bucket['median_spread']:.4f}" if bucket["median_spread"] is not None else "—",
+            f"{bucket['mean_bid_depth']:.2f}" if bucket["mean_bid_depth"] is not None else "—",
+            f"{bucket['mean_ask_depth']:.2f}" if bucket["mean_ask_depth"] is not None else "—",
+            f"{bucket['tradeable_pct']:.1f}%" if bucket["tradeable_pct"] is not None else "—",
+        )
+    console.print(table)
+    console.print(f"Total records: {analysis.get('total_records', 0)}")
+    console.print(f"Output: {output}")
+
+
+# ===========================================================================
+# Track B: forecast information service commands
+# ===========================================================================
+
+
+@app.command("forecast-report")
+def forecast_report(
+    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("ts_emos", help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    telegram: bool = typer.Option(False, help="Send to Telegram"),
+    firebase: bool = typer.Option(False, help="Publish to Firebase"),
+    output: Path = typer.Option(Path("artifacts/forecast_report.json"), help="Output JSON"),
+) -> None:
+    """Generate a one-shot forecast report with optional Telegram/Firebase delivery."""
+
+    from pmtmax.services.forecast_summary import build_forecast_summaries
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None,
+        snapshot_dir=None, fixture_dir=None, models=config.weather.models or None,
+    )
+    snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    summaries = build_forecast_summaries(snapshots, model_path, model_name, clob, builder, horizon=horizon)
+
+    # Rich table
+    table = Table(title="Forecast Report")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Mean ± Std")
+    table.add_column("Top Outcome")
+    table.add_column("Top Mispricing")
+    for s in summaries:
+        top_str = ""
+        if s.top_outcomes:
+            top = s.top_outcomes[0]
+            top_str = f"{top.get('label', '?')} ({top.get('prob', 0):.1%})"
+        mis_str = ""
+        if s.mispricings:
+            mp = s.mispricings[0]
+            mis_str = f"{mp.outcome_label} edge={mp.edge:+.1%}"
+        table.add_row(s.city, str(s.target_local_date), f"{s.mean_f} ± {s.std_f}", top_str, mis_str)
+    console.print(table)
+
+    # Save
+    payload = [s.model_dump(mode="json") for s in summaries]
+    dump_json(output, payload)
+    console.print(f"Wrote {output}")
+
+    # Telegram
+    if telegram and config.telegram.enabled:
+        from pmtmax.services.telegram_bot import TelegramNotifier
+
+        notifier = TelegramNotifier(config.telegram.bot_token, config.telegram.chat_id)
+        notifier.send_forecast_report(summaries)
+        console.print("Sent Telegram notifications")
+    elif telegram:
+        console.print("[yellow]Telegram not configured (set PMTMAX_TELEGRAM_BOT_TOKEN and PMTMAX_TELEGRAM_CHAT_ID)[/]")
+
+    # Firebase
+    if firebase and config.firebase.enabled:
+        from pmtmax.services.forecast_publisher import ForecastPublisher
+
+        publisher = ForecastPublisher(
+            bucket_name=config.firebase.bucket_name,
+            prefix=config.firebase.prefix,
+            credentials_json=config.firebase.credentials_json or None,
+        )
+        result = publisher.publish(summaries, dry_run=False)
+        console.print(f"Published {result['count']} forecasts to Firebase")
+    elif firebase:
+        console.print("[yellow]Firebase not configured[/]")
+
+
+@app.command("forecast-daemon")
+def forecast_daemon(
+    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("ts_emos", help="Model name"),
+    interval: int = typer.Option(21600, help="Seconds between forecast cycles (default 6h)"),
+    max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    telegram: bool = typer.Option(True, help="Send to Telegram each cycle"),
+    firebase: bool = typer.Option(True, help="Publish to Firebase each cycle"),
+) -> None:
+    """Continuously publish forecast reports on a schedule."""
+
+    import signal as sig
+    import time
+
+    from pmtmax.services.forecast_summary import build_forecast_summaries
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None,
+        snapshot_dir=None, fixture_dir=None, models=config.weather.models or None,
+    )
+
+    running = True
+
+    def _shutdown(signum: int, frame: object) -> None:
+        nonlocal running
+        running = False
+
+    sig.signal(sig.SIGINT, _shutdown)
+    sig.signal(sig.SIGTERM, _shutdown)
+
+    cycle = 0
+    console.print(f"Forecast daemon: interval={interval}s, max_cycles={max_cycles}")
+
+    while running:
+        try:
+            snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+            summaries = build_forecast_summaries(snapshots, model_path, model_name, clob, builder, horizon=horizon)
+
+            payload = [s.model_dump(mode="json") for s in summaries]
+            out = Path("artifacts/forecast_report.json")
+            dump_json(out, payload)
+            console.print(f"Cycle {cycle}: {len(summaries)} forecasts → {out}")
+
+            if telegram and config.telegram.enabled:
+                from pmtmax.services.telegram_bot import TelegramNotifier
+
+                notifier = TelegramNotifier(config.telegram.bot_token, config.telegram.chat_id)
+                notifier.send_forecast_report(summaries)
+
+            if firebase and config.firebase.enabled:
+                from pmtmax.services.forecast_publisher import ForecastPublisher
+
+                publisher = ForecastPublisher(
+                    bucket_name=config.firebase.bucket_name,
+                    prefix=config.firebase.prefix,
+                    credentials_json=config.firebase.credentials_json or None,
+                )
+                publisher.publish(summaries, dry_run=False)
+
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Cycle {cycle} error: {exc}[/]")
+
+        cycle += 1
+        if 0 < max_cycles <= cycle:
+            break
+        if running:
+            time.sleep(interval)
+
+    console.print("Forecast daemon stopped.")
+
+
+# ===========================================================================
+# Track C: market making commands
+# ===========================================================================
+
+
+@app.command("paper-mm")
+def paper_mm(
+    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("ts_emos", help="Model name"),
+    interval: int = typer.Option(60, help="Seconds between MM cycles"),
+    max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+) -> None:
+    """Run paper market-making simulation against live CLOB books."""
+
+    import signal as sig
+    import time
+
+    from pmtmax.execution.paper_market_maker import PaperMarketMaker
+    from pmtmax.execution.quoter import Quoter
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None,
+        snapshot_dir=None, fixture_dir=None, models=config.weather.models or None,
+    )
+
+    mm_config = config.market_making
+    risk_limits = RiskLimits(
+        max_position_per_outcome=mm_config.max_position_per_outcome,
+        max_total_exposure=mm_config.max_total_exposure,
+        max_loss=mm_config.max_loss,
+    )
+    quoter = Quoter(
+        base_half_spread=mm_config.base_half_spread,
+        skew_factor=mm_config.skew_factor,
+        base_size=mm_config.base_size,
+    )
+    mm = PaperMarketMaker(risk_limits=risk_limits)
+
+    running = True
+
+    def _shutdown(signum: int, frame: object) -> None:
+        nonlocal running
+        running = False
+
+    sig.signal(sig.SIGINT, _shutdown)
+    sig.signal(sig.SIGTERM, _shutdown)
+
+    cycle = 0
+    console.print(f"Paper MM: interval={interval}s, max_cycles={max_cycles}")
+
+    while running:
+        try:
+            snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+
+            for snapshot in snapshots:
+                spec = snapshot.spec
+                if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
+                    continue
+
+                feature_frame = builder.build_live_row(spec, horizon=horizon)
+                forecast = predict_market(model_path, model_name, spec, feature_frame)
+
+                # Build token_id mapping and fetch books
+                token_map: dict[str, str] = {}
+                books: dict[str, BookSnapshot] = {}
+                for ol in forecast.outcome_probabilities:
+                    idx = spec.outcome_labels().index(ol) if ol in spec.outcome_labels() else -1
+                    if idx < 0 or idx >= len(spec.token_ids):
+                        continue
+                    tid = spec.token_ids[idx]
+                    token_map[ol] = tid
+                    books[ol] = _fetch_book(clob, snapshot, tid, ol)
+
+                quotes = quoter.compute_quotes(
+                    forecast.outcome_probabilities, token_map, mm.inventory, risk_limits,
+                )
+
+                fills = mm.simulate_quotes(quotes, books)
+                if fills:
+                    console.print(f"  {spec.city}: {len(fills)} fills")
+
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Cycle {cycle} error: {exc}[/]")
+
+        summary = mm.summary()
+        console.print(f"Cycle {cycle}: fills={summary['total_fills']}, pnl={summary['net_pnl']:.4f}, exposure={summary['total_exposure']:.2f}")
+
+        cycle += 1
+        if 0 < max_cycles <= cycle:
+            break
+        if running:
+            time.sleep(interval)
+
+    console.print("Paper MM stopped.")
+    console.print_json(data=mm.summary())
+
+
+@app.command("live-mm")
+def live_mm(
+    model_path: Path = typer.Argument(..., help="Path to trained model artifact"),
+    model_name: str = typer.Option("ts_emos", help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    dry_run: bool = typer.Option(True, help="Compute quotes only, do not post"),
+    post_orders: bool = typer.Option(False, help="Actually post orders (requires live trading gates)"),
+) -> None:
+    """Run live market-making with quote computation and optional order posting."""
+
+    from pmtmax.execution.live_market_maker import LiveMarketMaker
+    from pmtmax.execution.quoter import Quoter
+
+    config, env, http, _, _, openmeteo = _runtime(include_stores=False)
+    broker = LiveBroker(env)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http, openmeteo=openmeteo, duckdb_store=None, parquet_store=None,
+        snapshot_dir=None, fixture_dir=None, models=config.weather.models or None,
+    )
+
+    mm_config = config.market_making
+    risk_limits = RiskLimits(
+        max_position_per_outcome=mm_config.max_position_per_outcome,
+        max_total_exposure=mm_config.max_total_exposure,
+        max_loss=mm_config.max_loss,
+    )
+    quoter = Quoter(
+        base_half_spread=mm_config.base_half_spread,
+        skew_factor=mm_config.skew_factor,
+        base_size=mm_config.base_size,
+    )
+    live_mm_engine = LiveMarketMaker(broker=broker, risk_limits=risk_limits)
+
+    should_post = post_orders and not dry_run
+    if should_post:
+        preflight = broker.preflight(require_posting=True)
+        if not preflight.ok:
+            console.print("[red]Live preflight failed:[/]")
+            for msg in preflight.messages:
+                console.print(f"  {msg}")
+            raise typer.Exit(1)
+
+    snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    all_results: list[dict] = []
+
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
+            continue
+
+        try:
+            feature_frame = builder.build_live_row(spec, horizon=horizon)
+            forecast = predict_market(model_path, model_name, spec, feature_frame)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Forecast failed for {spec.city}: {exc}[/]")
+            continue
+
+        token_map: dict[str, str] = {}
+        for ol in forecast.outcome_probabilities:
+            idx = spec.outcome_labels().index(ol) if ol in spec.outcome_labels() else -1
+            if idx < 0 or idx >= len(spec.token_ids):
+                continue
+            token_map[ol] = spec.token_ids[idx]
+
+        quotes = quoter.compute_quotes(
+            forecast.outcome_probabilities, token_map, live_mm_engine.active_order_ids, risk_limits,
+        )
+
+        results = live_mm_engine.update_quotes(quotes, market_id=spec.market_id, dry_run=not should_post)
+
+        table = Table(title=f"{spec.city} — {spec.target_local_date}")
+        table.add_column("Outcome")
+        table.add_column("Bid")
+        table.add_column("Ask")
+        table.add_column("Size")
+        table.add_column("Status")
+        for q in quotes:
+            status = "dry_run" if not should_post else "posted"
+            table.add_row(q.outcome_label, f"{q.bid_price:.4f}", f"{q.ask_price:.4f}", f"{q.bid_size:.2f}", status)
+        console.print(table)
+
+        all_results.extend(results)
+
+    dump_json(Path("artifacts/live_mm_preview.json"), all_results)
+    console.print(f"Wrote artifacts/live_mm_preview.json ({len(all_results)} entries)")
 
 
 def run() -> None:

@@ -77,6 +77,7 @@ backtest:
   slippage_bps: 50
 
 execution:
+  fee_bps: 200
   mode: paper
   live_trading: false
   confirm_live_trading: ""
@@ -116,3 +117,23 @@ firebase:
   bucket_name: ""
   prefix: pmtmax
   credentials_json: ""
+
+monitoring:
+  l2_interval_seconds: 900
+  l2_settlement_window_hours: 48.0
+  l2_output_dir: data/l2_timeseries
+
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+
+market_making:
+  enabled: false
+  base_half_spread: 0.02
+  skew_factor: 0.5
+  base_size: 10.0
+  requote_threshold: 0.01
+  max_position_per_outcome: 100.0
+  max_total_exposure: 1000.0
+  max_loss: 500.0

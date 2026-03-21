@@ -8,10 +8,19 @@ from typing import Any
 
 import pandas as pd
 
+import json
+
+import numpy as np
+
 from pmtmax.modeling.advanced.aifs_nwp_blend import AifsNwpBlendModel
 from pmtmax.modeling.advanced.det2prob_nn import Det2ProbNNModel
+from pmtmax.modeling.advanced.flexible_flow_nn import FlexibleProbNNModel
+from pmtmax.modeling.advanced.pinn_postproc import PermutationInvariantNNModel
+from pmtmax.modeling.advanced.spatial_gnn import SpatialGNNModel
+from pmtmax.modeling.advanced.transformer_postproc import TransformerPostprocModel
 from pmtmax.modeling.baselines.climatology import ClimatologyModel
 from pmtmax.modeling.baselines.gaussian_emos import GaussianEMOSModel
+from pmtmax.modeling.baselines.heteroscedastic_linear import HeteroscedasticLinearModel
 from pmtmax.modeling.baselines.leadtime_continuous import LeadTimeContinuousModel
 from pmtmax.modeling.baselines.raw_nwp import RawBestModelBaseline, RawMultiModelAverageBaseline
 from pmtmax.modeling.baselines.ts_emos import TSEmosModel
@@ -73,6 +82,20 @@ def train_model(model_name: str, frame: pd.DataFrame, artifacts_dir: Path) -> Mo
         ai = [name for name in features if "aifs" in name]
         model = AifsNwpBlendModel(nwp_features=nwp, ai_features=ai)
         model.fit(clean_frame)
+    elif model_name == "heteroscedastic_linear":
+        model = HeteroscedasticLinearModel(features)
+        model.fit(clean_frame)
+    elif model_name == "flexible_flow_nn":
+        model = FlexibleProbNNModel(features)
+        model.fit(clean_frame)
+    elif model_name == "spatial_gnn":
+        gnn_features = [f for f in features if f not in ("neighbor_mean_temp", "neighbor_spread")]
+        model = SpatialGNNModel(gnn_features)
+        model.fit(clean_frame)
+    elif model_name == "transformer_postproc":
+        model = _train_transformer(clean_frame)
+    elif model_name == "pinn_postproc":
+        model = _train_pinn(clean_frame)
     else:
         msg = f"Unsupported trainable model: {model_name}"
         raise ValueError(msg)
@@ -90,6 +113,55 @@ def train_model(model_name: str, frame: pd.DataFrame, artifacts_dir: Path) -> Mo
         metrics={},
         path=str(path),
     )
+
+
+def _extract_sequences(frame: pd.DataFrame, column: str, seq_len: int) -> np.ndarray:
+    """Extract fixed-length sequences from a JSON column, zero-padding if needed."""
+
+    rows = []
+    for raw in frame[column]:
+        arr = json.loads(raw) if isinstance(raw, str) else list(raw)
+        arr = [float(v) if v is not None else 0.0 for v in arr]
+        if len(arr) < seq_len:
+            arr = arr + [0.0] * (seq_len - len(arr))
+        rows.append(arr[:seq_len])
+    return np.array(rows, dtype=np.float32)
+
+
+def _train_transformer(frame: pd.DataFrame) -> TransformerPostprocModel:
+    """Train transformer postprocessor from tabular data with daily_max features as pseudo-sequence."""
+
+    daily_max_cols = sorted(col for col in frame.columns if col.endswith("_model_daily_max"))
+    if not daily_max_cols:
+        daily_max_cols = ["model_daily_max"]
+    seq_len = len(daily_max_cols)
+    sequences = frame[daily_max_cols].to_numpy(dtype=np.float32)
+    if sequences.ndim == 1:
+        sequences = sequences.reshape(-1, 1)
+    targets = frame["realized_daily_max"].to_numpy(dtype=np.float32)
+    model = TransformerPostprocModel(sequence_length=seq_len)
+    model.fit(sequences, targets)
+    model.feature_names = daily_max_cols
+    return model
+
+
+def _train_pinn(frame: pd.DataFrame) -> PermutationInvariantNNModel:
+    """Train permutation-invariant NN from NWP ensemble member daily_max columns."""
+
+    daily_max_cols = sorted(col for col in frame.columns if col.endswith("_model_daily_max"))
+    if not daily_max_cols:
+        daily_max_cols = ["model_daily_max"]
+    member_dim = len(daily_max_cols)
+    ensemble = frame[daily_max_cols].to_numpy(dtype=np.float32)
+    if ensemble.ndim == 1:
+        ensemble = ensemble.reshape(-1, 1)
+    # PINN expects (batch, members, member_dim) — use (batch, members, 1)
+    ensemble_3d = ensemble.reshape(ensemble.shape[0], member_dim, 1)
+    targets = frame["realized_daily_max"].to_numpy(dtype=np.float32)
+    model = PermutationInvariantNNModel(member_dim=1)
+    model.fit(ensemble_3d, targets)
+    model.feature_names = daily_max_cols
+    return model
 
 
 def load_model(path: Path) -> Any:

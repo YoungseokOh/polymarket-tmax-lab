@@ -36,6 +36,11 @@ class PaperBroker:
     ) -> ExecutionFill | None:
         """Simulate a conservative fill if edge stays positive after costs."""
 
+        # Cap order size to available ask-side liquidity
+        ask_liq = liquidity / 2.0 if liquidity > 0 else 0.0
+        size = min(size, ask_liq)
+        if size <= 0:
+            return None
         notional = signal.executable_price * size
         total_fee = estimate_fee(notional)
         # compute_edge operates in per-share probability/price units, so use a 1-share fee estimate here.
