@@ -220,6 +220,7 @@ If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with 
 The default research CLI no longer reads `tests/fixtures/truth`; fixture truth remains test/demo-only unless you wire it explicitly in code.
 `build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
 The repo also ships a recent 3-city benchmark for official history evaluation in `configs/market_inventory/recent_core_temperature_event_urls.json` and `configs/market_inventory/recent_core_temperature_snapshots.json`.
+For a reproducible lightweight rerun of that benchmark, use `configs/recent-core-benchmark.yaml` and `scripts/run_recent_core_benchmark.py`.
 
 3. Start from a clean canonical warehouse if you want to replace the existing seed data.
 
@@ -345,6 +346,12 @@ Synthetic outputs are written to `artifacts/backtest_metrics.json` and
 `artifacts/backtest_trades_real_history.json`. Quote-proxy runs write
 `artifacts/backtest_metrics_quote_proxy.json` and
 `artifacts/backtest_trades_quote_proxy.json`.
+
+To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into isolated per-city directories, use:
+
+```bash
+uv run python scripts/run_recent_core_benchmark.py
+```
 
 ## Paper Trading Workflow
 ```bash

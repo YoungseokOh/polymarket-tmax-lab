@@ -1,0 +1,4 @@
+extends: research.yaml
+weather:
+  models:
+    - ecmwf_ifs025

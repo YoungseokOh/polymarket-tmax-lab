@@ -73,6 +73,8 @@ uv run pmtmax compact-warehouse
 - active supported-city watchlist: `configs/market_inventory/active_temperature_watchlist.json`
 - recent core benchmark URLs: `configs/market_inventory/recent_core_temperature_event_urls.json`
 - recent core benchmark snapshots: `configs/market_inventory/recent_core_temperature_snapshots.json`
+- recent core benchmark config: `configs/recent-core-benchmark.yaml`
+- recent core benchmark runner: `scripts/run_recent_core_benchmark.py`
 
 `refresh_historical_event_urls.py`는 Gamma grouped weather/temperature events에서 supported closed backlog를 찾아 candidate/page-fetch/status manifest를 남기고, `collected`만 append-only URL manifest에 publish한다.
 retryable 상태는 `truth_source_lag`, `truth_request_failed`로 남기고 다음 batch에서 다시 classify할 수 있다.
