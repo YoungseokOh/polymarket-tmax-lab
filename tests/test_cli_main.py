@@ -15,6 +15,7 @@ from pmtmax.cli.main import (
     _load_snapshots,
     _quote_proxy_prices,
     _run_quote_proxy_backtest,
+    _resolve_signal_horizon_with_reason,
     _resolve_opportunity_shadow_horizon,
     _run_real_history_backtest,
     live_mm,
@@ -26,7 +27,7 @@ from pmtmax.cli.main import (
     summarize_truth_coverage,
 )
 from pmtmax.config.settings import EnvSettings
-from pmtmax.markets.repository import bundled_market_snapshots
+from pmtmax.markets.repository import bundled_market_snapshots, load_market_snapshots
 from pmtmax.storage.schemas import BookLevel, BookSnapshot, OpportunityObservation
 
 
@@ -35,6 +36,22 @@ def _future_snapshot(city: str = "Seoul"):
     assert snapshot.spec is not None
     snapshot.spec = snapshot.spec.model_copy(
         update={"target_local_date": datetime.now(tz=UTC).date() + timedelta(days=1)}
+    )
+    return snapshot
+
+
+def _future_snapshot_days(city: str, days: int):
+    if city == "Seoul":
+        snapshot = bundled_market_snapshots([city])[0].model_copy(deep=True)
+    else:
+        snapshot = next(
+            snap.model_copy(deep=True)
+            for snap in load_market_snapshots(Path("configs/market_inventory/recent_core_temperature_snapshots.json"))
+            if snap.spec is not None and snap.spec.city == city
+        )
+    assert snapshot.spec is not None
+    snapshot.spec = snapshot.spec.model_copy(
+        update={"target_local_date": datetime.now(tz=UTC).date() + timedelta(days=days)}
     )
     return snapshot
 
@@ -692,6 +709,95 @@ def test_opportunity_report_marks_missing_books_explicitly(
     payload = json.loads(output.read_text())
     assert payload[0]["reason"] == "missing_book"
     assert payload[0]["book_source_counts"] == {"missing": 1}
+
+
+def test_resolve_signal_horizon_with_reason_applies_recent_policy() -> None:
+    now_utc = datetime(2026, 3, 23, 3, 0, tzinfo=UTC)
+    london_snapshot = _future_snapshot_days("London", 1)
+    nyc_snapshot = _future_snapshot_days("NYC", 1)
+    seoul_snapshot = bundled_market_snapshots(["Seoul"])[0]
+    assert london_snapshot.spec is not None
+    assert nyc_snapshot.spec is not None
+    assert seoul_snapshot.spec is not None
+
+    policy = {
+        "London": ["previous_evening"],
+        "NYC": ["market_open", "previous_evening"],
+        "Seoul": ["market_open", "previous_evening", "morning_of"],
+    }
+
+    london_spec = london_snapshot.spec.model_copy(update={"target_local_date": datetime(2026, 3, 25, tzinfo=UTC).date()})
+    nyc_spec = nyc_snapshot.spec.model_copy(update={"target_local_date": datetime(2026, 3, 25, tzinfo=UTC).date()})
+    seoul_spec = seoul_snapshot.spec.model_copy(update={"target_local_date": datetime(2026, 3, 23, tzinfo=UTC).date()})
+
+    assert _resolve_signal_horizon_with_reason(
+        london_spec,
+        now_utc=now_utc,
+        horizon="policy",
+        horizon_policy=policy,
+    ) == ("market_open", "policy_filtered")
+    assert _resolve_signal_horizon_with_reason(
+        nyc_spec,
+        now_utc=now_utc,
+        horizon="policy",
+        horizon_policy=policy,
+    ) == ("market_open", None)
+    assert _resolve_signal_horizon_with_reason(
+        seoul_spec,
+        now_utc=now_utc,
+        horizon="policy",
+        horizon_policy=policy,
+    ) == ("morning_of", None)
+
+
+def test_opportunity_report_marks_policy_filtered_markets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot_days("London", 2)
+    assert snapshot.spec is not None
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.02})(),
+            "execution": type(
+                "_Exec",
+                (),
+                {
+                    "max_spread_bps": 500,
+                    "min_liquidity": 10.0,
+                    "stale_forecast_minutes": 60,
+                },
+            )(),
+        },
+    )()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr(
+        "pmtmax.cli.main._load_recent_horizon_policy",
+        lambda path=Path("configs/recent-core-horizon-policy.yaml"): {"London": ["previous_evening"]},
+    )
+
+    output = tmp_path / "opportunity_report_policy.json"
+    opportunity_report(output=output)
+
+    payload = json.loads(output.read_text())
+    assert payload[0]["reason"] == "policy_filtered"
+    assert payload[0]["decision_horizon"] == "market_open"
 
 
 def test_evaluate_market_signal_identifies_fee_killed_edge() -> None:

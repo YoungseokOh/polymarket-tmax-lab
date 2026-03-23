@@ -94,11 +94,19 @@ uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.
 uv run pmtmax paper-trader --model-name gaussian_emos
 ```
 
+`paper-trader` defaults to `--horizon policy`, which applies the checked-in
+city-specific horizon policy from `configs/recent-core-horizon-policy.yaml`.
+Markets outside the recommended horizon set are reported explicitly as
+`policy_filtered`.
+
 7. Audit active markets for executable opportunities with explicit book status:
 
 ```bash
 uv run pmtmax opportunity-report --model-name gaussian_emos
 ```
+
+`opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
+use the same policy-aware horizon selection where applicable.
 
 ## Install
 ```bash
@@ -364,6 +372,10 @@ uv run pmtmax paper-trader \
 
 Paper trading uses active discovered markets when available. If no active max-temperature markets are currently listed on Polymarket, the command exits cleanly with no fills.
 `paper-trader`, `opportunity-report`, `paper-mm`, `live-trader`, and `live-mm` now use real CLOB books by default and report missing books explicitly instead of silently fabricating synthetic liquidity.
+`paper-trader`, `live-trader`, `scan-daemon`, `opportunity-report`, and `opportunity-shadow`
+also default to the checked-in recent horizon policy. The current recommended
+set is `Seoul=market_open+previous_evening+morning_of`,
+`NYC=market_open+previous_evening`, and `London=previous_evening`.
 
 ## Opportunity Workflow
 ```bash

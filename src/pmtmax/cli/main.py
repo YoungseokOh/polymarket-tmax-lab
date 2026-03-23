@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import typer
@@ -71,11 +72,12 @@ from pmtmax.storage.schemas import (
     TradeSignal,
 )
 from pmtmax.storage.warehouse import DataWarehouse, backup_duckdb_file, ordered_legacy_paths
-from pmtmax.utils import dump_json, load_json, set_global_seed, stable_hash
+from pmtmax.utils import dump_json, load_json, load_yaml_with_extends, set_global_seed, stable_hash
 from pmtmax.weather.openmeteo_client import OpenMeteoClient
 
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
+DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
 
 
 def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
@@ -96,6 +98,90 @@ def _runtime(include_stores: bool = True) -> tuple:
     parquet_store = ParquetStore(config.app.parquet_dir) if include_stores else None
     openmeteo = OpenMeteoClient(http, config.weather.openmeteo_base_url, config.weather.archive_base_url)
     return config, env, http, duckdb_store, parquet_store, openmeteo
+
+
+def _load_recent_horizon_policy(path: Path = DEFAULT_RECENT_HORIZON_POLICY_PATH) -> dict[str, list[str]]:
+    """Load the repo's city-specific recent horizon policy."""
+
+    if not path.exists():
+        return {}
+    payload = load_yaml_with_extends(path.resolve())
+    cities = payload.get("cities", {})
+    result: dict[str, list[str]] = {}
+    if not isinstance(cities, dict):
+        return result
+    for city, city_payload in cities.items():
+        if not isinstance(city_payload, dict):
+            continue
+        allowed_horizons = city_payload.get("allowed_horizons", [])
+        result[str(city)] = [str(horizon) for horizon in allowed_horizons]
+    return result
+
+
+def _select_policy_candidate_horizon(spec: MarketSpec, *, now_utc: datetime) -> str | None:
+    """Return the default policy horizon for an active market based on local day."""
+
+    local_today = now_utc.astimezone(ZoneInfo(spec.timezone)).date()
+    delta_days = (spec.target_local_date - local_today).days
+    if delta_days < 0:
+        return None
+    if delta_days == 0:
+        return "morning_of"
+    if delta_days == 1:
+        return "previous_evening"
+    return "market_open"
+
+
+def _policy_allows_horizon(
+    spec: MarketSpec,
+    *,
+    decision_horizon: str,
+    horizon_policy: dict[str, list[str]],
+) -> bool:
+    """Return whether the city-level horizon policy allows this horizon."""
+
+    allowed_horizons = horizon_policy.get(spec.city)
+    if not allowed_horizons:
+        return True
+    return decision_horizon in allowed_horizons
+
+
+def _resolve_signal_horizon(
+    spec: MarketSpec,
+    *,
+    now_utc: datetime,
+    horizon: str,
+    horizon_policy: dict[str, list[str]],
+) -> str | None:
+    """Resolve the execution horizon for active-market signal paths."""
+
+    if horizon != "policy":
+        return horizon
+    candidate = _select_policy_candidate_horizon(spec, now_utc=now_utc)
+    if candidate is None:
+        return None
+    if not _policy_allows_horizon(spec, decision_horizon=candidate, horizon_policy=horizon_policy):
+        return None
+    return candidate
+
+
+def _resolve_signal_horizon_with_reason(
+    spec: MarketSpec,
+    *,
+    now_utc: datetime,
+    horizon: str,
+    horizon_policy: dict[str, list[str]],
+) -> tuple[str | None, str | None]:
+    """Resolve a live-signal horizon and explain policy skips."""
+
+    if horizon != "policy":
+        return horizon, None
+    candidate = _select_policy_candidate_horizon(spec, now_utc=now_utc)
+    if candidate is None:
+        return None, "past_market"
+    if not _policy_allows_horizon(spec, decision_horizon=candidate, horizon_policy=horizon_policy):
+        return candidate, "policy_filtered"
+    return candidate, None
 
 
 def _backfill_pipeline(config: Any, http: CachedHttpClient, openmeteo: OpenMeteoClient) -> BackfillPipeline:
@@ -2052,7 +2138,7 @@ def paper_trader(
     model_name: str = "gaussian_emos",
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
-    horizon: str = "morning_of",
+    horizon: str = "policy",
     bankroll: float = 10_000.0,
     min_edge: float | None = None,
 ) -> None:
@@ -2072,6 +2158,7 @@ def paper_trader(
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    horizon_policy = _load_recent_horizon_policy()
 
     current_exposure_by_city: dict[str, float] = {}
     results: list[dict[str, object]] = []
@@ -2079,9 +2166,29 @@ def paper_trader(
         spec = snapshot.spec
         if spec is None:
             continue
-        if spec.target_local_date < datetime.now(tz=UTC).date():
+        now_utc = datetime.now(tz=UTC)
+        if spec.target_local_date < now_utc.date():
             continue
-        feature_frame = builder.build_live_row(spec, horizon=horizon)
+        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+            spec,
+            now_utc=now_utc,
+            horizon=horizon,
+            horizon_policy=horizon_policy,
+        )
+        if horizon_reason == "policy_filtered":
+            results.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "decision_horizon": decision_horizon,
+                    "reason": "policy_filtered",
+                }
+            )
+            continue
+        if decision_horizon is None:
+            continue
+        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
         forecast = predict_market(model_path, model_name, spec, feature_frame)
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
             continue
@@ -2121,6 +2228,7 @@ def paper_trader(
                 "market_id": spec.market_id,
                 "city": spec.city,
                 "question": spec.question,
+                "decision_horizon": decision_horizon,
                 "outcome_label": signal.outcome_label if isinstance(signal, TradeSignal) else None,
                 "fair_probability": signal.fair_probability if isinstance(signal, TradeSignal) else None,
                 "executable_price": signal.executable_price if isinstance(signal, TradeSignal) else None,
@@ -2140,7 +2248,7 @@ def live_trader(
     model_name: str = "gaussian_emos",
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
-    horizon: str = "morning_of",
+    horizon: str = "policy",
     dry_run: bool = True,
     post_orders: bool = False,
 ) -> None:
@@ -2161,13 +2269,34 @@ def live_trader(
         models=config.weather.models or None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    horizon_policy = _load_recent_horizon_policy()
 
     previews: list[dict[str, object]] = []
     for snapshot in snapshots:
         spec = snapshot.spec
-        if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
+        now_utc = datetime.now(tz=UTC)
+        if spec is None or spec.target_local_date < now_utc.date():
             continue
-        feature_frame = builder.build_live_row(spec, horizon=horizon)
+        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+            spec,
+            now_utc=now_utc,
+            horizon=horizon,
+            horizon_policy=horizon_policy,
+        )
+        if horizon_reason == "policy_filtered":
+            previews.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "decision_horizon": decision_horizon,
+                    "reason": "policy_filtered",
+                }
+            )
+            continue
+        if decision_horizon is None:
+            continue
+        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
         forecast = predict_market(model_path, model_name, spec, feature_frame)
         books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
         evaluation = _evaluate_market_signal(
@@ -2188,6 +2317,7 @@ def live_trader(
                     "market_id": spec.market_id,
                     "city": spec.city,
                     "question": spec.question,
+                    "decision_horizon": decision_horizon,
                     "reason": evaluation["reason"],
                     "book_source_counts": evaluation["book_source_counts"],
                 }
@@ -2204,10 +2334,12 @@ def live_trader(
                 "market_id": signal.market_id,
                 "token_id": signal.token_id,
                 "outcome_label": signal.outcome_label,
+                "decision_horizon": decision_horizon,
                 "error": str(exc),
             }
         if post_orders and not dry_run and preflight.ok:
             preview["post_result"] = broker.post_limit_order(signal, size=size)
+        preview.setdefault("decision_horizon", decision_horizon)
         previews.append(preview)
 
     payload = {
@@ -2250,7 +2382,7 @@ def scan_daemon(
     bankroll: float = typer.Option(10_000.0, help="Starting bankroll"),
     max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
-    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
 ) -> None:
     """Run a continuous scanning daemon that monitors markets and manages positions."""
@@ -2276,6 +2408,7 @@ def scan_daemon(
     )
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
     refresh_interval = config.scanner.snapshot_refresh_interval
+    horizon_policy = _load_recent_horizon_policy()
 
     # -- snapshot management --------------------------------------------------
     snapshot_cache: list[MarketSnapshot] = []
@@ -2318,10 +2451,21 @@ def scan_daemon(
             spec = snapshot.spec
             if spec is None:
                 continue
+            now_utc = datetime.now(tz=UTC)
+            decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                spec,
+                now_utc=now_utc,
+                horizon=horizon,
+                horizon_policy=horizon_policy,
+            )
+            if horizon_reason == "policy_filtered":
+                continue
+            if decision_horizon is None:
+                continue
             if spec.market_id not in seen_market_ids:
                 continue
             try:
-                feature_frame = builder.build_live_row(spec, horizon=horizon)
+                feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
                 forecast = predict_market(model_path, model_name, spec, feature_frame)
                 forecasts[spec.market_id] = forecast
             except Exception:  # noqa: BLE001
@@ -2348,12 +2492,23 @@ def scan_daemon(
             spec = snapshot.spec
             if spec is None:
                 continue
-            if spec.target_local_date < datetime.now(tz=UTC).date():
+            now_utc = datetime.now(tz=UTC)
+            if spec.target_local_date < now_utc.date():
                 continue
             if spec.market_id in held_market_ids:
                 continue
+            decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                spec,
+                now_utc=now_utc,
+                horizon=horizon,
+                horizon_policy=horizon_policy,
+            )
+            if horizon_reason == "policy_filtered":
+                continue
+            if decision_horizon is None:
+                continue
             try:
-                feature_frame = builder.build_live_row(spec, horizon=horizon)
+                feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
                 forecast = predict_market(model_path, model_name, spec, feature_frame)
             except Exception:  # noqa: BLE001
                 logger.warning("forecast failed for %s — skipping entry", spec.market_id)
@@ -2606,7 +2761,7 @@ def opportunity_report(
     model_name: str = typer.Option("gaussian_emos", help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
-    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     output: Path = typer.Option(Path("artifacts/opportunity_report.json"), help="Output JSON"),
 ) -> None:
@@ -2616,7 +2771,7 @@ def opportunity_report(
     model_name = _resolve_option_value(model_name, "gaussian_emos")
     cities = _resolve_option_value(cities)
     markets_path = _resolve_option_value(markets_path)
-    horizon = _resolve_option_value(horizon, "morning_of")
+    horizon = _resolve_option_value(horizon, "policy")
     min_edge = _resolve_option_value(min_edge)
     output = _resolve_option_value(output, Path("artifacts/opportunity_report.json"))
 
@@ -2633,11 +2788,31 @@ def opportunity_report(
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    horizon_policy = _load_recent_horizon_policy()
 
     observations: list[OpportunityObservation] = []
     for snapshot in snapshots:
         spec = snapshot.spec
-        if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
+        now_utc = datetime.now(tz=UTC)
+        if spec is None or spec.target_local_date < now_utc.date():
+            continue
+        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+            spec,
+            now_utc=now_utc,
+            horizon=horizon,
+            horizon_policy=horizon_policy,
+        )
+        if horizon_reason == "policy_filtered":
+            observations.append(
+                _empty_opportunity_observation(
+                    snapshot,
+                    observed_at=now_utc,
+                    decision_horizon=decision_horizon or "policy",
+                    reason="policy_filtered",
+                )
+            )
+            continue
+        if decision_horizon is None:
             continue
         observation = _evaluate_opportunity_snapshot(
             snapshot,
@@ -2646,8 +2821,8 @@ def opportunity_report(
             model_path=model_path,
             model_name=model_name,
             config=config,
-            observed_at=datetime.now(tz=UTC),
-            decision_horizon=horizon,
+            observed_at=now_utc,
+            decision_horizon=decision_horizon,
             edge_threshold=edge_threshold,
         )
         if observation is not None:
@@ -2723,6 +2898,7 @@ def opportunity_shadow(
     summary_output_path = summary_output or shadow_config.summary_output_path
     latest_output_path = shadow_config.latest_output_path
     effective_state_path = state_path or shadow_config.state_path
+    horizon_policy = _load_recent_horizon_policy()
     edge_threshold = config.backtest.default_edge_threshold
 
     def _snapshot_fetcher() -> list[MarketSnapshot]:
@@ -2740,6 +2916,16 @@ def opportunity_shadow(
                 near_term_days=effective_near_term_days,
             )
             if decision_horizon is None:
+                continue
+            if not _policy_allows_horizon(spec, decision_horizon=decision_horizon, horizon_policy=horizon_policy):
+                observations.append(
+                    _empty_opportunity_observation(
+                        snapshot,
+                        observed_at=observed_at,
+                        decision_horizon=decision_horizon,
+                        reason="policy_filtered",
+                    )
+                )
                 continue
             observation = _evaluate_opportunity_snapshot(
                 snapshot,

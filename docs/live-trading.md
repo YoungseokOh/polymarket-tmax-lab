@@ -34,6 +34,9 @@ Live trading is implemented but disabled by default.
 - validate fee, nonce, and auth handling against current official docs before enabling
 - use `uv run pmtmax live-trader --dry-run` first to collect a preflight report and signed-order previews
 - use `uv run pmtmax opportunity-report` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
+- `live-trader`, `scan-daemon`, and `opportunity-report` now default to the
+  checked-in recent horizon policy (`configs/recent-core-horizon-policy.yaml`);
+  disallowed city/date combinations are surfaced as `policy_filtered`
 
 ## See Also
 - `docs/codebase/backtest-execution.md` for the execution folder split
