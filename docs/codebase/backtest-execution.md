@@ -15,13 +15,17 @@ from signal generation and broker behavior.
 - `fees.py` and `slippage.py`: execution cost estimates
 - `sizing.py`: bankroll-aware size selection
 - `guardrails.py`: spread, freshness, and exposure limits
+- `book_utils.py`: explicit `clob` / `missing` / optional `fixture` book loading contract
 - `paper_broker.py`: conservative paper fill simulation
+- `paper_market_maker.py`: two-sided fill simulation with realized/unrealized mark-to-market PnL
 - `live_broker.py`: official live path behind explicit feature flags
+- `live_market_maker.py`: guarded quote refresh path that skips a cycle if cancel fails
 
 ## Boundary Between The Two
 - `backtest/` measures what the model knew and when it knew it.
 - `execution/` decides whether an actionable edge survives spread, fees, slippage, and guardrails.
 - Live trading must remain gated and isolated from the default research/paper path.
+- `opportunity-report`, `paper-trader`, `live-trader`, `paper-mm`, and `live-mm` should treat missing live books as explicit skip states, not synthetic liquidity.
 
 ## Change Checklist
 - Dataset-column changes affect both training and paper-trading workflows.

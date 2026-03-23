@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -12,13 +12,25 @@ from pmtmax.cli.main import (
     _bootstrap_snapshots,
     _collection_preflight_report,
     _load_snapshots,
+    live_mm,
     materialize_backtest_panel,
+    opportunity_report,
     summarize_dataset_readiness,
     summarize_price_history_coverage,
     summarize_truth_coverage,
 )
 from pmtmax.config.settings import EnvSettings
 from pmtmax.markets.repository import bundled_market_snapshots
+from pmtmax.storage.schemas import BookLevel, BookSnapshot
+
+
+def _future_snapshot(city: str = "Seoul"):
+    snapshot = bundled_market_snapshots([city])[0].model_copy(deep=True)
+    assert snapshot.spec is not None
+    snapshot.spec = snapshot.spec.model_copy(
+        update={"target_local_date": datetime.now(tz=UTC).date() + timedelta(days=1)}
+    )
+    return snapshot
 
 
 def test_load_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> None:
@@ -281,3 +293,176 @@ def test_backtest_real_history_writes_separate_artifacts(
     trades = json.loads((tmp_path / "artifacts" / "backtest_trades_real_history.json").read_text())
     assert metrics["num_trades"] == 1.0
     assert trades[0]["pricing_source"] == "real_history"
+
+
+def test_opportunity_report_marks_missing_books_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    outcome_label = snapshot.spec.outcome_labels()[0]
+    token_id = snapshot.spec.token_ids[0]
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+        def build_live_row(self, spec: object, horizon: str = "morning_of") -> pd.DataFrame:
+            return pd.DataFrame([{"market_id": getattr(spec, "market_id", "m1"), "horizon": horizon}])
+
+    class _Forecast:
+        generated_at = datetime.now(tz=UTC)
+        mean = 11.0
+        std = 1.5
+        outcome_probabilities = {outcome_label: 0.55}
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.02})(),
+            "execution": type(
+                "_Exec",
+                (),
+                {
+                    "max_spread_bps": 500,
+                    "min_liquidity": 10.0,
+                    "stale_forecast_minutes": 60,
+                },
+            )(),
+        },
+    )()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main.predict_market", lambda *args, **kwargs: _Forecast())
+    monkeypatch.setattr(
+        "pmtmax.cli.main._load_snapshots",
+        lambda **kwargs: [snapshot],
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._load_books_for_forecast",
+        lambda clob, snap, probs, allow_synthetic_fallback=False: {
+            outcome_label: BookSnapshot(
+                market_id=snapshot.spec.market_id,
+                token_id=token_id,
+                outcome_label=outcome_label,
+                source="missing",
+                bids=[],
+                asks=[],
+            )
+        },
+    )
+
+    output = tmp_path / "opportunity_report.json"
+    opportunity_report(output=output)
+
+    payload = json.loads(output.read_text())
+    assert payload[0]["reason"] == "missing_book"
+    assert payload[0]["book_source_counts"] == {"missing": 1}
+
+
+def test_live_mm_uses_inventory_mapping_for_quoter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    outcome_label = snapshot.spec.outcome_labels()[0]
+    token_id = snapshot.spec.token_ids[0]
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+        def build_live_row(self, spec: object, horizon: str = "morning_of") -> pd.DataFrame:
+            return pd.DataFrame([{"market_id": getattr(spec, "market_id", "m1"), "horizon": horizon}])
+
+    class _Forecast:
+        generated_at = datetime.now(tz=UTC)
+        mean = 14.0
+        std = 1.0
+        outcome_probabilities = {outcome_label: 0.52}
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "market_making": type(
+                "_MM",
+                (),
+                {
+                    "max_position_per_outcome": 100.0,
+                    "max_total_exposure": 500.0,
+                    "max_loss": 50.0,
+                    "base_half_spread": 0.02,
+                    "skew_factor": 0.5,
+                    "base_size": 10.0,
+                },
+            )(),
+        },
+    )()
+
+    called: dict[str, object] = {}
+
+    def _fake_compute_quotes(self, outcome_probs, token_ids, inventory, risk_limits):
+        called["inventory_type"] = type(inventory)
+        assert isinstance(inventory, dict)
+        return [
+            type(
+                "_Quote",
+                (),
+                {
+                    "token_id": token_id,
+                    "outcome_label": outcome_label,
+                    "fair_value": 0.52,
+                    "bid_price": 0.50,
+                    "bid_size": 10.0,
+                    "ask_price": 0.54,
+                    "ask_size": 10.0,
+                },
+            )()
+        ]
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main.predict_market", lambda *args, **kwargs: _Forecast())
+    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr(
+        "pmtmax.cli.main._load_books_for_forecast",
+        lambda clob, snap, probs, allow_synthetic_fallback=False: {
+            outcome_label: BookSnapshot(
+                market_id=snapshot.spec.market_id,
+                token_id=token_id,
+                outcome_label=outcome_label,
+                source="clob",
+                bids=[BookLevel(price=0.49, size=25.0)],
+                asks=[BookLevel(price=0.51, size=25.0)],
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "pmtmax.execution.quoter.Quoter.compute_quotes",
+        _fake_compute_quotes,
+    )
+
+    live_mm(model_path=Path("artifacts/models/test.pkl"), dry_run=True, post_orders=False)
+
+    assert called["inventory_type"] is dict
+    payload = json.loads((tmp_path / "artifacts" / "live_mm_preview.json").read_text())
+    assert payload[0]["market_id"] == snapshot.spec.market_id
+    assert payload[0]["city"] == snapshot.spec.city

@@ -268,6 +268,104 @@ def _best_signal_across_outcomes(
     return best_signal
 
 
+def _load_books_for_forecast(
+    clob: ClobReadClient,
+    snapshot: MarketSnapshot,
+    forecast_probs: dict[str, float],
+    *,
+    allow_synthetic_fallback: bool = False,
+) -> dict[str, BookSnapshot]:
+    """Fetch one book per modeled outcome for an active market."""
+
+    spec = snapshot.spec
+    if spec is None:
+        return {}
+    books: dict[str, BookSnapshot] = {}
+    for outcome_label in forecast_probs:
+        idx = spec.outcome_labels().index(outcome_label) if outcome_label in spec.outcome_labels() else -1
+        if idx < 0 or idx >= len(spec.token_ids):
+            continue
+        token_id = spec.token_ids[idx]
+        books[outcome_label] = _fetch_book(
+            clob,
+            snapshot,
+            token_id,
+            outcome_label,
+            allow_synthetic_fallback=allow_synthetic_fallback,
+        )
+    return books
+
+
+def _book_source_counts(books: dict[str, BookSnapshot]) -> dict[str, int]:
+    """Count book origins for one market evaluation."""
+
+    counts: dict[str, int] = {}
+    for book in books.values():
+        counts[book.source] = counts.get(book.source, 0) + 1
+    return counts
+
+
+def _all_books_missing(books: dict[str, BookSnapshot]) -> bool:
+    """Return whether every fetched outcome book is missing."""
+
+    return bool(books) and all(book.source == "missing" for book in books.values())
+
+
+def _evaluate_market_signal(
+    snapshot: MarketSnapshot,
+    forecast_probs: dict[str, float],
+    books: dict[str, BookSnapshot],
+    *,
+    mode: Literal["paper", "live"],
+    edge_threshold: float,
+    max_spread_bps: int,
+    min_liquidity: float,
+) -> dict[str, object]:
+    """Evaluate one market for trading and return a structured decision payload."""
+
+    result: dict[str, object] = {
+        "reason": "missing_token_mapping",
+        "signal": None,
+        "book": None,
+        "spread": None,
+        "liquidity": None,
+        "book_source_counts": _book_source_counts(books),
+    }
+    if not books:
+        return result
+    if _all_books_missing(books):
+        result["reason"] = "missing_book"
+        return result
+
+    signal = _best_signal_across_outcomes(snapshot, forecast_probs, books, mode=mode)
+    if signal is None:
+        result["reason"] = "no_positive_edge"
+        return result
+
+    book = books[signal.outcome_label]
+    spread = book.best_ask() - book.best_bid()
+    liquidity = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
+    result.update(
+        {
+            "signal": signal,
+            "book": book,
+            "spread": spread,
+            "liquidity": liquidity,
+        }
+    )
+    if book.source != "clob":
+        result["reason"] = "non_clob_book"
+    elif signal.edge < edge_threshold:
+        result["reason"] = "edge_below_threshold"
+    elif not spread_ok(book.best_bid(), book.best_ask(), max_spread_bps):
+        result["reason"] = "spread_too_wide"
+    elif liquidity < min_liquidity:
+        result["reason"] = "liquidity_too_low"
+    else:
+        result["reason"] = "tradable"
+    return result
+
+
 def _summarize_backtest_metrics(
     prediction_rows: list[dict[str, object]],
     trade_rows: list[dict[str, object]],
@@ -1577,25 +1675,23 @@ def paper_trader(
         forecast = predict_market(model_path, model_name, spec, feature_frame)
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
             continue
-        books: dict[str, BookSnapshot] = {}
-        for ol in forecast.outcome_probabilities:
-            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
-            books[ol] = _fetch_book(clob, snapshot, tid, ol)
-        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
-        if signal is None:
-            continue
-        book = books[signal.outcome_label]
-        spread = book.best_ask() - book.best_bid()
-        liquidity = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
-        reason = "accepted"
+        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+        evaluation = _evaluate_market_signal(
+            snapshot,
+            forecast.outcome_probabilities,
+            books,
+            mode="paper",
+            edge_threshold=edge_threshold,
+            max_spread_bps=config.execution.max_spread_bps,
+            min_liquidity=config.execution.min_liquidity,
+        )
+        signal = evaluation["signal"]
+        book = evaluation["book"]
+        reason = str(evaluation["reason"])
         fill_payload: dict[str, object] | None = None
-        if signal.edge < edge_threshold:
-            reason = "edge_below_threshold"
-        elif not spread_ok(book.best_bid(), book.best_ask(), config.execution.max_spread_bps):
-            reason = "spread_too_wide"
-        elif liquidity < config.execution.min_liquidity:
-            reason = "liquidity_too_low"
-        else:
+        if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot):
+            spread = float(evaluation["spread"] or 0.0)
+            liquidity = float(evaluation["liquidity"] or 0.0)
             size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
@@ -1612,13 +1708,14 @@ def paper_trader(
                     fill_payload = fill.model_dump(mode="json")
         results.append(
             {
-                "market_id": signal.market_id,
+                "market_id": spec.market_id,
                 "city": spec.city,
                 "question": spec.question,
-                "outcome_label": signal.outcome_label,
-                "fair_probability": signal.fair_probability,
-                "executable_price": signal.executable_price,
-                "edge": signal.edge,
+                "outcome_label": signal.outcome_label if isinstance(signal, TradeSignal) else None,
+                "fair_probability": signal.fair_probability if isinstance(signal, TradeSignal) else None,
+                "executable_price": signal.executable_price if isinstance(signal, TradeSignal) else None,
+                "edge": signal.edge if isinstance(signal, TradeSignal) else None,
+                "book_source_counts": evaluation["book_source_counts"],
                 "reason": reason,
                 "fill": fill_payload,
             }
@@ -1662,12 +1759,27 @@ def live_trader(
             continue
         feature_frame = builder.build_live_row(spec, horizon=horizon)
         forecast = predict_market(model_path, model_name, spec, feature_frame)
-        books: dict[str, BookSnapshot] = {}
-        for ol in forecast.outcome_probabilities:
-            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
-            books[ol] = _fetch_book(clob, snapshot, tid, ol)
-        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="live")
-        if signal is None:
+        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+        evaluation = _evaluate_market_signal(
+            snapshot,
+            forecast.outcome_probabilities,
+            books,
+            mode="live",
+            edge_threshold=config.backtest.default_edge_threshold,
+            max_spread_bps=config.execution.max_spread_bps,
+            min_liquidity=config.execution.min_liquidity,
+        )
+        signal = evaluation["signal"]
+        if not isinstance(signal, TradeSignal):
+            previews.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "reason": evaluation["reason"],
+                    "book_source_counts": evaluation["book_source_counts"],
+                }
+            )
             continue
         size_notional = capped_kelly(signal.edge, signal.fair_probability, 1000.0, signal.executable_price)
         size = size_notional / max(signal.executable_price, 1e-6)
@@ -1836,22 +1948,23 @@ def scan_daemon(
                 continue
             if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
                 continue
-            books: dict[str, BookSnapshot] = {}
-            for ol in forecast.outcome_probabilities:
-                tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
-                books[ol] = _fetch_book(clob, snapshot, tid, ol)
-            signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
-            if signal is None:
+            books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+            evaluation = _evaluate_market_signal(
+                snapshot,
+                forecast.outcome_probabilities,
+                books,
+                mode="paper",
+                edge_threshold=edge_threshold,
+                max_spread_bps=config.execution.max_spread_bps,
+                min_liquidity=config.execution.min_liquidity,
+            )
+            signal = evaluation["signal"]
+            if not isinstance(signal, TradeSignal) or not isinstance(evaluation["book"], BookSnapshot):
                 continue
-            book = books[signal.outcome_label]
-            spread = book.best_ask() - book.best_bid()
-            liquidity = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
-            if signal.edge < edge_threshold:
+            if evaluation["reason"] != "tradable":
                 continue
-            if not spread_ok(book.best_bid(), book.best_ask(), config.execution.max_spread_bps):
-                continue
-            if liquidity < config.execution.min_liquidity:
-                continue
+            spread = float(evaluation["spread"] or 0.0)
+            liquidity = float(evaluation["liquidity"] or 0.0)
             size_notional = capped_kelly(signal.edge, signal.fair_probability, brk.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
@@ -2075,6 +2188,125 @@ def forecast_report(
         console.print("[yellow]Firebase not configured[/]")
 
 
+@app.command("opportunity-report")
+def opportunity_report(
+    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("morning_of", help="Forecast horizon"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path = typer.Option(Path("artifacts/opportunity_report.json"), help="Output JSON"),
+) -> None:
+    """Generate a one-shot active-market opportunity report with explicit book status."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+
+    rows: list[dict[str, object]] = []
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
+            continue
+        try:
+            feature_frame = builder.build_live_row(spec, horizon=horizon)
+            forecast = predict_market(model_path, model_name, spec, feature_frame)
+        except Exception as exc:  # noqa: BLE001
+            rows.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "target_local_date": spec.target_local_date.isoformat(),
+                    "reason": "forecast_failed",
+                    "error": str(exc),
+                }
+            )
+            continue
+        if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
+            rows.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "target_local_date": spec.target_local_date.isoformat(),
+                    "reason": "stale_forecast",
+                }
+            )
+            continue
+
+        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+        evaluation = _evaluate_market_signal(
+            snapshot,
+            forecast.outcome_probabilities,
+            books,
+            mode="paper",
+            edge_threshold=edge_threshold,
+            max_spread_bps=config.execution.max_spread_bps,
+            min_liquidity=config.execution.min_liquidity,
+        )
+        signal = evaluation["signal"]
+        book = evaluation["book"]
+        row: dict[str, object] = {
+            "market_id": spec.market_id,
+            "city": spec.city,
+            "question": spec.question,
+            "target_local_date": spec.target_local_date.isoformat(),
+            "forecast_mean": round(forecast.mean, 4),
+            "forecast_std": round(forecast.std, 4),
+            "reason": evaluation["reason"],
+            "book_source_counts": evaluation["book_source_counts"],
+        }
+        if isinstance(signal, TradeSignal):
+            row.update(
+                {
+                    "outcome_label": signal.outcome_label,
+                    "fair_probability": round(signal.fair_probability, 6),
+                    "executable_price": round(signal.executable_price, 6),
+                    "edge": round(signal.edge, 6),
+                    "spread": round(float(evaluation["spread"] or 0.0), 6),
+                    "liquidity": round(float(evaluation["liquidity"] or 0.0), 6),
+                }
+            )
+        if isinstance(book, BookSnapshot):
+            row["book_source"] = book.source
+        rows.append(row)
+
+    rows.sort(key=lambda row: (row.get("reason") != "tradable", -(float(row.get("edge", -999.0)) if row.get("edge") is not None else -999.0)))
+    dump_json(output, rows)
+
+    table = Table(title="Opportunity Report")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Outcome")
+    table.add_column("Edge")
+    table.add_column("Book")
+    table.add_column("Reason")
+    for row in rows[:20]:
+        edge = row.get("edge")
+        table.add_row(
+            str(row.get("city", "")),
+            str(row.get("target_local_date", "")),
+            str(row.get("outcome_label", "—")),
+            f"{float(edge):+.4f}" if edge is not None else "—",
+            str(row.get("book_source", "—")),
+            str(row.get("reason", "")),
+        )
+    console.print(table)
+    console.print(f"Wrote {output}")
+
+
 @app.command("forecast-daemon")
 def forecast_daemon(
     model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
@@ -2218,20 +2450,21 @@ def paper_mm(
                 feature_frame = builder.build_live_row(spec, horizon=horizon)
                 forecast = predict_market(model_path, model_name, spec, feature_frame)
 
-                # Build token_id mapping and fetch books
-                token_map: dict[str, str] = {}
-                books: dict[str, BookSnapshot] = {}
-                for ol in forecast.outcome_probabilities:
-                    idx = spec.outcome_labels().index(ol) if ol in spec.outcome_labels() else -1
-                    if idx < 0 or idx >= len(spec.token_ids):
-                        continue
-                    tid = spec.token_ids[idx]
-                    token_map[ol] = tid
-                    books[ol] = _fetch_book(clob, snapshot, tid, ol)
+                books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+                if not books:
+                    console.print(f"  {spec.city}: skip missing_token_mapping")
+                    continue
+                if any(book.source != "clob" for book in books.values()):
+                    console.print(f"  {spec.city}: skip missing_book {_book_source_counts(books)}")
+                    continue
+                token_map = {outcome_label: book.token_id for outcome_label, book in books.items()}
 
                 quotes = quoter.compute_quotes(
                     forecast.outcome_probabilities, token_map, mm.inventory, risk_limits,
                 )
+                if not quotes:
+                    console.print(f"  {spec.city}: skip no_quotes")
+                    continue
 
                 fills = mm.simulate_quotes(quotes, books)
                 if fills:
@@ -2313,18 +2546,53 @@ def live_mm(
             console.print(f"[yellow]Forecast failed for {spec.city}: {exc}[/]")
             continue
 
-        token_map: dict[str, str] = {}
-        for ol in forecast.outcome_probabilities:
-            idx = spec.outcome_labels().index(ol) if ol in spec.outcome_labels() else -1
-            if idx < 0 or idx >= len(spec.token_ids):
-                continue
-            token_map[ol] = spec.token_ids[idx]
+        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+        book_source_counts = _book_source_counts(books)
+        if not books:
+            all_results.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "reason": "missing_token_mapping",
+                    "book_source_counts": book_source_counts,
+                }
+            )
+            continue
+        if any(book.source != "clob" for book in books.values()):
+            all_results.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "reason": "missing_book",
+                    "book_source_counts": book_source_counts,
+                }
+            )
+            continue
+
+        token_map = {outcome_label: book.token_id for outcome_label, book in books.items()}
 
         quotes = quoter.compute_quotes(
-            forecast.outcome_probabilities, token_map, live_mm_engine.active_order_ids, risk_limits,
+            forecast.outcome_probabilities, token_map, live_mm_engine.inventory, risk_limits,
         )
+        if not quotes:
+            all_results.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "reason": "no_quotes",
+                    "book_source_counts": book_source_counts,
+                }
+            )
+            continue
 
         results = live_mm_engine.update_quotes(quotes, market_id=spec.market_id, dry_run=not should_post)
+        for result in results:
+            result.setdefault("market_id", spec.market_id)
+            result.setdefault("city", spec.city)
+            result.setdefault("question", spec.question)
 
         table = Table(title=f"{spec.city} — {spec.target_local_date}")
         table.add_column("Outcome")

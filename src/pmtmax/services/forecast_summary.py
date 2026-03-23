@@ -59,7 +59,15 @@ def build_forecast_summaries(
             if token_idx < 0 or token_idx >= len(spec.token_ids):
                 continue
             token_id = spec.token_ids[token_idx]
-            book = fetch_book(clob, snapshot, token_id, outcome_label)
+            book = fetch_book(
+                clob,
+                snapshot,
+                token_id,
+                outcome_label,
+                allow_synthetic_fallback=False,
+            )
+            if book.source != "clob" or not book.asks:
+                continue
             market_price = book.best_ask()
             edge = model_prob - market_price
             if abs(edge) > 0.02:

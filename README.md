@@ -87,6 +87,12 @@ uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
 uv run pmtmax paper-trader --model-name gaussian_emos
 ```
 
+7. Audit active markets for executable opportunities with explicit book status:
+
+```bash
+uv run pmtmax opportunity-report --model-name gaussian_emos
+```
+
 ## Install
 ```bash
 uv sync --all-extras
@@ -326,6 +332,18 @@ uv run pmtmax paper-trader \
 ```
 
 Paper trading uses active discovered markets when available. If no active max-temperature markets are currently listed on Polymarket, the command exits cleanly with no fills.
+`paper-trader`, `opportunity-report`, `paper-mm`, `live-trader`, and `live-mm` now use real CLOB books by default and report missing books explicitly instead of silently fabricating synthetic liquidity.
+
+## Opportunity Workflow
+```bash
+uv run pmtmax opportunity-report \
+  --model-path artifacts/models/gaussian_emos.pkl \
+  --model-name gaussian_emos
+```
+
+This writes `artifacts/opportunity_report.json` and separates `tradable`,
+`no_positive_edge`, `missing_book`, `spread_too_wide`, and other skip reasons so
+“no trade” and “no live book” are not conflated.
 
 ## Dry-Run Live Workflow
 ```bash
@@ -336,6 +354,7 @@ uv run pmtmax live-trader \
 ```
 
 This performs preflight checks and signed-order previews when a private key is configured. Actual posting remains gated.
+Dry-run live paths and market-making previews fail closed on missing CLOB books.
 
 ## Live Trading Is Gated
 Live trading exists for future use but is off by default.
@@ -355,6 +374,7 @@ Required credentials:
 - `PMTMAX_POLY_SIGNATURE_TYPE` and `PMTMAX_POLY_FUNDER_ADDRESS` are optional for proxy or smart-wallet setups
 
 The live broker fails closed if flags or credentials are missing.
+`live-mm` also fails closed if it cannot cancel existing orders before refreshing quotes.
 
 ## Repo Layout
 - `src/pmtmax/backfill/`: bronze/silver/gold backfill orchestration

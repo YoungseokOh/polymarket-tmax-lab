@@ -25,6 +25,7 @@ class LiveMarketMaker:
     broker: LiveBroker
     risk_limits: RiskLimits = field(default_factory=RiskLimits)
     active_order_ids: list[str] = field(default_factory=list)
+    inventory: dict[str, float] = field(default_factory=dict)
 
     def cancel_all(self) -> Any:
         """Emergency cancel all active orders."""
@@ -55,10 +56,14 @@ class LiveMarketMaker:
         if self.active_order_ids and not dry_run:
             try:
                 self.cancel_all()
-            except Exception:  # noqa: BLE001
-                LOGGER.warning("Failed to cancel existing orders, proceeding with new quotes")
-
-        self.active_order_ids.clear()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed to cancel existing orders, skipping quote refresh: %s", exc)
+                return [{
+                    "market_id": market_id,
+                    "reason": "cancel_failed",
+                    "error": str(exc),
+                    "active_order_ids": list(self.active_order_ids),
+                }]
 
         for quote in quotes:
             # Post bid (BUY) side

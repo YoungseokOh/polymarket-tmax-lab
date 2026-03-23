@@ -5,6 +5,8 @@
 - live trading은 기본 비활성
 - station/source fidelity를 모델 편의보다 우선
 - 폴더 책임이나 workflow가 바뀌면 문서도 같은 변경에 포함
+- live/paper execution 경로에서는 missing CLOB book을 synthetic으로 숨기지 말고 명시적 skip/error로 처리
+- `live-mm`는 기존 주문 cancel 실패 시 새 quote를 올리지 않고 그 cycle을 중단
 
 ## Commit Rules
 - 형식: `type: subject`

@@ -28,17 +28,34 @@ def synthetic_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) 
     )
 
 
+def missing_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) -> BookSnapshot:
+    """Return an explicit empty-book sentinel when live CLOB data is unavailable."""
+
+    return BookSnapshot(
+        market_id=snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id")),
+        token_id=token_id,
+        outcome_label=outcome_label,
+        source="missing",
+        timestamp=None,
+        bids=[],
+        asks=[],
+    )
+
+
 def book_snapshot_from_payload(
     *,
     snapshot: MarketSnapshot,
     token_id: str,
     outcome_label: str,
     payload: dict[str, Any] | None,
+    allow_synthetic_fallback: bool = False,
 ) -> BookSnapshot:
-    """Parse a CLOB book payload into a BookSnapshot, falling back to synthetic."""
+    """Parse a CLOB book payload into a BookSnapshot."""
 
     if payload is None:
-        return synthetic_book(snapshot, outcome_label, token_id)
+        if allow_synthetic_fallback:
+            return synthetic_book(snapshot, outcome_label, token_id)
+        return missing_book(snapshot, outcome_label, token_id)
     bids = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("bids", [])[:5]]
     asks = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("asks", [])[:5]]
     timestamp = payload.get("timestamp")
@@ -64,11 +81,19 @@ def fetch_book(
     snapshot: MarketSnapshot,
     token_id: str,
     outcome_label: str,
+    *,
+    allow_synthetic_fallback: bool = False,
 ) -> BookSnapshot:
-    """Fetch a live order book, falling back to synthetic on error."""
+    """Fetch a live order book, optionally falling back to a synthetic fixture."""
 
     try:
         payload = clob.get_book(token_id)
     except Exception:  # noqa: BLE001
         payload = None
-    return book_snapshot_from_payload(snapshot=snapshot, token_id=token_id, outcome_label=outcome_label, payload=payload)
+    return book_snapshot_from_payload(
+        snapshot=snapshot,
+        token_id=token_id,
+        outcome_label=outcome_label,
+        payload=payload,
+        allow_synthetic_fallback=allow_synthetic_fallback,
+    )

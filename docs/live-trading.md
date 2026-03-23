@@ -23,6 +23,8 @@ Live trading is implemented but disabled by default.
 ## Safety Rules
 - fail closed if flags are absent
 - fail closed if credentials are absent
+- fail closed if the current CLOB book is missing; do not auto-replace it with a synthetic book in live or dry-run live paths
+- fail closed if `live-mm` cannot cancel existing live orders before posting a refreshed quote set
 - no market orders by default
 - limit-order logic only
 - keep live execution isolated from research and paper modes
@@ -31,6 +33,7 @@ Live trading is implemented but disabled by default.
 - verify legal and regional eligibility before any live use
 - validate fee, nonce, and auth handling against current official docs before enabling
 - use `uv run pmtmax live-trader --dry-run` first to collect a preflight report and signed-order previews
+- use `uv run pmtmax opportunity-report` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
 
 ## See Also
 - `docs/codebase/backtest-execution.md` for the execution folder split
