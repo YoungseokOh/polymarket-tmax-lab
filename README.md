@@ -81,6 +81,13 @@ uv run pmtmax materialize-backtest-panel
 uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
 ```
 
+To run a more conservative execution proxy without claiming exact historical bid/ask
+replay, use the same panel with `quote_proxy`:
+
+```bash
+uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.02 --model-name gaussian_emos
+```
+
 6. Emit paper-trading signals:
 
 ```bash
@@ -207,11 +214,12 @@ uv run python scripts/validate_historical_market_inventory.py
 uv run pmtmax collection-preflight --markets-path configs/market_inventory/historical_temperature_snapshots.json
 ```
 
-`collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path, with Seoul / RKSI using AMO `AIR_CALP` and other supported cities using NOAA Global Hourly, so `PMTMAX_WU_API_KEY` is optional and only used for same-source audit collection.
+`collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path. Seoul / RKSI uses AMO `AIR_CALP`, while London / EGLC and NYC / KLGA use the Wunderground public historical API for the same station. `PMTMAX_WU_API_KEY` is optional and only used when you want to force an explicit same-source audit key instead of the documented public research path.
 When you run `build_historical_market_inventory.py` against the canonical checked-in manifests, it also syncs `data/manifests/historical_collection_status.json` so the `collected` count matches the current curated snapshot inventory.
 If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with a public archive lag message, run `uv run pmtmax summarize-truth-coverage` to inspect the latest archive date NOAA advertised for each lagged station.
 The default research CLI no longer reads `tests/fixtures/truth`; fixture truth remains test/demo-only unless you wire it explicitly in code.
 `build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
+The repo also ships a recent 3-city benchmark for official history evaluation in `configs/market_inventory/recent_core_temperature_event_urls.json` and `configs/market_inventory/recent_core_temperature_snapshots.json`.
 
 3. Start from a clean canonical warehouse if you want to replace the existing seed data.
 
@@ -319,10 +327,24 @@ uv run pmtmax backtest \
   --model-name gaussian_emos
 ```
 
+If you want an execution-aware proxy on top of the same official last-price panel,
+switch the pricing source and set an explicit half-spread penalty:
+
+```bash
+uv run pmtmax backtest \
+  --dataset-path data/parquet/gold/historical_training_set.parquet \
+  --panel-path data/parquet/gold/historical_backtest_panel.parquet \
+  --pricing-source quote_proxy \
+  --quote-proxy-half-spread 0.02 \
+  --model-name gaussian_emos
+```
+
 Synthetic outputs are written to `artifacts/backtest_metrics.json` and
 `artifacts/backtest_trades.json`. Official-price runs write
 `artifacts/backtest_metrics_real_history.json` and
-`artifacts/backtest_trades_real_history.json`.
+`artifacts/backtest_trades_real_history.json`. Quote-proxy runs write
+`artifacts/backtest_metrics_quote_proxy.json` and
+`artifacts/backtest_trades_quote_proxy.json`.
 
 ## Paper Trading Workflow
 ```bash
@@ -415,7 +437,7 @@ The live broker fails closed if flags or credentials are missing.
 - Bundled historical market snapshots provide a reproducible backtest path for Seoul, NYC, Hong Kong, and Taipei even when no active temperature markets are currently listed.
 - Active grouped-event discovery now follows Polymarket `weather` and `temperature` event tags instead of relying on `/markets` pagination alone.
 - The checked-in station catalog covers the current active airport-city universe, with Seoul, NYC, and London marked as the core trading cities.
-- Wunderground-family markets keep their official station/source metadata, but default research truth collection uses documented public airport observations for the same station. Seoul / RKSI uses Korea's Aviation Meteorological Office `AIR_CALP` daily-extremes feed; other supported WU cities currently default to NOAA Global Hourly. `PMTMAX_WU_API_KEY` is optional for same-source audit collection only.
+- Wunderground-family markets keep their official station/source metadata, but default research truth collection uses documented public same-airport paths. Seoul / RKSI uses Korea's Aviation Meteorological Office `AIR_CALP` daily-extremes feed. London / EGLC and NYC / KLGA use the Wunderground public historical API for the same airport station. `PMTMAX_WU_API_KEY` is optional for explicit same-source audit collection only.
 - The CWA adapter is cache-first but can use the official CODiS station API as an exact-source override for Taipei station data. It still does not substitute another source or station.
 - Advanced models beyond the det2prob path are practical public-data approximations of the cited papers, not paper-faithful reproductions of closed or richer operational inputs.
 - Firebase sync is a backup mirror for raw/parquet/manifests only. DuckDB remains the local canonical warehouse and is not mirrored.

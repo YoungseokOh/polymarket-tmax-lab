@@ -34,6 +34,11 @@ class _BrokenHtmlHttp(_FakeHttp):
         return "<html>missing temperatureMax</html>"
 
 
+class _PublicApiKeyHttp(_FakeHttp):
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        return '<html><script>var url="https://api.weather.com/v3/wx/observations/current?apiKey=abcdef0123456789abcdef0123456789";</script></html>'
+
+
 def test_wunderground_truth_source_uses_cached_html_snapshot_when_available() -> None:
     spec = example_market_specs(["NYC"])[0]
     source = WundergroundTruthSource(_FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
@@ -58,6 +63,24 @@ def test_wunderground_truth_source_fetches_official_historical_api_for_live_data
     assert http.calls[0]["params"] == {
         "apiKey": "test-weathercom-key",
         "units": "m",
+        "startDate": "20260317",
+        "endDate": "20260317",
+    }
+
+
+def test_wunderground_truth_source_discovers_public_frontend_api_key() -> None:
+    spec = example_market_specs(["NYC"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
+    http = _PublicApiKeyHttp()
+    source = WundergroundTruthSource(http)  # type: ignore[arg-type]
+
+    bundle = source.fetch_observation_bundle(spec, date(2026, 3, 17))
+
+    assert bundle.observation.daily_max == 12
+    assert bundle.media_type == "application/json"
+    assert len(http.calls) == 1
+    assert http.calls[0]["params"] == {
+        "apiKey": "abcdef0123456789abcdef0123456789",
+        "units": "e",
         "startDate": "20260317",
         "endDate": "20260317",
     }

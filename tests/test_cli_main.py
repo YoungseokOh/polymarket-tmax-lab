@@ -13,7 +13,10 @@ from pmtmax.cli.main import (
     _collection_preflight_report,
     _evaluate_market_signal,
     _load_snapshots,
+    _quote_proxy_prices,
+    _run_quote_proxy_backtest,
     _resolve_opportunity_shadow_horizon,
+    _run_real_history_backtest,
     live_mm,
     materialize_backtest_panel,
     opportunity_shadow,
@@ -303,6 +306,318 @@ def test_backtest_real_history_writes_separate_artifacts(
     trades = json.loads((tmp_path / "artifacts" / "backtest_trades_real_history.json").read_text())
     assert metrics["num_trades"] == 1.0
     assert trades[0]["pricing_source"] == "real_history"
+
+
+def test_backtest_quote_proxy_writes_separate_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "training.parquet"
+    panel_path = tmp_path / "panel.parquet"
+    pd.DataFrame(
+        [
+            {
+                "market_id": "101025",
+                "market_spec_json": "{}",
+                "market_prices_json": "{}",
+                "winning_outcome": "11°C",
+                "realized_daily_max": 11.0,
+            },
+            {
+                "market_id": "101026",
+                "market_spec_json": "{}",
+                "market_prices_json": "{}",
+                "winning_outcome": "12°C",
+                "realized_daily_max": 12.0,
+            },
+        ]
+    ).to_parquet(dataset_path)
+    pd.DataFrame(
+        [
+            {
+                "market_id": "101025",
+                "decision_horizon": "morning_of",
+                "outcome_label": "11°C",
+                "coverage_status": "ok",
+                "market_price": 0.5,
+            }
+        ]
+    ).to_parquet(panel_path)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "pmtmax.cli.main.load_settings",
+        lambda: (
+            type("_Config", (), {"execution": type("_Exec", (), {"default_fee_bps": 0.0})()})(),
+            EnvSettings(),
+        ),
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._run_quote_proxy_backtest",
+        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread: (
+            {
+                "mae": 1.0,
+                "rmse": 1.0,
+                "nll": 1.0,
+                "avg_brier": 0.1,
+                "avg_crps": 0.2,
+                "num_trades": 1.0,
+                "pnl": 0.25,
+                "hit_rate": 1.0,
+                "avg_edge": 0.05,
+            },
+            [{"market_id": "101025", "pricing_source": "quote_proxy"}],
+        ),
+    )
+
+    backtest(
+        dataset_path=dataset_path,
+        panel_path=panel_path,
+        pricing_source="quote_proxy",
+        quote_proxy_half_spread=0.02,
+    )
+
+    metrics = json.loads((tmp_path / "artifacts" / "backtest_metrics_quote_proxy.json").read_text())
+    trades = json.loads((tmp_path / "artifacts" / "backtest_trades_quote_proxy.json").read_text())
+    assert metrics["num_trades"] == 1.0
+    assert trades[0]["pricing_source"] == "quote_proxy"
+
+
+def test_run_real_history_backtest_counts_missing_coverage_separately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    assert snapshot.spec is not None
+    spec = snapshot.spec
+    outcome_label = spec.outcome_labels()[0]
+
+    frame = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-16"),
+                "decision_horizon": "morning_of",
+            },
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-17"),
+                "decision_horizon": "morning_of",
+            },
+        ]
+    )
+    panel = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "decision_horizon": "morning_of",
+                "outcome_label": outcome_label,
+                "coverage_status": "missing",
+                "market_price": 0.5,
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main.train_model",
+        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main.predict_market",
+        lambda *args, **kwargs: type(
+            "_Forecast",
+            (),
+            {
+                "mean": 10.0,
+                "std": 1.0,
+                "samples": [10.0, 10.0],
+                "outcome_probabilities": {outcome_label: 0.55},
+            },
+        )(),
+    )
+
+    metrics, trades = _run_real_history_backtest(
+        frame,
+        panel,
+        model_name="gaussian_emos",
+        artifacts_dir=tmp_path,
+        flat_stake=1.0,
+        default_fee_bps=0.0,
+    )
+
+    assert trades == []
+    assert metrics["priced_decision_rows"] == 0.0
+    assert metrics["skipped_missing_price"] == 1.0
+    assert metrics["skipped_non_positive_edge"] == 0.0
+
+
+def test_run_real_history_backtest_counts_stale_coverage_separately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    assert snapshot.spec is not None
+    spec = snapshot.spec
+    outcome_label = spec.outcome_labels()[0]
+
+    frame = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-16"),
+                "decision_horizon": "morning_of",
+            },
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-17"),
+                "decision_horizon": "morning_of",
+            },
+        ]
+    )
+    panel = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "decision_horizon": "morning_of",
+                "outcome_label": outcome_label,
+                "coverage_status": "stale",
+                "market_price": 0.5,
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main.train_model",
+        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main.predict_market",
+        lambda *args, **kwargs: type(
+            "_Forecast",
+            (),
+            {
+                "mean": 10.0,
+                "std": 1.0,
+                "samples": [10.0, 10.0],
+                "outcome_probabilities": {outcome_label: 0.55},
+            },
+        )(),
+    )
+
+    metrics, trades = _run_real_history_backtest(
+        frame,
+        panel,
+        model_name="gaussian_emos",
+        artifacts_dir=tmp_path,
+        flat_stake=1.0,
+        default_fee_bps=0.0,
+    )
+
+    assert trades == []
+    assert metrics["priced_decision_rows"] == 0.0
+    assert metrics["skipped_missing_price"] == 0.0
+    assert metrics["skipped_stale_price"] == 1.0
+
+
+def test_run_quote_proxy_backtest_uses_proxy_execution_price(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    assert snapshot.spec is not None
+    spec = snapshot.spec
+    outcome_label = spec.outcome_labels()[0]
+
+    frame = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-16"),
+                "decision_horizon": "morning_of",
+            },
+            {
+                "market_id": spec.market_id,
+                "market_spec_json": spec.model_dump_json(),
+                "market_prices_json": "{}",
+                "winning_outcome": outcome_label,
+                "realized_daily_max": 10.0,
+                "target_date": pd.Timestamp("2026-03-17"),
+                "decision_horizon": "morning_of",
+            },
+        ]
+    )
+    panel = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "decision_horizon": "morning_of",
+                "outcome_label": outcome_label,
+                "coverage_status": "ok",
+                "market_price": 0.5,
+                "price_age_seconds": 60.0,
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main.train_model",
+        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main.predict_market",
+        lambda *args, **kwargs: type(
+            "_Forecast",
+            (),
+            {
+                "mean": 10.0,
+                "std": 1.0,
+                "samples": [10.0, 10.0],
+                "outcome_probabilities": {outcome_label: 0.7},
+            },
+        )(),
+    )
+
+    metrics, trades = _run_quote_proxy_backtest(
+        frame,
+        panel,
+        model_name="gaussian_emos",
+        artifacts_dir=tmp_path,
+        flat_stake=1.0,
+        default_fee_bps=0.0,
+        quote_proxy_half_spread=0.02,
+    )
+
+    assert metrics["num_trades"] == 1.0
+    assert metrics["avg_execution_price_premium"] == pytest.approx(0.02)
+    assert trades[0]["pricing_source"] == "quote_proxy"
+    assert trades[0]["reference_market_price"] == pytest.approx(0.5)
+    assert trades[0]["price"] == pytest.approx(0.52)
+
+
+def test_quote_proxy_prices_clip_to_bounds() -> None:
+    bid, ask = _quote_proxy_prices(0.01, half_spread=0.02)
+    assert bid == pytest.approx(0.0005)
+    assert ask == pytest.approx(0.03)
 
 
 def test_opportunity_report_marks_missing_books_explicitly(

@@ -218,7 +218,7 @@ def _collection_preflight_report(snapshots: list[MarketSnapshot], env: EnvSettin
         else:
             messages.append(
                 "Wunderground-family markets default to public airport archive collection. "
-                "Seoul/RKSI uses AMO AIR_CALP; other supported cities default to NOAA Global Hourly. "
+                "Seoul/RKSI uses AMO AIR_CALP; London/EGLC and NYC/KLGA use the Wunderground public historical API. "
                 "PMTMAX_WU_API_KEY is optional and only needed for same-source audit collection."
             )
 
@@ -788,8 +788,76 @@ def _run_real_history_backtest(
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
+    return _run_panel_pricing_backtest(
+        frame,
+        panel,
+        model_name=model_name,
+        artifacts_dir=artifacts_dir,
+        flat_stake=flat_stake,
+        default_fee_bps=default_fee_bps,
+        pricing_source="real_history",
+    )
+
+
+def _quote_proxy_prices(
+    market_price: float,
+    *,
+    half_spread: float,
+    min_price: float = 0.0005,
+    max_price: float = 0.9995,
+) -> tuple[float, float]:
+    """Build a conservative synthetic bid/ask proxy around a historical last trade."""
+
+    bounded_price = min(max(float(market_price), min_price), max_price)
+    bounded_half_spread = max(float(half_spread), 0.0)
+    bid = max(min_price, bounded_price - bounded_half_spread)
+    ask = min(max_price, bounded_price + bounded_half_spread)
+    if ask < bid:
+        ask = bid
+    return bid, ask
+
+
+def _run_quote_proxy_backtest(
+    frame: pd.DataFrame,
+    panel: pd.DataFrame,
+    *,
+    model_name: str,
+    artifacts_dir: Path,
+    flat_stake: float,
+    default_fee_bps: float,
+    quote_proxy_half_spread: float,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    """Run a decision-time backtest using last price plus an explicit quote proxy."""
+
+    return _run_panel_pricing_backtest(
+        frame,
+        panel,
+        model_name=model_name,
+        artifacts_dir=artifacts_dir,
+        flat_stake=flat_stake,
+        default_fee_bps=default_fee_bps,
+        pricing_source="quote_proxy",
+        quote_proxy_half_spread=quote_proxy_half_spread,
+    )
+
+
+def _run_panel_pricing_backtest(
+    frame: pd.DataFrame,
+    panel: pd.DataFrame,
+    *,
+    model_name: str,
+    artifacts_dir: Path,
+    flat_stake: float,
+    default_fee_bps: float,
+    pricing_source: Literal["real_history", "quote_proxy"],
+    quote_proxy_half_spread: float = 0.0,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    """Run a decision-time backtest using historical pricing or a quote proxy."""
+
     if flat_stake <= 0:
         raise typer.BadParameter("flat_stake must be positive.")
+    if pricing_source == "quote_proxy" and quote_proxy_half_spread < 0:
+        raise typer.BadParameter("quote_proxy_half_spread must be non-negative.")
     required_panel_columns = {
         "market_id",
         "decision_horizon",
@@ -820,6 +888,7 @@ def _run_real_history_backtest(
     skipped_stale_price = 0
     skipped_non_positive_edge = 0
     price_ages: list[float] = []
+    execution_price_premiums: list[float] = []
 
     for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
         artifact = train_model(model_name, train, artifacts_dir)
@@ -841,6 +910,8 @@ def _run_real_history_backtest(
 
         best_edge = 0.0
         best_candidate: dict[str, object] | None = None
+        has_covered_price = False
+        has_stale_price = False
         for outcome_label, fair_probability in forecast.outcome_probabilities.items():
             panel_row = working_panel.loc[
                 (working_panel["market_id"] == spec.market_id)
@@ -851,36 +922,54 @@ def _run_real_history_backtest(
                 continue
             selected = panel_row.iloc[-1]
             coverage_status = str(selected["coverage_status"])
+            if coverage_status == "stale":
+                has_stale_price = True
             if coverage_status != "ok":
                 continue
+            has_covered_price = True
             market_price = float(selected["market_price"])
-            fee_per_share = estimate_fee(market_price, taker_bps=default_fee_bps)
-            edge = compute_edge(fair_probability, market_price, fee_per_share, 0.0)
+            executable_price = market_price
+            if pricing_source == "quote_proxy":
+                _, executable_price = _quote_proxy_prices(
+                    market_price,
+                    half_spread=quote_proxy_half_spread,
+                )
+            fee_per_share = estimate_fee(executable_price, taker_bps=default_fee_bps)
+            edge = compute_edge(fair_probability, executable_price, fee_per_share, 0.0)
             if edge > best_edge:
                 best_edge = edge
                 best_candidate = {
                     "outcome_label": outcome_label,
                     "fair_probability": fair_probability,
                     "market_price": market_price,
+                    "executable_price": executable_price,
                     "edge": edge,
                     "selected": selected,
                 }
+        if not has_covered_price:
+            if has_stale_price:
+                skipped_stale_price += 1
+            else:
+                skipped_missing_price += 1
+            continue
         if best_candidate is None:
             skipped_non_positive_edge += 1
             continue
         outcome_label = str(best_candidate["outcome_label"])
         market_price = float(best_candidate["market_price"])  # type: ignore[arg-type]
+        executable_price = float(best_candidate["executable_price"])  # type: ignore[arg-type]
         edge = float(best_candidate["edge"])  # type: ignore[arg-type]
         selected = best_candidate["selected"]
-        size = flat_stake / max(market_price, 1e-6)
+        size = flat_stake / max(executable_price, 1e-6)
         priced_decision_rows += 1
         age_seconds = selected.get("price_age_seconds")  # type: ignore[union-attr]
         if age_seconds is not None and pd.notna(age_seconds):
             price_ages.append(float(age_seconds))
+        execution_price_premiums.append(executable_price - market_price)
         realized_pnl = settle_position(
             Position(
                 outcome_label=outcome_label,
-                price=market_price,
+                price=executable_price,
                 size=size,
                 side="buy",
             ),
@@ -894,13 +983,14 @@ def _run_real_history_backtest(
                 "decision_horizon": str(row["decision_horizon"]),
                 "outcome_label": outcome_label,
                 "winning_outcome": winning_label,
-                "price": market_price,
+                "price": executable_price,
+                "reference_market_price": market_price,
                 "size": size,
                 "edge": edge,
                 "price_ts": selected.get("price_ts"),  # type: ignore[union-attr]
                 "price_age_seconds": age_seconds,
                 "realized_pnl": realized_pnl,
-                "pricing_source": "real_history",
+                "pricing_source": pricing_source,
             }
         )
 
@@ -913,6 +1003,11 @@ def _run_real_history_backtest(
             "skipped_stale_price": float(skipped_stale_price),
             "skipped_non_positive_edge": float(skipped_non_positive_edge),
             "avg_price_age_seconds": float(sum(price_ages) / len(price_ages)) if price_ages else 0.0,
+            "avg_execution_price_premium": (
+                float(sum(execution_price_premiums) / len(execution_price_premiums))
+                if execution_price_premiums
+                else 0.0
+            ),
         },
     )
     return metrics, trade_rows
@@ -1875,9 +1970,10 @@ def backtest(
     model_name: str = "gaussian_emos",
     artifacts_dir: Path = Path("artifacts/models"),
     bankroll: float = 10_000.0,
-    pricing_source: Literal["synthetic", "real_history"] = "synthetic",
+    pricing_source: Literal["synthetic", "real_history", "quote_proxy"] = "synthetic",
     panel_path: Path = Path("data/parquet/gold/historical_backtest_panel.parquet"),
     flat_stake: float = 1.0,
+    quote_proxy_half_spread: float = 0.02,
 ) -> None:
     """Run a rolling-origin backtest with synthetic or official historical pricing."""
 
@@ -1921,16 +2017,29 @@ def backtest(
                 "Run `uv run pmtmax summarize-price-history-coverage` to inspect gaps."
             )
             raise typer.BadParameter(msg)
-        metrics, trade_rows = _run_real_history_backtest(
-            frame,
-            panel,
-            model_name=model_name,
-            artifacts_dir=artifacts_dir,
-            flat_stake=flat_stake,
-            default_fee_bps=default_fee_bps,
-        )
-        metrics_output = Path("artifacts/backtest_metrics_real_history.json")
-        trades_output = Path("artifacts/backtest_trades_real_history.json")
+        if pricing_source == "real_history":
+            metrics, trade_rows = _run_real_history_backtest(
+                frame,
+                panel,
+                model_name=model_name,
+                artifacts_dir=artifacts_dir,
+                flat_stake=flat_stake,
+                default_fee_bps=default_fee_bps,
+            )
+            metrics_output = Path("artifacts/backtest_metrics_real_history.json")
+            trades_output = Path("artifacts/backtest_trades_real_history.json")
+        else:
+            metrics, trade_rows = _run_quote_proxy_backtest(
+                frame,
+                panel,
+                model_name=model_name,
+                artifacts_dir=artifacts_dir,
+                flat_stake=flat_stake,
+                default_fee_bps=default_fee_bps,
+                quote_proxy_half_spread=quote_proxy_half_spread,
+            )
+            metrics_output = Path("artifacts/backtest_metrics_quote_proxy.json")
+            trades_output = Path("artifacts/backtest_trades_quote_proxy.json")
 
     dump_json(metrics_output, metrics)
     dump_json(trades_output, trade_rows)

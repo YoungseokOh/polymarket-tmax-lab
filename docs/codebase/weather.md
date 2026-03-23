@@ -19,8 +19,8 @@ feature building, lagged pseudo-ensemble support, and official truth retrieval.
 
 ## Operational Rules
 - Do not silently substitute another station or another source.
-- If official truth is unavailable, fail closed or use an explicitly documented public-station override for the same airport, such as AMO `AIR_CALP` for Seoul / RKSI or NOAA Global Hourly for other Wunderground-family cities.
-- Wunderground historical Weather.com access must read `PMTMAX_WU_API_KEY` from runtime settings; do not check API keys into source.
+- If official truth is unavailable, fail closed or use an explicitly documented public-station override for the same airport, such as AMO `AIR_CALP` for Seoul / RKSI or the Wunderground public historical API for London / EGLC and NYC / KLGA.
+- Wunderground historical access may use `PMTMAX_WU_API_KEY` when you have one, but the research path may also derive the documented public front-end Weather.com key from the station page at runtime. Do not hardcode any key material into source.
 - Historical forecast reconstruction uses Open-Meteo's generic archive forecast endpoint and must avoid lookahead.
 - Exact decision-horizon backfills may add `single_run` rows on top of generic archive rows. Gold materialization should prefer those horizon-specific rows when they exist.
 - Research backfills default to strict archive mode; fixture fallback is demo-only and must be logged in bronze tables.

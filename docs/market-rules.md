@@ -46,7 +46,8 @@
 - Markets wait for finalized source data.
 - Revisions after finalization are ignored when the rule text says so.
 - Wunderground-family markets keep the official WU station/source metadata, but the default research truth path uses public airport observations for the same station when exact WU programmatic access is unavailable.
-- Seoul / RKSI uses the Korea Aviation Meteorological Office `AIR_CALP` daily-extremes feed as the default research-truth proxy for the same airport. Other currently supported Wunderground-family cities still use NOAA Global Hourly.
+- Seoul / RKSI uses the Korea Aviation Meteorological Office `AIR_CALP` daily-extremes feed as the default research-truth proxy for the same airport.
+- London / EGLC and NYC / KLGA use the Wunderground public historical API for the same airport station as the default research-truth path.
 - The bin mapper expands labels to settlement intervals using the market precision rule:
   - `8°C` -> `[7.5, 8.5)`
   - `70-71°F` -> `[34.0? no]` not generic conversion; it becomes the rule-specific two-degree Fahrenheit settlement interval centered on the labeled integer endpoints.

@@ -135,10 +135,15 @@ class MarketSpec(BaseModel):
         """Return the default truth adapter used for collection/materialization."""
 
         public_name = (self.public_truth_source_name or "").lower()
-        if self.truth_track == "research_public" and "air_calp" in public_name:
-            return "amo_air_calp"
-        if self.truth_track == "research_public" and self.adapter_key() == "wunderground":
-            return "noaa_global_hourly"
+        if self.truth_track == "research_public":
+            if "air_calp" in public_name:
+                return "amo_air_calp"
+            if "wunderground" in public_name:
+                return "wunderground"
+            if "daily summaries" in public_name:
+                return "noaa_daily_summaries"
+            if self.adapter_key() == "wunderground":
+                return "noaa_global_hourly"
         if self.adapter_key() == "noaa":
             return "noaa_global_hourly"
         return self.adapter_key()

@@ -32,6 +32,10 @@ def test_parse_nyc_rules() -> None:
     assert spec.station_id == "KLGA"
     assert spec.unit == "F"
     assert spec.timezone == "America/New_York"
+    assert spec.truth_track == "research_public"
+    assert spec.public_truth_source_name == "Wunderground Public Historical API"
+    assert spec.public_truth_station_id == "KLGA"
+    assert spec.truth_source_key() == "wunderground"
     assert spec.precision_rule.step == 2.0
 
 
@@ -49,6 +53,10 @@ def test_parse_london_rules() -> None:
     assert spec.timezone == "Europe/London"
     assert spec.station_lat is not None
     assert spec.official_source_url == "https://www.wunderground.com/history/daily/gb/london/EGLC"
+    assert spec.truth_track == "research_public"
+    assert spec.public_truth_source_name == "Wunderground Public Historical API"
+    assert spec.public_truth_station_id == "EGLC"
+    assert spec.truth_source_key() == "wunderground"
 
 
 def test_parse_hko_rules() -> None:

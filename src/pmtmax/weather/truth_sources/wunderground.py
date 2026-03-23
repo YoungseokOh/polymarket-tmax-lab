@@ -18,6 +18,10 @@ TEMP_MAX_PATTERNS = [
     re.compile(r'"temperatureMax"\s*:\s*\{"value"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)', re.I),
     re.compile(r'"temperatureMax"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)', re.I),
 ]
+PUBLIC_API_KEY_PATTERNS = [
+    re.compile(r'apiKey=(?P<value>[a-f0-9]{32})', re.I),
+    re.compile(r'"apiKey"\s*:\s*"(?P<value>[a-f0-9]{32})"', re.I),
+]
 WU_HISTORICAL_URL = "https://api.weather.com/v1/location/{location_id}/observations/historical.json"
 WU_API_KEY_ENV = "PMTMAX_WU_API_KEY"
 
@@ -33,7 +37,9 @@ class WundergroundTruthSource(TruthSource):
     ) -> None:
         self.http = http
         self.snapshot_dir = snapshot_dir
-        self.api_key = EnvSettings().wu_api_key if api_key is None else api_key
+        resolved_api_key = EnvSettings().wu_api_key if api_key is None else api_key
+        self.api_key = resolved_api_key or None
+        self._public_api_key_cache: dict[str, str] = {}
 
     def fetch_observation_bundle(self, spec: MarketSpec, target_date: date) -> TruthFetchBundle:
         url = f"{spec.official_source_url.rstrip('/')}/date/{target_date.isoformat()}"
@@ -56,18 +62,27 @@ class WundergroundTruthSource(TruthSource):
             )
 
         historical_error: Exception | None = None
+        runtime_api_key = self.api_key
+        if not runtime_api_key:
+            runtime_api_key = self._public_api_key_cache.get(spec.station_id)
+            if not runtime_api_key:
+                html = self.http.get_text(url, use_cache=True)
+                runtime_api_key = self._extract_public_api_key(html)
+                if runtime_api_key is not None:
+                    self._public_api_key_cache[spec.station_id] = runtime_api_key
         try:
-            payload, source_url = self._fetch_historical_payload(spec, target_date)
+            payload, source_url = self._fetch_historical_payload(spec, target_date, api_key=runtime_api_key)
             value = self._parse_historical_max(payload)
             raw_payload: dict[str, object] | str = payload
             media_type = "application/json"
         except Exception as exc:
             historical_error = exc
-            html = self.http.get_text(url, use_cache=True)
+            if html is None:
+                html = self.http.get_text(url, use_cache=True)
             try:
                 value = self._parse_daily_max(html)
             except ValueError as parse_exc:
-                if not self.api_key and isinstance(historical_error, RuntimeError):
+                if not runtime_api_key:
                     msg = (
                         f"{parse_exc}. Set {WU_API_KEY_ENV} for Weather.com historical API access "
                         "or provide a same-source local snapshot."
@@ -101,14 +116,21 @@ class WundergroundTruthSource(TruthSource):
             return candidate.read_text()
         return None
 
-    def _fetch_historical_payload(self, spec: MarketSpec, target_date: date) -> tuple[dict[str, object], str]:
-        if not self.api_key:
+    def _fetch_historical_payload(
+        self,
+        spec: MarketSpec,
+        target_date: date,
+        *,
+        api_key: str | None = None,
+    ) -> tuple[dict[str, object], str]:
+        runtime_api_key = api_key or self.api_key
+        if not runtime_api_key:
             msg = f"Missing {WU_API_KEY_ENV} for Weather.com historical API"
             raise RuntimeError(msg)
         location_id = self._location_id(spec)
         base_url = WU_HISTORICAL_URL.format(location_id=location_id)
         params = {
-            "apiKey": self.api_key,
+            "apiKey": runtime_api_key,
             "units": "m" if spec.unit == "C" else "e",
             "startDate": target_date.strftime("%Y%m%d"),
             "endDate": target_date.strftime("%Y%m%d"),
@@ -116,6 +138,13 @@ class WundergroundTruthSource(TruthSource):
         payload = cast(dict[str, object], self.http.get_json(base_url, params=params, use_cache=True))
         source_url = f"{base_url}?{urlencode(params)}"
         return payload, source_url
+
+    def _extract_public_api_key(self, html: str) -> str | None:
+        for pattern in PUBLIC_API_KEY_PATTERNS:
+            match = pattern.search(html)
+            if match:
+                return match.group("value")
+        return None
 
     @staticmethod
     def _location_id(spec: MarketSpec) -> str:

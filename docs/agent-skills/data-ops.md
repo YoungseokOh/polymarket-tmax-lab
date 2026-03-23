@@ -71,10 +71,12 @@ uv run pmtmax compact-warehouse
 - inventory build report: `data/manifests/historical_inventory_build_report.json`
 - inventory validate report: `data/manifests/historical_inventory_validate_report.json`
 - active supported-city watchlist: `configs/market_inventory/active_temperature_watchlist.json`
+- recent core benchmark URLs: `configs/market_inventory/recent_core_temperature_event_urls.json`
+- recent core benchmark snapshots: `configs/market_inventory/recent_core_temperature_snapshots.json`
 
 `refresh_historical_event_urls.py`는 Gamma grouped weather/temperature events에서 supported closed backlog를 찾아 candidate/page-fetch/status manifest를 남기고, `collected`만 append-only URL manifest에 publish한다.
 retryable 상태는 `truth_source_lag`, `truth_request_failed`로 남기고 다음 batch에서 다시 classify할 수 있다.
-`collection-preflight`는 curated snapshot 집합의 truth track과 수동 env 요구사항을 함께 요약한다. Wunderground-family markets는 기본적으로 같은 공항의 documented public truth를 사용하므로 `PMTMAX_WU_API_KEY`는 optional audit env로만 표시된다. 현재 Seoul / RKSI는 AMO `AIR_CALP`, 그 외 지원 도시들은 기본적으로 NOAA Global Hourly를 사용한다.
+`collection-preflight`는 curated snapshot 집합의 truth track과 수동 env 요구사항을 함께 요약한다. Wunderground-family markets는 기본적으로 같은 공항의 documented public truth를 사용하므로 `PMTMAX_WU_API_KEY`는 optional audit env로만 표시된다. 현재 Seoul / RKSI는 AMO `AIR_CALP`, London / EGLC와 NYC / KLGA는 Wunderground public historical API를 research truth 기본값으로 사용한다.
 `build_historical_market_inventory.py`는 canonical snapshot output을 truth-ready subset으로만 만든다. `truth_source_lag`, `truth_blocked`, `truth_request_failed`는 snapshot JSON에 들어가지 않고 inventory report issue로 남는다. canonical 경로로 실행하면 `historical_collection_status.json`도 함께 sync해서 `collected` count가 현재 curated snapshot inventory와 맞도록 갱신한다.
 `backfill-truth`에 `lag` 상태가 보이면 public archive가 target date보다 뒤처진 것이다. 이때 `summarize-truth-coverage`가 station별 최신 archive 일자를 JSON으로 내보내므로 truth-ready subset을 따로 고르거나 재시도 시점을 판단할 수 있다.
 `summarize-dataset-readiness`는 snapshot 수집 성공과 warehouse materialization 성공을 분리해서 보여준다. 도시별 `snapshot_count`, `forecast_ready_count`, `truth_ok_count`, `truth_lag_count`, `gold_market_count`, `gold_row_count`와 market-level readiness detail을 함께 확인할 수 있다.

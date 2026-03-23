@@ -1122,7 +1122,7 @@ class BackfillPipeline:
                     "forecast_source_kind": self._forecast_source_kind(selected_forecasts),
                     **self._metadata_fields(source_priority=self._source_priority(self._forecast_source_kind(selected_forecasts))),
                 }
-                self._populate_feature_row(row, selected_forecasts, spec.target_local_date)
+                self._populate_feature_row(row, selected_forecasts, spec.target_local_date, spec.timezone)
                 rows.append(row)
                 sequence_rows.extend(
                     self._build_sequence_rows(
@@ -1219,10 +1219,11 @@ class BackfillPipeline:
         row: dict[str, object],
         market_forecasts: pd.DataFrame,
         target_date: dt.date,
+        timezone: str,
     ) -> None:
         for model in self.models:
             subset = market_forecasts.loc[market_forecasts["model_name"] == model].copy()
-            features = self._features_from_hourly_rows(subset, target_date)
+            features = self._features_from_hourly_rows(subset, target_date, timezone)
             for key, value in features.items():
                 row[f"{model}_{key}"] = value
             if "model_daily_max" in features and "model_daily_max" not in row:
@@ -1235,12 +1236,18 @@ class BackfillPipeline:
             - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
         )
 
-    def _features_from_hourly_rows(self, frame: pd.DataFrame, target_date: dt.date) -> dict[str, float]:
+    def _features_from_hourly_rows(
+        self,
+        frame: pd.DataFrame,
+        target_date: dt.date,
+        timezone: str,
+    ) -> dict[str, float]:
         if frame.empty:
             return self._empty_feature_map()
+        local_time = pd.to_datetime(frame["forecast_time_local"], utc=True).dt.tz_convert(timezone)
         payload_frame = pd.DataFrame(
             {
-                "time": pd.to_datetime(frame["forecast_time_local"]),
+                "time": local_time,
                 "temperature_2m": frame["temperature_2m"].astype(float),
                 "dew_point_2m": frame["dew_point_2m"].astype(float),
                 "relative_humidity_2m": frame["relative_humidity_2m"].astype(float),
@@ -1928,7 +1935,11 @@ class BackfillPipeline:
             return []
         local_time = pd.to_datetime(frame["time"])
         if getattr(local_time.dt, "tz", None) is None:
-            local_time = local_time.dt.tz_localize(spec.timezone)
+            local_time = local_time.dt.tz_localize(
+                spec.timezone,
+                ambiguous="infer",
+                nonexistent="shift_forward",
+            )
         utc_time = local_time.dt.tz_convert("UTC")
         rows: list[dict[str, object]] = []
         for idx, local_timestamp in enumerate(local_time):

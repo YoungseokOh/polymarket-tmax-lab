@@ -194,6 +194,50 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
     assert not availability["recommended"].empty
 
 
+def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["NYC"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "dst.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+    spec = snapshots[0].spec
+    assert spec is not None
+
+    rows = pipeline._normalize_forecast_rows(
+        spec=spec.model_copy(update={"target_local_date": date(2026, 3, 8)}),
+        model_name="ecmwf_ifs025",
+        endpoint_kind="single_run",
+        payload={
+            "hourly": {
+                "time": ["2026-03-08T01:00", "2026-03-08T02:00", "2026-03-08T03:00"],
+                "temperature_2m": [40.0, 41.0, 42.0],
+            }
+        },
+        raw_path="raw.json",
+        raw_hash="hash",
+        availability_status="available",
+        source_variables=["temperature_2m"],
+        retrieved_at=datetime.now(tz=UTC),
+    )
+
+    assert len(rows) == 3
+    assert rows[1]["forecast_time_local"] == "2026-03-08T03:00:00-04:00"
+    assert rows[1]["forecast_time_utc"] == "2026-03-08T07:00:00+00:00"
+    features = pipeline._features_from_hourly_rows(pd.DataFrame(rows), date(2026, 3, 8), spec.timezone)
+    assert features["num_hours"] == 3.0
+
+
 def test_summarize_dataset_readiness_reports_city_level_progress(tmp_path: Path) -> None:
     snapshots = bundled_market_snapshots(["Seoul"])
     warehouse = DataWarehouse.from_paths(
