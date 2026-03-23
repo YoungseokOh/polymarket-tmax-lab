@@ -12,7 +12,7 @@ from signal generation and broker behavior.
 
 ## execution
 - `edge.py`: fair-value versus executable-price comparison
-- `fees.py` and `slippage.py`: execution cost estimates
+- `fees.py` and `slippage.py`: token-specific fee-rate lookups plus level-walk execution cost estimates
 - `sizing.py`: bankroll-aware size selection
 - `guardrails.py`: spread, freshness, and exposure limits
 - `book_utils.py`: explicit `clob` / `missing` / optional `fixture` book loading contract
@@ -28,6 +28,7 @@ from signal generation and broker behavior.
 - Live trading must remain gated and isolated from the default research/paper path.
 - `opportunity-report`, `paper-trader`, `live-trader`, `paper-mm`, and `live-mm` should treat missing live books as explicit skip states, not synthetic liquidity.
 - `opportunity-shadow` reuses the same guardrails but logs the best raw gap and after-cost edge even for rejected markets, so “strategy is dead” and “book is unusable” remain distinct diagnoses.
+- Execution diagnostics should distinguish `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, and `after_cost_positive_but_spread_too_wide` instead of collapsing everything into a generic “no edge”.
 
 ## Change Checklist
 - Dataset-column changes affect both training and paper-trading workflows.

@@ -26,7 +26,7 @@ from pmtmax.execution.live_broker import LiveBroker
 from pmtmax.execution.opportunity_shadow import OpportunityShadowRunner, select_shadow_horizon
 from pmtmax.execution.paper_broker import PaperBroker
 from pmtmax.execution.sizing import capped_kelly
-from pmtmax.execution.slippage import estimate_slippage
+from pmtmax.execution.slippage import estimate_book_slippage
 from pmtmax.http import CachedHttpClient
 from pmtmax.logging_utils import configure_logging
 from pmtmax.markets.clob_read_client import ClobReadClient
@@ -246,38 +246,24 @@ def _best_signal_across_outcomes(
     books: dict[str, BookSnapshot],
     *,
     mode: Literal["paper", "live"],
+    clob: ClobReadClient | None = None,
+    default_fee_bps: float = 30.0,
+    order_size: float = 1.0,
 ) -> TradeSignal | None:
     """Scan all outcomes and return the signal with the highest edge."""
-    market_id = snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id"))
-    best_signal: TradeSignal | None = None
-    best_edge = 0.0
-    for outcome_label, fair_prob in forecast_probs.items():
-        book = books.get(outcome_label)
-        if book is None:
-            continue
-        executable_price = book.best_ask()
-        spread = max(book.best_ask() - book.best_bid(), 0.0)
-        visible_liq = sum(l.size for l in book.bids) + sum(l.size for l in book.asks)
-        fee = estimate_fee(executable_price)
-        slippage = estimate_slippage(executable_price, spread, visible_liq, 1.0)
-        edge = compute_edge(fair_prob, executable_price, fee, slippage)
-        if edge > best_edge:
-            best_edge = edge
-            best_signal = TradeSignal(
-                market_id=market_id,
-                token_id=book.token_id,
-                outcome_label=outcome_label,
-                side="buy",
-                fair_probability=fair_prob,
-                executable_price=executable_price,
-                fee_estimate=fee,
-                slippage_estimate=slippage,
-                edge=edge,
-                confidence=fair_prob,
-                rationale=f"Best edge outcome {outcome_label} p={fair_prob:.3f}",
-                mode=mode,
-            )
-    return best_signal
+    _, best_after_cost, _, _ = _rank_execution_candidates(
+        forecast_probs,
+        books,
+        clob=clob,
+        default_fee_bps=default_fee_bps,
+        order_size=order_size,
+    )
+    if best_after_cost is None:
+        return None
+    after_cost_edge = best_after_cost.get("after_cost_edge")
+    if after_cost_edge is None or float(after_cost_edge) <= 0:
+        return None
+    return _trade_signal_from_candidate(snapshot, best_after_cost, mode=mode)
 
 
 def _load_books_for_forecast(
@@ -308,6 +294,122 @@ def _load_books_for_forecast(
     return books
 
 
+def _default_fee_bps(config: Any) -> float:
+    """Return the configured fallback fee rate in basis points."""
+
+    execution = getattr(config, "execution", None)
+    if execution is None:
+        return 30.0
+    if hasattr(execution, "default_fee_bps"):
+        return float(getattr(execution, "default_fee_bps"))
+    if hasattr(execution, "fee_bps"):
+        return float(getattr(execution, "fee_bps"))
+    return 30.0
+
+
+def _resolve_fee_bps(
+    clob: ClobReadClient | None,
+    token_id: str,
+    *,
+    default_fee_bps: float,
+) -> float:
+    """Resolve token fee rate, falling back to config when unavailable."""
+
+    if clob is None:
+        return default_fee_bps
+    try:
+        return float(clob.get_fee_rate(token_id))
+    except Exception:  # noqa: BLE001
+        return default_fee_bps
+
+
+def _visible_liquidity(book: BookSnapshot) -> float:
+    """Return the total visible two-sided liquidity from a book snapshot."""
+
+    return sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
+
+
+def _rank_execution_candidates(
+    forecast_probs: dict[str, float],
+    books: dict[str, BookSnapshot],
+    *,
+    clob: ClobReadClient | None,
+    default_fee_bps: float,
+    order_size: float = 1.0,
+) -> tuple[list[dict[str, object]], dict[str, object] | None, dict[str, object] | None, dict[str, object] | None]:
+    """Build comparable execution candidates across all modeled outcomes."""
+
+    candidates: list[dict[str, object]] = []
+    for outcome_label, fair_prob in forecast_probs.items():
+        book = books.get(outcome_label)
+        if book is None or book.source != "clob" or not book.asks:
+            continue
+        best_bid = book.best_bid()
+        best_ask = book.best_ask()
+        spread = max(best_ask - best_bid, 0.0)
+        visible_liquidity = _visible_liquidity(book)
+        fee_bps = _resolve_fee_bps(clob, book.token_id, default_fee_bps=default_fee_bps)
+        fee_per_share = estimate_fee(best_ask, taker_bps=fee_bps)
+        edge_after_fee = fair_prob - best_ask - fee_per_share
+        slippage = estimate_book_slippage("buy", book.asks, order_size)
+        candidates.append(
+            {
+                "token_id": book.token_id,
+                "outcome_label": outcome_label,
+                "fair_probability": fair_prob,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": spread,
+                "visible_liquidity": visible_liquidity,
+                "fee_bps": fee_bps,
+                "fee_estimate": fee_per_share,
+                "slippage_estimate": slippage,
+                "raw_gap": fair_prob - best_ask,
+                "edge_after_fee": edge_after_fee,
+                "after_cost_edge": compute_edge(fair_prob, best_ask, fee_per_share, slippage)
+                if slippage is not None
+                else None,
+                "insufficient_depth": slippage is None,
+                "book_source": book.source,
+            }
+        )
+
+    best_after_cost = max(
+        [candidate for candidate in candidates if candidate["after_cost_edge"] is not None],
+        key=lambda candidate: float(candidate["after_cost_edge"]),
+        default=None,
+    )
+    best_after_fee = max(candidates, key=lambda candidate: float(candidate["edge_after_fee"]), default=None)
+    best_raw = max(candidates, key=lambda candidate: float(candidate["raw_gap"]), default=None)
+    best_reporting = best_after_cost or best_after_fee or best_raw
+    return candidates, best_after_cost, best_after_fee, best_reporting
+
+
+def _trade_signal_from_candidate(
+    snapshot: MarketSnapshot,
+    candidate: dict[str, object],
+    *,
+    mode: Literal["paper", "live"],
+) -> TradeSignal:
+    """Convert a ranked execution candidate into a trade signal."""
+
+    market_id = snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id"))
+    return TradeSignal(
+        market_id=market_id,
+        token_id=str(candidate["token_id"]),
+        outcome_label=str(candidate["outcome_label"]),
+        side="buy",
+        fair_probability=float(candidate["fair_probability"]),
+        executable_price=float(candidate["best_ask"]),
+        fee_estimate=float(candidate["fee_estimate"]),
+        slippage_estimate=float(candidate["slippage_estimate"] or 0.0),
+        edge=float(candidate["after_cost_edge"]),
+        confidence=float(candidate["fair_probability"]),
+        rationale=f"Best edge outcome {candidate['outcome_label']} p={float(candidate['fair_probability']):.3f}",
+        mode=mode,
+    )
+
+
 def _book_source_counts(books: dict[str, BookSnapshot]) -> dict[str, int]:
     """Count book origins for one market evaluation."""
 
@@ -329,6 +431,8 @@ def _evaluate_market_signal(
     books: dict[str, BookSnapshot],
     *,
     mode: Literal["paper", "live"],
+    clob: ClobReadClient | None,
+    default_fee_bps: float,
     edge_threshold: float,
     max_spread_bps: int,
     min_liquidity: float,
@@ -342,6 +446,7 @@ def _evaluate_market_signal(
         "spread": None,
         "liquidity": None,
         "book_source_counts": _book_source_counts(books),
+        "candidate": None,
     }
     if not books:
         return result
@@ -349,32 +454,56 @@ def _evaluate_market_signal(
         result["reason"] = "missing_book"
         return result
 
-    signal = _best_signal_across_outcomes(snapshot, forecast_probs, books, mode=mode)
-    if signal is None:
-        result["reason"] = "no_positive_edge"
+    candidates, best_after_cost, _, best_reporting = _rank_execution_candidates(
+        forecast_probs,
+        books,
+        clob=clob,
+        default_fee_bps=default_fee_bps,
+    )
+    result["candidate"] = best_reporting
+    if not candidates or best_reporting is None:
+        result["reason"] = "missing_book"
         return result
 
-    book = books[signal.outcome_label]
-    spread = book.best_ask() - book.best_bid()
-    liquidity = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
-    result.update(
-        {
-            "signal": signal,
-            "book": book,
-            "spread": spread,
-            "liquidity": liquidity,
-        }
-    )
-    if book.source != "clob":
-        result["reason"] = "non_clob_book"
-    elif signal.edge < edge_threshold:
-        result["reason"] = "edge_below_threshold"
-    elif not spread_ok(book.best_bid(), book.best_ask(), max_spread_bps):
-        result["reason"] = "spread_too_wide"
-    elif liquidity < min_liquidity:
-        result["reason"] = "liquidity_too_low"
+    positive_after_cost = [
+        candidate
+        for candidate in candidates
+        if candidate["after_cost_edge"] is not None and float(candidate["after_cost_edge"]) > 0
+    ]
+    if positive_after_cost and best_after_cost is not None:
+        signal = _trade_signal_from_candidate(snapshot, best_after_cost, mode=mode)
+        book = books[signal.outcome_label]
+        spread = float(best_after_cost["spread"])
+        liquidity = float(best_after_cost["visible_liquidity"])
+        result.update(
+            {
+                "signal": signal,
+                "book": book,
+                "spread": spread,
+                "liquidity": liquidity,
+            }
+        )
+        if not spread_ok(book.best_bid(), book.best_ask(), max_spread_bps):
+            result["reason"] = "after_cost_positive_but_spread_too_wide"
+        elif liquidity < min_liquidity:
+            result["reason"] = "after_cost_positive_but_liquidity_too_low"
+        elif signal.edge < edge_threshold:
+            result["reason"] = "after_cost_positive_but_below_threshold"
+        else:
+            result["reason"] = "tradable"
+        return result
+
+    if any(
+        float(candidate["edge_after_fee"]) > 0 and bool(candidate["insufficient_depth"])
+        for candidate in candidates
+    ):
+        result["reason"] = "insufficient_depth"
+    elif any(float(candidate["edge_after_fee"]) > 0 for candidate in candidates):
+        result["reason"] = "slippage_killed_edge"
+    elif any(float(candidate["raw_gap"]) > 0 for candidate in candidates):
+        result["reason"] = "fee_killed_edge"
     else:
-        result["reason"] = "tradable"
+        result["reason"] = "raw_gap_non_positive"
     return result
 
 
@@ -433,38 +562,19 @@ def _empty_opportunity_observation(
 def _best_opportunity_candidate(
     forecast_probs: dict[str, float],
     books: dict[str, BookSnapshot],
+    *,
+    clob: ClobReadClient | None,
+    default_fee_bps: float,
 ) -> dict[str, object] | None:
     """Return the most favorable outcome candidate, even if it is not tradable."""
 
-    best: dict[str, object] | None = None
-    for outcome_label, fair_prob in forecast_probs.items():
-        book = books.get(outcome_label)
-        if book is None or book.source != "clob" or not book.asks:
-            continue
-        best_bid = book.best_bid()
-        best_ask = book.best_ask()
-        spread = max(best_ask - best_bid, 0.0)
-        visible_liquidity = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
-        fee = estimate_fee(best_ask)
-        slippage = estimate_slippage(best_ask, spread, visible_liquidity, 1.0)
-        raw_gap = fair_prob - best_ask
-        after_cost_edge = compute_edge(fair_prob, best_ask, fee, slippage)
-        candidate = {
-            "outcome_label": outcome_label,
-            "fair_probability": fair_prob,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "spread": spread,
-            "visible_liquidity": visible_liquidity,
-            "fee_estimate": fee,
-            "slippage_estimate": slippage,
-            "raw_gap": raw_gap,
-            "after_cost_edge": after_cost_edge,
-            "book_source": book.source,
-        }
-        if best is None or float(candidate["after_cost_edge"]) > float(best["after_cost_edge"]):
-            best = candidate
-    return best
+    _, _, _, best_reporting = _rank_execution_candidates(
+        forecast_probs,
+        books,
+        clob=clob,
+        default_fee_bps=default_fee_bps,
+    )
+    return best_reporting
 
 
 def _evaluate_opportunity_snapshot(
@@ -513,6 +623,8 @@ def _evaluate_opportunity_snapshot(
         forecast.outcome_probabilities,
         books,
         mode="paper",
+        clob=clob,
+        default_fee_bps=_default_fee_bps(config),
         edge_threshold=edge_threshold,
         max_spread_bps=config.execution.max_spread_bps,
         min_liquidity=config.execution.min_liquidity,
@@ -527,7 +639,7 @@ def _evaluate_opportunity_snapshot(
         forecast_mean=forecast.mean,
         forecast_std=forecast.std,
     )
-    best_candidate = _best_opportunity_candidate(forecast.outcome_probabilities, books)
+    best_candidate = evaluation.get("candidate")
     if best_candidate is None:
         return observation
     return observation.model_copy(update=best_candidate)
@@ -581,6 +693,7 @@ def _run_synthetic_backtest(
     model_name: str,
     artifacts_dir: Path,
     bankroll: float,
+    default_fee_bps: float,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run the existing synthetic-book research backtest."""
 
@@ -617,7 +730,14 @@ def _run_synthetic_backtest(
         for ol in outcome_labels:
             tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
             books[ol] = _synthetic_book(snapshot, ol, tid)
-        signal = _best_signal_across_outcomes(snapshot, forecast.outcome_probabilities, books, mode="paper")
+        signal = _best_signal_across_outcomes(
+            snapshot,
+            forecast.outcome_probabilities,
+            books,
+            mode="paper",
+            clob=None,
+            default_fee_bps=default_fee_bps,
+        )
         if signal is None:
             continue
         book = books[signal.outcome_label]
@@ -625,12 +745,7 @@ def _run_synthetic_backtest(
         size = size_notional / max(signal.executable_price, 1e-6)
         if size <= 0:
             continue
-        fill = broker.simulate_fill(
-            signal,
-            spread=book.best_ask() - book.best_bid(),
-            liquidity=sum(l.size for l in book.bids) + sum(l.size for l in book.asks),
-            size=size,
-        )
+        fill = broker.simulate_fill(signal, book=book, size=size)
         if fill is None:
             continue
         realized_pnl = settle_position(
@@ -641,7 +756,7 @@ def _run_synthetic_backtest(
                 side=fill.side,
             ),
             winning_label,
-            fee_paid=estimate_fee(fill.price * fill.size),
+            fee_paid=estimate_fee(fill.price * fill.size, taker_bps=default_fee_bps),
         )
         trade_rows.append(
             {
@@ -669,6 +784,7 @@ def _run_real_history_backtest(
     model_name: str,
     artifacts_dir: Path,
     flat_stake: float,
+    default_fee_bps: float,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -738,7 +854,7 @@ def _run_real_history_backtest(
             if coverage_status != "ok":
                 continue
             market_price = float(selected["market_price"])
-            fee_per_share = estimate_fee(market_price)
+            fee_per_share = estimate_fee(market_price, taker_bps=default_fee_bps)
             edge = compute_edge(fair_probability, market_price, fee_per_share, 0.0)
             if edge > best_edge:
                 best_edge = edge
@@ -769,7 +885,7 @@ def _run_real_history_backtest(
                 side="buy",
             ),
             winning_label,
-            fee_paid=estimate_fee(flat_stake),
+            fee_paid=estimate_fee(flat_stake, taker_bps=default_fee_bps),
         )
         trade_rows.append(
             {
@@ -1765,6 +1881,8 @@ def backtest(
 ) -> None:
     """Run a rolling-origin backtest with synthetic or official historical pricing."""
 
+    config, _ = load_settings()
+    default_fee_bps = _default_fee_bps(config)
     frame = pd.read_parquet(dataset_path)
     required_columns = {"market_spec_json", "market_prices_json", "winning_outcome", "realized_daily_max"}
     missing = required_columns.difference(frame.columns)
@@ -1780,6 +1898,7 @@ def backtest(
             model_name=model_name,
             artifacts_dir=artifacts_dir,
             bankroll=bankroll,
+            default_fee_bps=default_fee_bps,
         )
         metrics_output = Path("artifacts/backtest_metrics.json")
         trades_output = Path("artifacts/backtest_trades.json")
@@ -1808,6 +1927,7 @@ def backtest(
             model_name=model_name,
             artifacts_dir=artifacts_dir,
             flat_stake=flat_stake,
+            default_fee_bps=default_fee_bps,
         )
         metrics_output = Path("artifacts/backtest_metrics_real_history.json")
         trades_output = Path("artifacts/backtest_trades_real_history.json")
@@ -1862,6 +1982,8 @@ def paper_trader(
             forecast.outcome_probabilities,
             books,
             mode="paper",
+            clob=clob,
+            default_fee_bps=_default_fee_bps(config),
             edge_threshold=edge_threshold,
             max_spread_bps=config.execution.max_spread_bps,
             min_liquidity=config.execution.min_liquidity,
@@ -1871,8 +1993,6 @@ def paper_trader(
         reason = str(evaluation["reason"])
         fill_payload: dict[str, object] | None = None
         if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot):
-            spread = float(evaluation["spread"] or 0.0)
-            liquidity = float(evaluation["liquidity"] or 0.0)
             size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
@@ -1881,7 +2001,7 @@ def paper_trader(
             elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
                 reason = "global_exposure_limit"
             else:
-                fill = broker.simulate_fill(signal, spread=spread, liquidity=liquidity, size=size)
+                fill = broker.simulate_fill(signal, book=book, size=size)
                 if fill is None:
                     reason = "broker_rejected"
                 else:
@@ -1946,6 +2066,8 @@ def live_trader(
             forecast.outcome_probabilities,
             books,
             mode="live",
+            clob=clob,
+            default_fee_bps=_default_fee_bps(config),
             edge_threshold=config.backtest.default_edge_threshold,
             max_spread_bps=config.execution.max_spread_bps,
             min_liquidity=config.execution.min_liquidity,
@@ -2135,6 +2257,8 @@ def scan_daemon(
                 forecast.outcome_probabilities,
                 books,
                 mode="paper",
+                clob=clob,
+                default_fee_bps=_default_fee_bps(config),
                 edge_threshold=edge_threshold,
                 max_spread_bps=config.execution.max_spread_bps,
                 min_liquidity=config.execution.min_liquidity,
@@ -2144,8 +2268,6 @@ def scan_daemon(
                 continue
             if evaluation["reason"] != "tradable":
                 continue
-            spread = float(evaluation["spread"] or 0.0)
-            liquidity = float(evaluation["liquidity"] or 0.0)
             size_notional = capped_kelly(signal.edge, signal.fair_probability, brk.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
@@ -2153,7 +2275,7 @@ def scan_daemon(
                 continue
             if not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
                 continue
-            fill = brk.simulate_fill(signal, spread=spread, liquidity=liquidity, size=size)
+            fill = brk.simulate_fill(signal, book=evaluation["book"], size=size)
             if fill is not None:
                 current_exposure_by_city[spec.city] = current_city_exposure + size_notional
                 logger.info("Entry fill: %s %s edge=%.4f", spec.city, signal.outcome_label, signal.edge)

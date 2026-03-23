@@ -342,8 +342,12 @@ uv run pmtmax opportunity-report \
 ```
 
 This writes `artifacts/opportunity_report.json` and separates `tradable`,
-`no_positive_edge`, `missing_book`, `spread_too_wide`, and other skip reasons so
-“no trade” and “no live book” are not conflated.
+`missing_book`, `raw_gap_non_positive`, `fee_killed_edge`,
+`slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`, and other
+skip reasons so “no trade” and “no live book” are not conflated.
+
+Opportunity evaluation now uses token-specific CLOB `fee-rate` when available
+and a depth walk over visible book levels instead of a flat half-spread penalty.
 
 If you want to validate whether the current live opportunity logic ever becomes
 tradable over time before wiring alerts, run the shadow watcher:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
@@ -61,6 +61,7 @@ class ExecutionConfig(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     live_trading: bool = False
     confirm_live_trading: str = ""
+    default_fee_bps: float = Field(30.0, validation_alias=AliasChoices("default_fee_bps", "fee_bps"))
     max_city_exposure: float = 500.0
     global_max_exposure: float = 2_000.0
     min_liquidity: float = 250.0

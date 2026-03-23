@@ -11,6 +11,7 @@ from pmtmax.cli.main import (
     backtest,
     _bootstrap_snapshots,
     _collection_preflight_report,
+    _evaluate_market_signal,
     _load_snapshots,
     _resolve_opportunity_shadow_horizon,
     live_mm,
@@ -278,8 +279,15 @@ def test_backtest_real_history_writes_separate_artifacts(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
+        "pmtmax.cli.main.load_settings",
+        lambda: (
+            type("_Config", (), {"execution": type("_Exec", (), {"default_fee_bps": 0.0})()})(),
+            EnvSettings(),
+        ),
+    )
+    monkeypatch.setattr(
         "pmtmax.cli.main._run_real_history_backtest",
-        lambda frame, panel, *, model_name, artifacts_dir, flat_stake: (
+        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps: (
             {"mae": 1.0, "rmse": 1.0, "nll": 1.0, "avg_brier": 0.1, "avg_crps": 0.2, "num_trades": 1.0, "pnl": 0.5, "hit_rate": 1.0, "avg_edge": 0.1},
             [{"market_id": "101025", "pricing_source": "real_history"}],
         ),
@@ -369,6 +377,114 @@ def test_opportunity_report_marks_missing_books_explicitly(
     payload = json.loads(output.read_text())
     assert payload[0]["reason"] == "missing_book"
     assert payload[0]["book_source_counts"] == {"missing": 1}
+
+
+def test_evaluate_market_signal_identifies_fee_killed_edge() -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    outcome_label = snapshot.spec.outcome_labels()[0]
+    token_id = snapshot.spec.token_ids[0]
+    books = {
+        outcome_label: BookSnapshot(
+            market_id=snapshot.spec.market_id,
+            token_id=token_id,
+            outcome_label=outcome_label,
+            bids=[BookLevel(price=0.59, size=10.0)],
+            asks=[BookLevel(price=0.60, size=10.0)],
+        )
+    }
+
+    class _Clob:
+        def get_fee_rate(self, token_id: str) -> float:
+            assert token_id
+            return 100.0
+
+    evaluation = _evaluate_market_signal(
+        snapshot,
+        {outcome_label: 0.605},
+        books,
+        mode="paper",
+        clob=_Clob(),
+        default_fee_bps=30.0,
+        edge_threshold=0.0,
+        max_spread_bps=10_000,
+        min_liquidity=0.0,
+    )
+
+    assert evaluation["reason"] == "fee_killed_edge"
+
+
+def test_evaluate_market_signal_identifies_slippage_killed_edge() -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    outcome_label = snapshot.spec.outcome_labels()[0]
+    token_id = snapshot.spec.token_ids[0]
+    books = {
+        outcome_label: BookSnapshot(
+            market_id=snapshot.spec.market_id,
+            token_id=token_id,
+            outcome_label=outcome_label,
+            bids=[BookLevel(price=0.59, size=10.0)],
+            asks=[
+                BookLevel(price=0.60, size=0.10),
+                BookLevel(price=0.80, size=0.90),
+            ],
+        )
+    }
+
+    class _Clob:
+        def get_fee_rate(self, token_id: str) -> float:
+            assert token_id
+            return 0.0
+
+    evaluation = _evaluate_market_signal(
+        snapshot,
+        {outcome_label: 0.62},
+        books,
+        mode="paper",
+        clob=_Clob(),
+        default_fee_bps=30.0,
+        edge_threshold=0.0,
+        max_spread_bps=10_000,
+        min_liquidity=0.0,
+    )
+
+    assert evaluation["reason"] == "slippage_killed_edge"
+
+
+def test_evaluate_market_signal_distinguishes_positive_edge_from_spread_guardrail() -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    outcome_label = snapshot.spec.outcome_labels()[0]
+    token_id = snapshot.spec.token_ids[0]
+    books = {
+        outcome_label: BookSnapshot(
+            market_id=snapshot.spec.market_id,
+            token_id=token_id,
+            outcome_label=outcome_label,
+            bids=[BookLevel(price=0.01, size=100.0)],
+            asks=[BookLevel(price=0.51, size=100.0)],
+        )
+    }
+
+    class _Clob:
+        def get_fee_rate(self, token_id: str) -> float:
+            assert token_id
+            return 0.0
+
+    evaluation = _evaluate_market_signal(
+        snapshot,
+        {outcome_label: 0.80},
+        books,
+        mode="paper",
+        clob=_Clob(),
+        default_fee_bps=30.0,
+        edge_threshold=0.0,
+        max_spread_bps=500,
+        min_liquidity=0.0,
+    )
+
+    assert evaluation["reason"] == "after_cost_positive_but_spread_too_wide"
 
 
 def test_resolve_opportunity_shadow_horizon_uses_market_local_date() -> None:

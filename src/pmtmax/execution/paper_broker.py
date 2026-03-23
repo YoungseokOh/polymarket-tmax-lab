@@ -10,9 +10,9 @@ import pandas as pd
 from pmtmax.execution.edge import compute_edge
 from pmtmax.execution.fees import estimate_fee
 from pmtmax.execution.forecast_exit import should_forecast_exit
-from pmtmax.execution.slippage import estimate_slippage
+from pmtmax.execution.slippage import estimate_book_slippage
 from pmtmax.execution.stops import evaluate_stops
-from pmtmax.storage.schemas import ExecutionFill, PaperPosition, ProbForecast, TradeSignal
+from pmtmax.storage.schemas import BookSnapshot, ExecutionFill, PaperPosition, ProbForecast, TradeSignal
 
 
 @dataclass
@@ -30,22 +30,22 @@ class PaperBroker:
         self,
         signal: TradeSignal,
         *,
-        spread: float,
-        liquidity: float,
+        book: BookSnapshot,
         size: float,
     ) -> ExecutionFill | None:
         """Simulate a conservative fill if edge stays positive after costs."""
 
-        # Cap order size to available ask-side liquidity
-        ask_liq = liquidity / 2.0 if liquidity > 0 else 0.0
+        ask_liq = sum(level.size for level in book.asks)
         size = min(size, ask_liq)
         if size <= 0:
             return None
+        fee_bps = (signal.fee_estimate / signal.executable_price) * 10_000.0 if signal.executable_price > 0 else 0.0
         notional = signal.executable_price * size
-        total_fee = estimate_fee(notional)
-        # compute_edge operates in per-share probability/price units, so use a 1-share fee estimate here.
-        fee_per_share = estimate_fee(signal.executable_price)
-        slippage = estimate_slippage(signal.executable_price, spread, liquidity, size)
+        total_fee = estimate_fee(notional, taker_bps=fee_bps)
+        fee_per_share = estimate_fee(signal.executable_price, taker_bps=fee_bps)
+        slippage = estimate_book_slippage(signal.side, book.asks if signal.side == "buy" else book.bids, size)
+        if slippage is None:
+            return None
         edge = compute_edge(signal.fair_probability, signal.executable_price, fee_per_share, slippage)
         if edge <= 0 or self.bankroll < notional + total_fee:
             return None

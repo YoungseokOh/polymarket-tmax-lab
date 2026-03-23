@@ -11,6 +11,8 @@ class _FakeHttp:
 
     def get_json(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> dict[str, object]:
         self.calls.append((url, params, use_cache))
+        if url.endswith("/fee-rate"):
+            return {"base_fee": 0}
         return {"history": []}
 
 
@@ -39,3 +41,21 @@ def test_get_prices_history_rejects_invalid_window_combinations() -> None:
 
     with pytest.raises(ValueError, match="Provide either interval or a start/end timestamp window"):
         client.get_prices_history("token-1", interval=None, fidelity=60)
+
+
+def test_get_fee_rate_caches_by_token() -> None:
+    http = _FakeHttp()
+    client = ClobReadClient(http, "https://clob.polymarket.com")
+
+    first = client.get_fee_rate("token-1")
+    second = client.get_fee_rate("token-1")
+
+    assert first == 0.0
+    assert second == 0.0
+    assert http.calls == [
+        (
+            "https://clob.polymarket.com/fee-rate",
+            {"token_id": "token-1"},
+            True,
+        )
+    ]

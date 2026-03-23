@@ -13,6 +13,7 @@ class ClobReadClient:
     def __init__(self, http: CachedHttpClient, base_url: str) -> None:
         self.http = http
         self.base_url = base_url.rstrip("/")
+        self._fee_rate_cache: dict[str, float] = {}
 
     def get_book(self, token_id: str) -> dict[str, Any]:
         """Fetch order book for a token."""
@@ -78,3 +79,19 @@ class ClobReadClient:
             use_cache=False,
         )
         return cast(dict[str, Any], payload)
+
+    def get_fee_rate(self, token_id: str, *, use_cache: bool = True) -> float:
+        """Fetch and cache the base taker fee rate in basis points for a token."""
+
+        if use_cache and token_id in self._fee_rate_cache:
+            return self._fee_rate_cache[token_id]
+
+        payload = self.http.get_json(
+            f"{self.base_url}/fee-rate",
+            params={"token_id": token_id},
+            use_cache=use_cache,
+        )
+        base_fee = float(cast(dict[str, Any], payload).get("base_fee", 0.0))
+        if use_cache:
+            self._fee_rate_cache[token_id] = base_fee
+        return base_fee

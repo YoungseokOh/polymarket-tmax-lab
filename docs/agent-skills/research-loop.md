@@ -58,3 +58,4 @@ uv run python scripts/build_active_weather_watchlist.py
 - 모델보다 settlement fidelity와 lookahead 방지가 우선이다
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다
+- active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다
