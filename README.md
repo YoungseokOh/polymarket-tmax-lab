@@ -353,6 +353,8 @@ To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into
 uv run python scripts/run_recent_core_benchmark.py
 ```
 
+The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
+
 ## Paper Trading Workflow
 ```bash
 uv run pmtmax paper-trader \

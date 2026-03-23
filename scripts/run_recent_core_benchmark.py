@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -70,6 +69,22 @@ def _copy_metrics(city_root: Path, *, pricing_source: str, city_slug: str) -> tu
     return metrics_dst, trades_dst
 
 
+def _trade_summary(trades_path: Path) -> dict[str, dict[str, float]]:
+    trades = pd.DataFrame(load_json(trades_path))
+    if trades.empty:
+        return {}
+    summary: dict[str, dict[str, float]] = {}
+    for horizon, group in trades.groupby("decision_horizon", dropna=False):
+        realized = pd.to_numeric(group["realized_pnl"], errors="coerce").fillna(0.0)
+        summary[str(horizon)] = {
+            "trade_count": float(len(group)),
+            "pnl": float(realized.sum()),
+            "hit_rate": float((realized > 0).mean()),
+            "avg_price": float(pd.to_numeric(group["price"], errors="coerce").mean()),
+        }
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--markets-path", type=Path, default=DEFAULT_MARKETS)
@@ -78,6 +93,11 @@ def main() -> None:
     parser.add_argument("--city", action="append", default=None, help="Repeat to limit benchmark cities.")
     parser.add_argument("--model-name", default="gaussian_emos")
     parser.add_argument("--quote-proxy-half-spread", type=float, default=0.02)
+    parser.add_argument(
+        "--reuse-existing",
+        action="store_true",
+        help="Reuse existing per-city dataset/panel/backtest artifacts in the output root when present.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -112,114 +132,144 @@ def main() -> None:
         env = _city_env(city_root, config_path)
         dataset_name = f"{city_slug}_recent_training_set"
         panel_name = f"{city_slug}_recent_backtest_panel"
-
-        _run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(repo_root),
-                "pmtmax",
-                "build-dataset",
-                "--markets-path",
-                str(markets_path),
-                "--city",
-                city,
-                "--output-name",
-                dataset_name,
-            ],
-            cwd=city_root,
-            env=env,
-        )
         dataset_path = city_root / "parquet" / "gold" / f"{dataset_name}.parquet"
+        if not (args.reuse_existing and dataset_path.exists()):
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(repo_root),
+                    "pmtmax",
+                    "build-dataset",
+                    "--markets-path",
+                    str(markets_path),
+                    "--city",
+                    city,
+                    "--output-name",
+                    dataset_name,
+                ],
+                cwd=city_root,
+                env=env,
+            )
         dataset_rows = int(len(pd.read_parquet(dataset_path)))
 
-        _run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(repo_root),
-                "pmtmax",
-                "backfill-price-history",
-                "--markets-path",
-                str(markets_path),
-                "--city",
-                city,
-            ],
-            cwd=city_root,
-            env=env,
-        )
-        _run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(repo_root),
-                "pmtmax",
-                "materialize-backtest-panel",
-                "--dataset-path",
-                str(dataset_path),
-                "--markets-path",
-                str(markets_path),
-                "--city",
-                city,
-                "--output-name",
-                panel_name,
-            ],
-            cwd=city_root,
-            env=env,
-        )
         panel_path = city_root / "parquet" / "gold" / f"{panel_name}.parquet"
+        if not (args.reuse_existing and panel_path.exists()):
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(repo_root),
+                    "pmtmax",
+                    "backfill-price-history",
+                    "--markets-path",
+                    str(markets_path),
+                    "--city",
+                    city,
+                ],
+                cwd=city_root,
+                env=env,
+            )
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(repo_root),
+                    "pmtmax",
+                    "materialize-backtest-panel",
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--markets-path",
+                    str(markets_path),
+                    "--city",
+                    city,
+                    "--output-name",
+                    panel_name,
+                ],
+                cwd=city_root,
+                env=env,
+            )
 
-        _run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(repo_root),
-                "pmtmax",
-                "backtest",
-                "--dataset-path",
-                str(dataset_path),
-                "--panel-path",
-                str(panel_path),
-                "--pricing-source",
-                "real_history",
-                "--model-name",
-                args.model_name,
-            ],
-            cwd=city_root,
-            env=env,
-        )
-        real_metrics_path, real_trades_path = _copy_metrics(city_root, pricing_source="real_history", city_slug=city_slug)
+        real_metrics_path = city_root / "artifacts" / f"{city_slug}_backtest_metrics_real_history.json"
+        real_trades_path = city_root / "artifacts" / f"{city_slug}_backtest_trades_real_history.json"
+        if not (args.reuse_existing and real_metrics_path.exists() and real_trades_path.exists()):
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(repo_root),
+                    "pmtmax",
+                    "backtest",
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--panel-path",
+                    str(panel_path),
+                    "--pricing-source",
+                    "real_history",
+                    "--model-name",
+                    args.model_name,
+                ],
+                cwd=city_root,
+                env=env,
+            )
+            real_metrics_path, real_trades_path = _copy_metrics(
+                city_root,
+                pricing_source="real_history",
+                city_slug=city_slug,
+            )
 
-        _run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(repo_root),
-                "pmtmax",
-                "backtest",
-                "--dataset-path",
-                str(dataset_path),
-                "--panel-path",
-                str(panel_path),
-                "--pricing-source",
-                "quote_proxy",
-                "--quote-proxy-half-spread",
-                str(args.quote_proxy_half_spread),
-                "--model-name",
-                args.model_name,
-            ],
-            cwd=city_root,
-            env=env,
-        )
-        proxy_metrics_path, proxy_trades_path = _copy_metrics(city_root, pricing_source="quote_proxy", city_slug=city_slug)
+        proxy_metrics_path = city_root / "artifacts" / f"{city_slug}_backtest_metrics_quote_proxy.json"
+        proxy_trades_path = city_root / "artifacts" / f"{city_slug}_backtest_trades_quote_proxy.json"
+        if not (args.reuse_existing and proxy_metrics_path.exists() and proxy_trades_path.exists()):
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(repo_root),
+                    "pmtmax",
+                    "backtest",
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--panel-path",
+                    str(panel_path),
+                    "--pricing-source",
+                    "quote_proxy",
+                    "--quote-proxy-half-spread",
+                    str(args.quote_proxy_half_spread),
+                    "--model-name",
+                    args.model_name,
+                ],
+                cwd=city_root,
+                env=env,
+            )
+            proxy_metrics_path, proxy_trades_path = _copy_metrics(
+                city_root,
+                pricing_source="quote_proxy",
+                city_slug=city_slug,
+            )
 
         real_metrics = load_json(real_metrics_path)
         proxy_metrics = load_json(proxy_metrics_path)
+        real_horizon = _trade_summary(real_trades_path)
+        proxy_horizon = _trade_summary(proxy_trades_path)
+        horizon_delta: dict[str, dict[str, float]] = {}
+        for horizon in sorted(set(real_horizon) | set(proxy_horizon)):
+            real_row = real_horizon.get(horizon, {})
+            proxy_row = proxy_horizon.get(horizon, {})
+            horizon_delta[horizon] = {
+                "real_trade_count": float(real_row.get("trade_count", 0.0)),
+                "proxy_trade_count": float(proxy_row.get("trade_count", 0.0)),
+                "real_pnl": float(real_row.get("pnl", 0.0)),
+                "proxy_pnl": float(proxy_row.get("pnl", 0.0)),
+                "pnl_delta": float(proxy_row.get("pnl", 0.0)) - float(real_row.get("pnl", 0.0)),
+                "real_hit_rate": float(real_row.get("hit_rate", 0.0)),
+                "proxy_hit_rate": float(proxy_row.get("hit_rate", 0.0)),
+            }
         summary["cities"][city] = {
             "snapshot_count": snapshot_counts[city],
             **snapshot_ranges[city],
@@ -229,6 +279,9 @@ def main() -> None:
             "panel_summary": _panel_summary(panel_path),
             "real_history_metrics": real_metrics,
             "quote_proxy_metrics": proxy_metrics,
+            "real_history_by_horizon": real_horizon,
+            "quote_proxy_by_horizon": proxy_horizon,
+            "horizon_delta_quote_proxy": horizon_delta,
             "real_history_trades_path": str(real_trades_path),
             "quote_proxy_trades_path": str(proxy_trades_path),
             "pnl_delta_quote_proxy": float(proxy_metrics["pnl"]) - float(real_metrics["pnl"]),
