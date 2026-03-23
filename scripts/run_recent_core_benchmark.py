@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from pmtmax.backtest.metrics import summarize_trade_log
 from pmtmax.utils import dump_json, load_json
+from pmtmax.utils import load_yaml_with_extends
 
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")
 DEFAULT_CONFIG = Path("configs/recent-core-benchmark.yaml")
+DEFAULT_HORIZON_POLICY = Path("configs/recent-core-horizon-policy.yaml")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/recent_core_benchmark")
 DEFAULT_CITIES = ["Seoul", "NYC", "London"]
 
@@ -85,10 +88,34 @@ def _trade_summary(trades_path: Path) -> dict[str, dict[str, float]]:
     return summary
 
 
+def _load_horizon_policy(path: Path | None) -> dict[str, list[str]]:
+    if path is None:
+        return {}
+    payload = load_yaml_with_extends(path.resolve())
+    cities = payload.get("cities", {})
+    result: dict[str, list[str]] = {}
+    for city, city_payload in cities.items():
+        if not isinstance(city_payload, dict):
+            continue
+        horizons = city_payload.get("allowed_horizons", [])
+        result[str(city)] = [str(horizon) for horizon in horizons]
+    return result
+
+
+def _policy_trade_metrics(trades_path: Path, allowed_horizons: list[str]) -> dict[str, float]:
+    trades = pd.DataFrame(load_json(trades_path))
+    if trades.empty:
+        return {"num_trades": 0.0, "pnl": 0.0, "hit_rate": 0.0, "avg_edge": 0.0}
+    if allowed_horizons:
+        trades = trades.loc[trades["decision_horizon"].astype(str).isin(allowed_horizons)].copy()
+    return summarize_trade_log(trades)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--markets-path", type=Path, default=DEFAULT_MARKETS)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--horizon-policy", type=Path, default=DEFAULT_HORIZON_POLICY)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--city", action="append", default=None, help="Repeat to limit benchmark cities.")
     parser.add_argument("--model-name", default="gaussian_emos")
@@ -103,8 +130,10 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     markets_path = args.markets_path.resolve()
     config_path = args.config.resolve()
+    horizon_policy_path = args.horizon_policy.resolve() if args.horizon_policy is not None else None
     output_root = args.output_root.resolve()
     cities = args.city or DEFAULT_CITIES
+    horizon_policy = _load_horizon_policy(horizon_policy_path)
 
     snapshots = load_json(markets_path)
     snapshot_counts: dict[str, int] = {}
@@ -121,6 +150,7 @@ def main() -> None:
     summary: dict[str, object] = {
         "config_path": str(config_path),
         "markets_path": str(markets_path),
+        "horizon_policy_path": str(horizon_policy_path) if horizon_policy_path is not None else None,
         "quote_proxy_half_spread": args.quote_proxy_half_spread,
         "cities": {},
     }
@@ -257,6 +287,7 @@ def main() -> None:
         proxy_metrics = load_json(proxy_metrics_path)
         real_horizon = _trade_summary(real_trades_path)
         proxy_horizon = _trade_summary(proxy_trades_path)
+        allowed_horizons = horizon_policy.get(city, [])
         horizon_delta: dict[str, dict[str, float]] = {}
         for horizon in sorted(set(real_horizon) | set(proxy_horizon)):
             real_row = real_horizon.get(horizon, {})
@@ -270,6 +301,8 @@ def main() -> None:
                 "real_hit_rate": float(real_row.get("hit_rate", 0.0)),
                 "proxy_hit_rate": float(proxy_row.get("hit_rate", 0.0)),
             }
+        policy_real_metrics = _policy_trade_metrics(real_trades_path, allowed_horizons)
+        policy_proxy_metrics = _policy_trade_metrics(proxy_trades_path, allowed_horizons)
         summary["cities"][city] = {
             "snapshot_count": snapshot_counts[city],
             **snapshot_ranges[city],
@@ -277,8 +310,11 @@ def main() -> None:
             "dataset_path": str(dataset_path),
             "panel_path": str(panel_path),
             "panel_summary": _panel_summary(panel_path),
+            "allowed_horizons": allowed_horizons,
             "real_history_metrics": real_metrics,
             "quote_proxy_metrics": proxy_metrics,
+            "policy_real_history_metrics": policy_real_metrics,
+            "policy_quote_proxy_metrics": policy_proxy_metrics,
             "real_history_by_horizon": real_horizon,
             "quote_proxy_by_horizon": proxy_horizon,
             "horizon_delta_quote_proxy": horizon_delta,

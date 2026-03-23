@@ -1,0 +1,13 @@
+cities:
+  Seoul:
+    allowed_horizons:
+      - market_open
+      - previous_evening
+      - morning_of
+  NYC:
+    allowed_horizons:
+      - market_open
+      - previous_evening
+  London:
+    allowed_horizons:
+      - previous_evening
