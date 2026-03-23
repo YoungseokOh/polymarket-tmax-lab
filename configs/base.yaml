@@ -112,6 +112,15 @@ scanner:
   state_path: artifacts/scanner_state.json
   snapshot_refresh_interval: 10
 
+opportunity_shadow:
+  interval_seconds: 60
+  max_cycles: 0
+  near_term_days: 1
+  state_path: artifacts/opportunity_shadow_state.json
+  latest_output_path: artifacts/opportunity_shadow_latest.json
+  history_output_path: artifacts/opportunity_shadow.jsonl
+  summary_output_path: artifacts/opportunity_shadow_summary.json
+
 firebase:
   enabled: false
   bucket_name: ""

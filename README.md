@@ -345,6 +345,21 @@ This writes `artifacts/opportunity_report.json` and separates `tradable`,
 `no_positive_edge`, `missing_book`, `spread_too_wide`, and other skip reasons so
 “no trade” and “no live book” are not conflated.
 
+If you want to validate whether the current live opportunity logic ever becomes
+tradable over time before wiring alerts, run the shadow watcher:
+
+```bash
+uv run pmtmax opportunity-shadow \
+  --model-path artifacts/models/gaussian_emos.pkl \
+  --model-name gaussian_emos \
+  --interval 60
+```
+
+This keeps a near-term (`today` / `tomorrow` in each market timezone) append-only
+audit trail in `artifacts/opportunity_shadow.jsonl`, plus latest and summary views
+under `artifacts/opportunity_shadow_latest.json` and
+`artifacts/opportunity_shadow_summary.json`.
+
 ## Dry-Run Live Workflow
 ```bash
 uv run pmtmax live-trader \

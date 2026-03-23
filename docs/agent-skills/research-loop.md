@@ -6,6 +6,7 @@
 - `backtest`
 - `paper-trader`
 - `opportunity-report`
+- `opportunity-shadow`
 
 ## Default Workflow
 ```bash
@@ -14,6 +15,7 @@ uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax backtest --model-name gaussian_emos
 uv run pmtmax paper-trader --model-name gaussian_emos
 uv run pmtmax opportunity-report --model-name gaussian_emos
+uv run pmtmax opportunity-shadow --model-name gaussian_emos --max-cycles 1
 ```
 
 ## Real Historical Workflow
@@ -46,6 +48,7 @@ uv run python scripts/build_active_weather_watchlist.py
 - backtest outputs: `artifacts/backtest_metrics.json`, `artifacts/backtest_trades.json`
 - paper outputs: `artifacts/paper_signals.json`
 - opportunity outputs: `artifacts/opportunity_report.json`
+- shadow validation outputs: `artifacts/opportunity_shadow.jsonl`, `artifacts/opportunity_shadow_latest.json`, `artifacts/opportunity_shadow_summary.json`
 - closed-event manifests: `data/manifests/historical_event_candidates.json`, `data/manifests/historical_event_page_fetches.json`, `data/manifests/historical_collection_status.json`
 - active watchlist: `artifacts/active_weather_watchlist.json`
 
@@ -54,3 +57,4 @@ uv run python scripts/build_active_weather_watchlist.py
 - 단일 도시 smoke면 horizon을 2개 이상 주는 편이 안전하다
 - 모델보다 settlement fidelity와 lookahead 방지가 우선이다
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
+- `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다

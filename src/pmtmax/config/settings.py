@@ -82,6 +82,16 @@ class ScannerConfig(BaseModel):
     snapshot_refresh_interval: int = 10
 
 
+class OpportunityShadowConfig(BaseModel):
+    interval_seconds: int = 60
+    max_cycles: int = 0
+    near_term_days: int = 1
+    state_path: Path = Path("artifacts/opportunity_shadow_state.json")
+    latest_output_path: Path = Path("artifacts/opportunity_shadow_latest.json")
+    history_output_path: Path = Path("artifacts/opportunity_shadow.jsonl")
+    summary_output_path: Path = Path("artifacts/opportunity_shadow_summary.json")
+
+
 class FirebaseConfig(BaseModel):
     enabled: bool = False
     bucket_name: str = ""
@@ -121,6 +131,7 @@ class RepoConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    opportunity_shadow: OpportunityShadowConfig = Field(default_factory=OpportunityShadowConfig)
     firebase: FirebaseConfig = Field(default_factory=FirebaseConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

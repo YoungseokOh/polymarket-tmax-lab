@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 
 import pandas as pd
 import typer
+from typer.models import OptionInfo
 from rich.console import Console
 from rich.table import Table
 
@@ -22,6 +23,7 @@ from pmtmax.execution.edge import compute_edge
 from pmtmax.execution.fees import estimate_fee
 from pmtmax.execution.guardrails import exposure_ok, forecast_fresh, spread_ok
 from pmtmax.execution.live_broker import LiveBroker
+from pmtmax.execution.opportunity_shadow import OpportunityShadowRunner, select_shadow_horizon
 from pmtmax.execution.paper_broker import PaperBroker
 from pmtmax.execution.sizing import capped_kelly
 from pmtmax.execution.slippage import estimate_slippage
@@ -64,6 +66,7 @@ from pmtmax.storage.schemas import (
     BookSnapshot,
     LegacyRunInventory,
     MarketSnapshot,
+    OpportunityObservation,
     RiskLimits,
     TradeSignal,
 )
@@ -73,6 +76,15 @@ from pmtmax.weather.openmeteo_client import OpenMeteoClient
 
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
+
+
+def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
+    """Return plain default values when Typer OptionInfo leaks into direct calls."""
+
+    if isinstance(value, OptionInfo):
+        default = value.default
+        return fallback if default is ... else default
+    return value
 
 
 def _runtime(include_stores: bool = True) -> tuple:
@@ -364,6 +376,175 @@ def _evaluate_market_signal(
     else:
         result["reason"] = "tradable"
     return result
+
+
+def _market_url_for_spec(spec: MarketSpec) -> str:
+    """Return the public Polymarket event URL when the slug is available."""
+
+    return f"https://polymarket.com/event/{spec.slug}" if spec.slug else ""
+
+
+def _resolve_opportunity_shadow_horizon(
+    spec: MarketSpec,
+    *,
+    now_utc: datetime,
+    near_term_days: int,
+) -> str | None:
+    """Resolve the dynamic near-term horizon for opportunity shadowing."""
+
+    return select_shadow_horizon(spec, now_utc=now_utc, near_term_days=near_term_days)
+
+
+def _empty_opportunity_observation(
+    snapshot: MarketSnapshot,
+    *,
+    observed_at: datetime,
+    decision_horizon: str,
+    reason: str,
+    book_source_counts: dict[str, int] | None = None,
+    forecast_generated_at: datetime | None = None,
+    forecast_mean: float | None = None,
+    forecast_std: float | None = None,
+    error: str | None = None,
+) -> OpportunityObservation:
+    """Build a minimal opportunity observation for skipped/error cases."""
+
+    spec = snapshot.spec
+    if spec is None:
+        msg = "Snapshot is missing spec"
+        raise ValueError(msg)
+    return OpportunityObservation(
+        observed_at=observed_at,
+        market_id=spec.market_id,
+        city=spec.city,
+        question=spec.question,
+        target_local_date=spec.target_local_date,
+        decision_horizon=decision_horizon,
+        reason=reason,
+        market_url=_market_url_for_spec(spec),
+        book_source_counts=book_source_counts or {},
+        forecast_generated_at=forecast_generated_at,
+        forecast_mean=forecast_mean,
+        forecast_std=forecast_std,
+        error=error,
+    )
+
+
+def _best_opportunity_candidate(
+    forecast_probs: dict[str, float],
+    books: dict[str, BookSnapshot],
+) -> dict[str, object] | None:
+    """Return the most favorable outcome candidate, even if it is not tradable."""
+
+    best: dict[str, object] | None = None
+    for outcome_label, fair_prob in forecast_probs.items():
+        book = books.get(outcome_label)
+        if book is None or book.source != "clob" or not book.asks:
+            continue
+        best_bid = book.best_bid()
+        best_ask = book.best_ask()
+        spread = max(best_ask - best_bid, 0.0)
+        visible_liquidity = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
+        fee = estimate_fee(best_ask)
+        slippage = estimate_slippage(best_ask, spread, visible_liquidity, 1.0)
+        raw_gap = fair_prob - best_ask
+        after_cost_edge = compute_edge(fair_prob, best_ask, fee, slippage)
+        candidate = {
+            "outcome_label": outcome_label,
+            "fair_probability": fair_prob,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "visible_liquidity": visible_liquidity,
+            "fee_estimate": fee,
+            "slippage_estimate": slippage,
+            "raw_gap": raw_gap,
+            "after_cost_edge": after_cost_edge,
+            "book_source": book.source,
+        }
+        if best is None or float(candidate["after_cost_edge"]) > float(best["after_cost_edge"]):
+            best = candidate
+    return best
+
+
+def _evaluate_opportunity_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    builder: DatasetBuilder,
+    clob: ClobReadClient,
+    model_path: Path,
+    model_name: str,
+    config: Any,
+    observed_at: datetime,
+    decision_horizon: str,
+    edge_threshold: float,
+) -> OpportunityObservation | None:
+    """Evaluate one market snapshot into a decomposed opportunity observation."""
+
+    spec = snapshot.spec
+    if spec is None:
+        return None
+    try:
+        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
+        forecast = predict_market(model_path, model_name, spec, feature_frame)
+    except Exception as exc:  # noqa: BLE001
+        return _empty_opportunity_observation(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="forecast_failed",
+            error=str(exc),
+        )
+
+    if not forecast_fresh(forecast.generated_at, config.execution.stale_forecast_minutes):
+        return _empty_opportunity_observation(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="stale_forecast",
+            forecast_generated_at=forecast.generated_at,
+            forecast_mean=forecast.mean,
+            forecast_std=forecast.std,
+        )
+
+    books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+    evaluation = _evaluate_market_signal(
+        snapshot,
+        forecast.outcome_probabilities,
+        books,
+        mode="paper",
+        edge_threshold=edge_threshold,
+        max_spread_bps=config.execution.max_spread_bps,
+        min_liquidity=config.execution.min_liquidity,
+    )
+    observation = _empty_opportunity_observation(
+        snapshot,
+        observed_at=observed_at,
+        decision_horizon=decision_horizon,
+        reason=str(evaluation["reason"]),
+        book_source_counts=dict(evaluation["book_source_counts"]),
+        forecast_generated_at=forecast.generated_at,
+        forecast_mean=forecast.mean,
+        forecast_std=forecast.std,
+    )
+    best_candidate = _best_opportunity_candidate(forecast.outcome_probabilities, books)
+    if best_candidate is None:
+        return observation
+    return observation.model_copy(update=best_candidate)
+
+
+def _serialize_opportunity_observation(observation: OpportunityObservation) -> dict[str, object]:
+    """Normalize an opportunity observation for CLI JSON outputs."""
+
+    row = observation.model_dump(mode="json")
+    row["target_local_date"] = observation.target_local_date.isoformat()
+    if observation.after_cost_edge is not None:
+        row["edge"] = round(observation.after_cost_edge, 6)
+    if observation.visible_liquidity is not None:
+        row["liquidity"] = round(observation.visible_liquidity, 6)
+    if observation.best_ask is not None:
+        row["executable_price"] = round(observation.best_ask, 6)
+    return row
 
 
 def _summarize_backtest_metrics(
@@ -2200,6 +2381,14 @@ def opportunity_report(
 ) -> None:
     """Generate a one-shot active-market opportunity report with explicit book status."""
 
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
+    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    cities = _resolve_option_value(cities)
+    markets_path = _resolve_option_value(markets_path)
+    horizon = _resolve_option_value(horizon, "morning_of")
+    min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output, Path("artifacts/opportunity_report.json"))
+
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -2214,75 +2403,26 @@ def opportunity_report(
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
 
-    rows: list[dict[str, object]] = []
+    observations: list[OpportunityObservation] = []
     for snapshot in snapshots:
         spec = snapshot.spec
         if spec is None or spec.target_local_date < datetime.now(tz=UTC).date():
             continue
-        try:
-            feature_frame = builder.build_live_row(spec, horizon=horizon)
-            forecast = predict_market(model_path, model_name, spec, feature_frame)
-        except Exception as exc:  # noqa: BLE001
-            rows.append(
-                {
-                    "market_id": spec.market_id,
-                    "city": spec.city,
-                    "question": spec.question,
-                    "target_local_date": spec.target_local_date.isoformat(),
-                    "reason": "forecast_failed",
-                    "error": str(exc),
-                }
-            )
-            continue
-        if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
-            rows.append(
-                {
-                    "market_id": spec.market_id,
-                    "city": spec.city,
-                    "question": spec.question,
-                    "target_local_date": spec.target_local_date.isoformat(),
-                    "reason": "stale_forecast",
-                }
-            )
-            continue
-
-        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
-        evaluation = _evaluate_market_signal(
+        observation = _evaluate_opportunity_snapshot(
             snapshot,
-            forecast.outcome_probabilities,
-            books,
-            mode="paper",
+            builder=builder,
+            clob=clob,
+            model_path=model_path,
+            model_name=model_name,
+            config=config,
+            observed_at=datetime.now(tz=UTC),
+            decision_horizon=horizon,
             edge_threshold=edge_threshold,
-            max_spread_bps=config.execution.max_spread_bps,
-            min_liquidity=config.execution.min_liquidity,
         )
-        signal = evaluation["signal"]
-        book = evaluation["book"]
-        row: dict[str, object] = {
-            "market_id": spec.market_id,
-            "city": spec.city,
-            "question": spec.question,
-            "target_local_date": spec.target_local_date.isoformat(),
-            "forecast_mean": round(forecast.mean, 4),
-            "forecast_std": round(forecast.std, 4),
-            "reason": evaluation["reason"],
-            "book_source_counts": evaluation["book_source_counts"],
-        }
-        if isinstance(signal, TradeSignal):
-            row.update(
-                {
-                    "outcome_label": signal.outcome_label,
-                    "fair_probability": round(signal.fair_probability, 6),
-                    "executable_price": round(signal.executable_price, 6),
-                    "edge": round(signal.edge, 6),
-                    "spread": round(float(evaluation["spread"] or 0.0), 6),
-                    "liquidity": round(float(evaluation["liquidity"] or 0.0), 6),
-                }
-            )
-        if isinstance(book, BookSnapshot):
-            row["book_source"] = book.source
-        rows.append(row)
+        if observation is not None:
+            observations.append(observation)
 
+    rows = [_serialize_opportunity_observation(observation) for observation in observations]
     rows.sort(key=lambda row: (row.get("reason") != "tradable", -(float(row.get("edge", -999.0)) if row.get("edge") is not None else -999.0)))
     dump_json(output, rows)
 
@@ -2305,6 +2445,107 @@ def opportunity_report(
         )
     console.print(table)
     console.print(f"Wrote {output}")
+
+
+@app.command("opportunity-shadow")
+def opportunity_shadow(
+    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    interval: int | None = typer.Option(None, help="Seconds between shadow cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    near_term_days: int | None = typer.Option(None, help="How many days ahead to include beyond local today"),
+    output: Path | None = typer.Option(None, help="Append-only JSONL output"),
+    summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
+    state_path: Path | None = typer.Option(None, help="State JSON path"),
+) -> None:
+    """Continuously validate whether the live opportunity path ever becomes tradable."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
+    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    cities = _resolve_option_value(cities)
+    markets_path = _resolve_option_value(markets_path)
+    interval = _resolve_option_value(interval)
+    max_cycles = _resolve_option_value(max_cycles)
+    near_term_days = _resolve_option_value(near_term_days)
+    output = _resolve_option_value(output)
+    summary_output = _resolve_option_value(summary_output)
+    state_path = _resolve_option_value(state_path)
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    shadow_config = config.opportunity_shadow
+    effective_interval = interval or shadow_config.interval_seconds
+    effective_max_cycles = shadow_config.max_cycles if max_cycles is None else max_cycles
+    effective_near_term_days = near_term_days if near_term_days is not None else shadow_config.near_term_days
+    history_output_path = output or shadow_config.history_output_path
+    summary_output_path = summary_output or shadow_config.summary_output_path
+    latest_output_path = shadow_config.latest_output_path
+    effective_state_path = state_path or shadow_config.state_path
+    edge_threshold = config.backtest.default_edge_threshold
+
+    def _snapshot_fetcher() -> list[MarketSnapshot]:
+        return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+
+    def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[OpportunityObservation]:
+        observations: list[OpportunityObservation] = []
+        for snapshot in snapshots:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            decision_horizon = _resolve_opportunity_shadow_horizon(
+                spec,
+                now_utc=observed_at,
+                near_term_days=effective_near_term_days,
+            )
+            if decision_horizon is None:
+                continue
+            observation = _evaluate_opportunity_snapshot(
+                snapshot,
+                builder=builder,
+                clob=clob,
+                model_path=model_path,
+                model_name=model_name,
+                config=config,
+                observed_at=observed_at,
+                decision_horizon=decision_horizon,
+                edge_threshold=edge_threshold,
+            )
+            if observation is not None:
+                observations.append(observation)
+        return observations
+
+    runner = OpportunityShadowRunner(
+        config=config,
+        interval_seconds=effective_interval,
+        max_cycles=effective_max_cycles or 0,
+        state_path=effective_state_path,
+        latest_output_path=latest_output_path,
+        history_output_path=history_output_path,
+        summary_output_path=summary_output_path,
+        snapshot_fetcher=_snapshot_fetcher,
+        evaluator=_evaluator,
+    )
+
+    console.print(
+        "Opportunity shadow: "
+        f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
+        f"near_term_days={effective_near_term_days}"
+    )
+    runner.run_loop()
+    console.print(f"Wrote latest {latest_output_path}")
+    console.print(f"Wrote history {history_output_path}")
+    console.print(f"Wrote summary {summary_output_path}")
 
 
 @app.command("forecast-daemon")

@@ -308,6 +308,33 @@ class ForecastSummary(BaseModel):
     mispricings: list[OutcomeMispricing] = Field(default_factory=list)
 
 
+class OpportunityObservation(BaseModel):
+    observed_at: datetime
+    market_id: str
+    city: str
+    question: str
+    target_local_date: date
+    decision_horizon: str
+    reason: str
+    market_url: str = ""
+    book_source_counts: dict[str, int] = Field(default_factory=dict)
+    forecast_generated_at: datetime | None = None
+    forecast_mean: float | None = None
+    forecast_std: float | None = None
+    outcome_label: str | None = None
+    fair_probability: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    spread: float | None = None
+    visible_liquidity: float | None = None
+    fee_estimate: float | None = None
+    slippage_estimate: float | None = None
+    raw_gap: float | None = None
+    after_cost_edge: float | None = None
+    book_source: str | None = None
+    error: str | None = None
+
+
 # -- Track C: market making ------------------------------------------------
 
 

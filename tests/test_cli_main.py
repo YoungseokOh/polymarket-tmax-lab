@@ -12,8 +12,10 @@ from pmtmax.cli.main import (
     _bootstrap_snapshots,
     _collection_preflight_report,
     _load_snapshots,
+    _resolve_opportunity_shadow_horizon,
     live_mm,
     materialize_backtest_panel,
+    opportunity_shadow,
     opportunity_report,
     summarize_dataset_readiness,
     summarize_price_history_coverage,
@@ -21,7 +23,7 @@ from pmtmax.cli.main import (
 )
 from pmtmax.config.settings import EnvSettings
 from pmtmax.markets.repository import bundled_market_snapshots
-from pmtmax.storage.schemas import BookLevel, BookSnapshot
+from pmtmax.storage.schemas import BookLevel, BookSnapshot, OpportunityObservation
 
 
 def _future_snapshot(city: str = "Seoul"):
@@ -367,6 +369,118 @@ def test_opportunity_report_marks_missing_books_explicitly(
     payload = json.loads(output.read_text())
     assert payload[0]["reason"] == "missing_book"
     assert payload[0]["book_source_counts"] == {"missing": 1}
+
+
+def test_resolve_opportunity_shadow_horizon_uses_market_local_date() -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0].model_copy(deep=True)
+    assert snapshot.spec is not None
+    spec = snapshot.spec
+    now_utc = datetime(2026, 3, 23, 3, 0, tzinfo=UTC)
+
+    same_day = spec.model_copy(update={"target_local_date": datetime(2026, 3, 23, tzinfo=UTC).date()})
+    next_day = spec.model_copy(update={"target_local_date": datetime(2026, 3, 24, tzinfo=UTC).date()})
+    far_day = spec.model_copy(update={"target_local_date": datetime(2026, 3, 25, tzinfo=UTC).date()})
+
+    assert _resolve_opportunity_shadow_horizon(same_day, now_utc=now_utc, near_term_days=1) == "morning_of"
+    assert _resolve_opportunity_shadow_horizon(next_day, now_utc=now_utc, near_term_days=1) == "previous_evening"
+    assert _resolve_opportunity_shadow_horizon(far_day, now_utc=now_utc, near_term_days=1) is None
+
+
+def test_opportunity_shadow_command_writes_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot("Seoul")
+    assert snapshot.spec is not None
+    snapshot.spec = snapshot.spec.model_copy(
+        update={"target_local_date": datetime.now(tz=UTC).date()}
+    )
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.02})(),
+            "execution": type("_Exec", (), {"max_spread_bps": 500, "min_liquidity": 10.0, "stale_forecast_minutes": 60})(),
+            "opportunity_shadow": type(
+                "_Shadow",
+                (),
+                {
+                    "interval_seconds": 1,
+                    "max_cycles": 1,
+                    "near_term_days": 1,
+                    "state_path": tmp_path / "shadow_state.json",
+                    "latest_output_path": tmp_path / "shadow_latest.json",
+                    "history_output_path": tmp_path / "shadow_history.jsonl",
+                    "summary_output_path": tmp_path / "shadow_summary.json",
+                },
+            )(),
+        },
+    )()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+
+    def _fake_eval(
+        snapshot,
+        *,
+        builder,
+        clob,
+        model_path,
+        model_name,
+        config,
+        observed_at,
+        decision_horizon,
+        edge_threshold,
+    ):
+        assert decision_horizon == "morning_of"
+        return OpportunityObservation(
+            observed_at=observed_at,
+            market_id=snapshot.spec.market_id,
+            city=snapshot.spec.city,
+            question=snapshot.spec.question,
+            target_local_date=snapshot.spec.target_local_date,
+            decision_horizon=decision_horizon,
+            reason="tradable",
+            market_url=f"https://polymarket.com/event/{snapshot.spec.slug}",
+            outcome_label=snapshot.spec.outcome_labels()[0],
+            fair_probability=0.62,
+            best_bid=0.58,
+            best_ask=0.60,
+            spread=0.02,
+            visible_liquidity=500.0,
+            fee_estimate=0.012,
+            slippage_estimate=0.011,
+            raw_gap=0.02,
+            after_cost_edge=-0.003,
+            book_source="clob",
+        )
+
+    monkeypatch.setattr("pmtmax.cli.main._evaluate_opportunity_snapshot", _fake_eval)
+
+    opportunity_shadow(max_cycles=1)
+
+    latest = json.loads((tmp_path / "shadow_latest.json").read_text())
+    summary = json.loads((tmp_path / "shadow_summary.json").read_text())
+    state = json.loads((tmp_path / "shadow_state.json").read_text())
+    history_lines = (tmp_path / "shadow_history.jsonl").read_text().strip().splitlines()
+
+    assert latest[0]["reason"] == "tradable"
+    assert latest[0]["decision_horizon"] == "morning_of"
+    assert summary["tradable_count"] == 1
+    assert state["tradable_count"] == 1
+    assert len(history_lines) == 1
 
 
 def test_live_mm_uses_inventory_mapping_for_quoter(
