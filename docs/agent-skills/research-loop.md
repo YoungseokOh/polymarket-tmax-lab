@@ -18,6 +18,14 @@ uv run pmtmax opportunity-report --model-name gaussian_emos
 uv run pmtmax opportunity-shadow --model-name gaussian_emos --max-cycles 1
 ```
 
+집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
+shadow watcher를 돌리고 싶으면 다음 래퍼를 사용한다.
+
+```bash
+scripts/run_recent_core_benchmark_local.sh
+scripts/run_opportunity_shadow_watch.sh --max-cycles 1
+```
+
 `paper-trader`, `live-trader`, `scan-daemon`, `opportunity-report`, and
 `opportunity-shadow` default to `--horizon policy`. The policy lives in
 `configs/recent-core-horizon-policy.yaml` and filtered rows are emitted as

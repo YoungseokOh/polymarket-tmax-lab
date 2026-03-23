@@ -229,6 +229,12 @@ The default research CLI no longer reads `tests/fixtures/truth`; fixture truth r
 `build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
 The repo also ships a recent 3-city benchmark for official history evaluation in `configs/market_inventory/recent_core_temperature_event_urls.json` and `configs/market_inventory/recent_core_temperature_snapshots.json`.
 For a reproducible lightweight rerun of that benchmark, use `configs/recent-core-benchmark.yaml`, `configs/recent-core-horizon-policy.yaml`, and `scripts/run_recent_core_benchmark.py`.
+If you want a home-machine wrapper that first repairs the local canonical dataset/model and then runs the benchmark, use:
+
+```bash
+scripts/run_recent_core_benchmark_local.sh
+scripts/run_recent_core_benchmark_local.sh --city Seoul
+```
 
 3. Start from a clean canonical warehouse if you want to replace the existing seed data.
 
@@ -400,6 +406,14 @@ uv run pmtmax opportunity-shadow \
   --model-path artifacts/models/gaussian_emos.pkl \
   --model-name gaussian_emos \
   --interval 60
+```
+
+For a home-machine operational entrypoint that first ensures the canonical
+dataset/model exist locally and then starts the watcher, use:
+
+```bash
+scripts/run_opportunity_shadow_watch.sh --max-cycles 1
+scripts/run_opportunity_shadow_watch.sh --city Seoul --interval 60
 ```
 
 This keeps a near-term (`today` / `tomorrow` in each market timezone) append-only
