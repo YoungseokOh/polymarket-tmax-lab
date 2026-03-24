@@ -5,11 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from pmtmax.examples import example_market_specs
+from pmtmax.examples import EXAMPLE_MARKETS, example_market_specs
+from pmtmax.markets.rule_parser import parse_market_spec
 from pmtmax.weather.truth_sources import make_truth_source
 from pmtmax.weather.truth_sources.amo_air_calp import AmoAirCalpTruthSource
 from pmtmax.weather.truth_sources.base import TruthSourceLagError
 from pmtmax.weather.truth_sources.noaa_global_hourly import NoaaGlobalHourlyTruthSource
+from pmtmax.weather.truth_sources.wunderground import WundergroundTruthSource
 
 
 class _FakeHttp:
@@ -35,6 +37,27 @@ class _LaggingHttp:
         return []
 
 
+def _toronto_spec():
+    market = {
+        **EXAMPLE_MARKETS["Seoul"],
+        "id": "example-toronto",
+        "slug": "highest-temperature-in-toronto-on-march-21-2026",
+        "question": "Highest temperature in Toronto on March 21?",
+    }
+    description = (
+        "This market will resolve to the temperature range that contains the highest temperature recorded at the "
+        "Toronto Pearson Intl Airport Station in degrees Celsius on 21 Mar '26. "
+        "The resolution source for this market will be information from Wunderground, specifically the highest "
+        "temperature recorded for all times on this day by the Forecast for the Toronto Pearson Intl Airport "
+        "Station once information is finalized, available here: "
+        "https://www.wunderground.com/history/daily/ca/mississauga/CYYZ. "
+        'This market can not resolve to "Yes" until all data for this date has been finalized. '
+        "The resolution source for this market measures temperatures to whole degrees Celsius (eg, 9°C). "
+        "Any revisions to temperatures recorded after data is finalized for this market's timeframe will not be considered."
+    )
+    return parse_market_spec(description, market=market)
+
+
 def test_make_truth_source_routes_seoul_markets_to_amo_public_archive() -> None:
     spec = example_market_specs(["Seoul"])[0]
     source = make_truth_source(spec, _FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
@@ -42,8 +65,29 @@ def test_make_truth_source_routes_seoul_markets_to_amo_public_archive() -> None:
     assert isinstance(source, AmoAirCalpTruthSource)
 
 
-def test_make_truth_source_routes_nyc_markets_to_noaa_public_archive() -> None:
+def test_make_truth_source_routes_nyc_markets_to_wunderground_public_archive() -> None:
     spec = example_market_specs(["NYC"])[0]
+    source = make_truth_source(spec, _FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
+
+    assert isinstance(source, WundergroundTruthSource)
+
+
+def test_make_truth_source_routes_london_markets_to_wunderground_public_archive() -> None:
+    market = {
+        **EXAMPLE_MARKETS["Seoul"],
+        "id": "example-london",
+        "slug": "highest-temperature-in-london-on-march-18-2026",
+        "question": "Highest temperature in London on March 18?",
+    }
+    description = Path("tests/fixtures/markets/london_rules.txt").read_text()
+    spec = parse_market_spec(description, market=market)
+    source = make_truth_source(spec, _FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
+
+    assert isinstance(source, WundergroundTruthSource)
+
+
+def test_make_truth_source_routes_toronto_markets_to_noaa_public_archive() -> None:
+    spec = _toronto_spec()
     source = make_truth_source(spec, _FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
 
     assert isinstance(source, NoaaGlobalHourlyTruthSource)
@@ -61,7 +105,12 @@ def test_noaa_truth_source_uses_local_station_snapshot_when_available() -> None:
 
 
 def test_noaa_truth_source_fetches_hourly_rows_and_converts_to_market_unit() -> None:
-    spec = example_market_specs(["NYC"])[0]
+    spec = example_market_specs(["NYC"])[0].model_copy(
+        update={
+            "public_truth_source_name": "NOAA Global Hourly",
+            "public_truth_station_id": "72503014732",
+        }
+    )
     http = _FakeHttp()
     source = NoaaGlobalHourlyTruthSource(http)  # type: ignore[arg-type]
 

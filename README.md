@@ -222,7 +222,7 @@ uv run python scripts/validate_historical_market_inventory.py
 uv run pmtmax collection-preflight --markets-path configs/market_inventory/historical_temperature_snapshots.json
 ```
 
-`collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path. Seoul / RKSI uses AMO `AIR_CALP`, while London / EGLC and NYC / KLGA use the Wunderground public historical API for the same station. `PMTMAX_WU_API_KEY` is optional and only used when you want to force an explicit same-source audit key instead of the documented public research path.
+`collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path. Seoul / RKSI uses AMO `AIR_CALP`, London / EGLC and NYC / KLGA use the Wunderground public historical API for the same station, and other expansion-city mappings may use NOAA Global Hourly when `station_catalog.json` documents that same-airport public path. `PMTMAX_WU_API_KEY` is optional and only used when you want to force an explicit same-source audit key instead of the documented public research path.
 When you run `build_historical_market_inventory.py` against the canonical checked-in manifests, it also syncs `data/manifests/historical_collection_status.json` so the `collected` count matches the current curated snapshot inventory.
 If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with a public archive lag message, run `uv run pmtmax summarize-truth-coverage` to inspect the latest archive date NOAA advertised for each lagged station.
 The default research CLI no longer reads `tests/fixtures/truth`; fixture truth remains test/demo-only unless you wire it explicitly in code.
@@ -367,7 +367,7 @@ To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into
 uv run python scripts/run_recent_core_benchmark.py
 ```
 
-The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. It also applies `configs/recent-core-horizon-policy.yaml` and records policy-filtered metrics for the currently recommended horizons. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
+The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. It also applies `configs/recent-core-horizon-policy.yaml`, records policy-filtered metrics for the currently recommended horizons, and adds top-level aggregate profitability fields: `aggregate_real_history_metrics`, `aggregate_quote_proxy_metrics`, `aggregate_policy_real_history_metrics`, `aggregate_policy_quote_proxy_metrics`, `aggregate_panel_coverage`, `decision`, `decision_reason`, and `sample_adequacy`. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
 
 ## Paper Trading Workflow
 ```bash
@@ -472,7 +472,7 @@ The live broker fails closed if flags or credentials are missing.
 - Bundled historical market snapshots provide a reproducible backtest path for Seoul, NYC, Hong Kong, and Taipei even when no active temperature markets are currently listed.
 - Active grouped-event discovery now follows Polymarket `weather` and `temperature` event tags instead of relying on `/markets` pagination alone.
 - The checked-in station catalog covers the current active airport-city universe, with Seoul, NYC, and London marked as the core trading cities.
-- Wunderground-family markets keep their official station/source metadata, but default research truth collection uses documented public same-airport paths. Seoul / RKSI uses Korea's Aviation Meteorological Office `AIR_CALP` daily-extremes feed. London / EGLC and NYC / KLGA use the Wunderground public historical API for the same airport station. `PMTMAX_WU_API_KEY` is optional for explicit same-source audit collection only.
+- Wunderground-family markets keep their official station/source metadata, but default research truth collection uses documented public same-airport paths. Seoul / RKSI uses Korea's Aviation Meteorological Office `AIR_CALP` daily-extremes feed. London / EGLC and NYC / KLGA use the Wunderground public historical API for the same airport station. Some expansion-city WU mappings use NOAA Global Hourly when the checked-in station catalog points to that same-airport public archive. `PMTMAX_WU_API_KEY` is optional for explicit same-source audit collection only.
 - The CWA adapter is cache-first but can use the official CODiS station API as an exact-source override for Taipei station data. It still does not substitute another source or station.
 - Advanced models beyond the det2prob path are practical public-data approximations of the cited papers, not paper-faithful reproductions of closed or richer operational inputs.
 - Firebase sync is a backup mirror for raw/parquet/manifests only. DuckDB remains the local canonical warehouse and is not mirrored.

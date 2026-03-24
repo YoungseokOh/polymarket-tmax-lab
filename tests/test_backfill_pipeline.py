@@ -56,8 +56,15 @@ class _LagTruthHttp:
 
 
 class _FakeClobClient:
-    def __init__(self, payloads: dict[str, dict[str, object]]) -> None:
+    def __init__(
+        self,
+        payloads: dict[str, dict[str, object]],
+        *,
+        last_trade_payloads: dict[str, dict[str, object]] | None = None,
+    ) -> None:
         self.payloads = payloads
+        self.last_trade_payloads = last_trade_payloads or {}
+        self.last_trade_calls: list[str] = []
 
     def get_prices_history(
         self,
@@ -71,6 +78,10 @@ class _FakeClobClient:
         assert fidelity == 60
         assert use_cache is True
         return self.payloads.get(market, {"history": []})
+
+    def get_last_trade_price(self, token_id: str) -> dict[str, object]:
+        self.last_trade_calls.append(token_id)
+        return self.last_trade_payloads.get(token_id, {})
 
 
 def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> None:
@@ -427,6 +438,11 @@ def test_backfill_price_history_and_panel_materialization_capture_coverage_state
             ]
         },
     }
+    empty_token_ids = [token_id for token_id in token_ids if token_id not in payloads]
+    clob = _FakeClobClient(
+        payloads,
+        last_trade_payloads={token_id: {"price": "0.11", "side": "BUY"} for token_id in empty_token_ids},
+    )
     warehouse = DataWarehouse.from_paths(
         duckdb_path=tmp_path / "duckdb" / "prices.duckdb",
         parquet_root=tmp_path / "parquet",
@@ -443,10 +459,17 @@ def test_backfill_price_history_and_panel_materialization_capture_coverage_state
         forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
     )
 
-    history_tables = pipeline.backfill_price_history([snapshot], clob=_FakeClobClient(payloads))
+    history_tables = pipeline.backfill_price_history([snapshot], clob=clob)
+    bronze = history_tables["bronze_price_history_requests"]
+    empty_request = bronze.loc[bronze["status"].astype(str) == "empty"].iloc[0]
 
-    assert len(history_tables["bronze_price_history_requests"]) == len(token_ids)
-    assert set(history_tables["bronze_price_history_requests"]["status"].astype(str)) == {"ok", "empty"}
+    assert len(bronze) == len(token_ids)
+    assert set(bronze["status"].astype(str)) == {"ok", "empty"}
+    assert empty_request["empty_reason"] == "history_unavailable_last_trade_present"
+    assert float(empty_request["last_trade_price"]) == 0.11
+    assert empty_request["last_trade_side"] == "BUY"
+    assert bool(empty_request["last_trade_present"]) is True
+    assert set(clob.last_trade_calls) == set(empty_token_ids)
     assert len(history_tables["silver_price_timeseries"]) == 3
 
     dataset = pd.DataFrame(
@@ -473,4 +496,97 @@ def test_backfill_price_history_and_panel_materialization_capture_coverage_state
     assert len(panel) == len(token_ids)
     assert set(panel["coverage_status"].astype(str)) == {"missing", "ok", "stale"}
     assert set(summary["panel_summary"]["coverage_status"].astype(str)) == {"missing", "ok", "stale"}
+    empty_summary = summary["request_summary"].loc[summary["request_summary"]["status"].astype(str) == "empty"].iloc[0]
+    assert int(empty_summary["last_trade_probe_count"]) == len(empty_token_ids)
+    assert int(empty_summary["last_trade_present_count"]) == len(empty_token_ids)
+    assert int(empty_summary["history_empty_with_last_trade_count"]) == len(empty_token_ids)
     assert bool(summary["market_summary"].iloc[0]["market_ready"]) is True
+
+
+def test_materialize_backtest_panel_fails_closed_when_price_history_table_is_empty(tmp_path: Path) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    spec = snapshot.spec
+    assert spec is not None
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "empty_prices.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+    dataset = pd.DataFrame(
+        [
+            {
+                "market_id": spec.market_id,
+                "city": spec.city,
+                "target_date": pd.Timestamp(spec.target_local_date),
+                "decision_horizon": "morning_of",
+                "decision_time_utc": pd.Timestamp(datetime(2025, 1, 1, 9, 30, tzinfo=UTC)),
+                "market_spec_json": spec.model_dump_json(),
+                "winning_outcome": spec.outcome_labels()[0],
+                "realized_daily_max": 10.0,
+            }
+        ]
+    )
+
+    panel = pipeline.materialize_backtest_panel(
+        dataset,
+        output_name="empty_price_backtest_panel",
+        max_price_age_minutes=60,
+    )
+
+    assert len(panel) == len(spec.token_ids)
+    assert set(panel["coverage_status"].astype(str)) == {"missing"}
+
+
+def test_summarize_price_history_coverage_uses_latest_request_per_token(tmp_path: Path) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    spec = snapshot.spec
+    assert spec is not None
+    token_ids = spec.token_ids
+    payloads = {
+        token_ids[0]: {
+            "history": [
+                {"t": int(datetime(2025, 1, 1, 8, 0, tzinfo=UTC).timestamp()), "p": 0.42},
+            ]
+        }
+    }
+    empty_token_ids = [token_id for token_id in token_ids if token_id not in payloads]
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "summary_latest.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_price_history([snapshot], clob=_FakeClobClient(payloads))
+    pipeline.backfill_price_history(
+        [snapshot],
+        clob=_FakeClobClient(
+            payloads,
+            last_trade_payloads={token_id: {"price": "0.11", "side": "BUY"} for token_id in empty_token_ids},
+        ),
+    )
+    summary = pipeline.summarize_price_history_coverage({spec.market_id})
+
+    assert len(summary["request_details"]) == len(token_ids)
+    empty_summary = summary["request_summary"].loc[summary["request_summary"]["status"].astype(str) == "empty"].iloc[0]
+    assert int(empty_summary["history_empty_with_last_trade_count"]) == len(empty_token_ids)
+    assert int(empty_summary["history_empty_without_last_trade_count"]) == 0

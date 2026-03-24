@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 from pmtmax.backtest.metrics import summarize_trade_log
-from pmtmax.utils import dump_json, load_json
-from pmtmax.utils import load_yaml_with_extends
+from pmtmax.backtest.recent_core_benchmark import summarize_recent_core_profitability
+from pmtmax.utils import dump_json, load_json, load_yaml_with_extends
 
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")
 DEFAULT_CONFIG = Path("configs/recent-core-benchmark.yaml")
@@ -26,7 +26,7 @@ def _city_slug(city: str) -> str:
 
 
 def _run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
-    subprocess.run(cmd, cwd=cwd, env=env, check=True)
+    subprocess.run(cmd, cwd=cwd, env=env, check=True)  # noqa: S603
 
 
 def _city_env(city_root: Path, config_path: Path) -> dict[str, str]:
@@ -323,6 +323,7 @@ def main() -> None:
             "pnl_delta_quote_proxy": float(proxy_metrics["pnl"]) - float(real_metrics["pnl"]),
         }
 
+    summary.update(summarize_recent_core_profitability(dict(summary["cities"])))
     summary_path = output_root / "recent_core_benchmark_summary.json"
     dump_json(summary_path, summary)
     print(f"Wrote recent core benchmark summary -> {summary_path}")

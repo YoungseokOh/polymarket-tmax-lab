@@ -60,6 +60,15 @@ def _coerce_float(value: object) -> float:
     return 0.0
 
 
+def _coerce_optional_float(value: object) -> float | None:
+    """Convert mixed row values to an optional float for sparse diagnostics."""
+
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
 def _rows_for_market(frame: pd.DataFrame, market_id: str) -> pd.DataFrame:
     """Return rows for one market or an empty frame when the key column is absent."""
 
@@ -79,6 +88,32 @@ def _normalize_price_history_points(payload: dict[str, Any]) -> list[dict[str, o
             continue
         normalized.append({"timestamp": pd.Timestamp(timestamp), "price": float(price)})
     return normalized
+
+
+def _extract_last_trade_diagnostics(payload: dict[str, Any]) -> dict[str, object]:
+    """Normalize last-trade diagnostics from mixed CLOB payload shapes."""
+
+    last_trade_price: float | None = None
+    for key in ("price", "last_trade_price", "lastTradePrice"):
+        if key not in payload:
+            continue
+        last_trade_price = _coerce_optional_float(payload.get(key))
+        if last_trade_price is not None:
+            break
+
+    last_trade_side: str | None = None
+    for key in ("side", "last_trade_side", "lastTradeSide"):
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        last_trade_side = str(value)
+        break
+
+    return {
+        "last_trade_price": last_trade_price,
+        "last_trade_side": last_trade_side,
+        "last_trade_present": last_trade_price is not None,
+    }
 
 
 @dataclass
@@ -792,6 +827,12 @@ class BackfillPipeline:
                 http_status_code: int | None = None
                 history: list[dict[str, object]] = []
                 status = "empty"
+                empty_reason: str | None = None
+                last_trade_price: float | None = None
+                last_trade_side: str | None = None
+                last_trade_present: bool | None = None
+                last_trade_http_status_code: int | None = None
+                last_trade_error_message: str | None = None
                 try:
                     payload = clob.get_prices_history(
                         token_id,
@@ -811,6 +852,27 @@ class BackfillPipeline:
                     raw_path = artifact.relative_path
                     raw_hash = artifact.content_hash
                     status = "ok" if history else "empty"
+                    if status == "empty":
+                        try:
+                            last_trade_payload = clob.get_last_trade_price(token_id)
+                            diagnostics = _extract_last_trade_diagnostics(last_trade_payload)
+                            last_trade_price = cast(float | None, diagnostics["last_trade_price"])
+                            last_trade_side = cast(str | None, diagnostics["last_trade_side"])
+                            last_trade_present = cast(bool, diagnostics["last_trade_present"])
+                            empty_reason = (
+                                "history_unavailable_last_trade_present"
+                                if last_trade_present
+                                else "history_unavailable_last_trade_missing"
+                            )
+                        except httpx.HTTPStatusError as exc:
+                            last_trade_http_status_code = exc.response.status_code
+                            last_trade_error_message = str(exc)
+                            last_trade_present = None
+                            empty_reason = "history_unavailable_last_trade_http_error"
+                        except Exception as exc:  # noqa: BLE001
+                            last_trade_error_message = str(exc)
+                            last_trade_present = None
+                            empty_reason = "history_unavailable_last_trade_error"
                 except httpx.HTTPStatusError as exc:
                     http_status_code = exc.response.status_code
                     error_message = str(exc)
@@ -859,6 +921,12 @@ class BackfillPipeline:
                         "point_count": len(history),
                         "first_price_ts": earliest_ts,
                         "last_price_ts": latest_ts,
+                        "empty_reason": empty_reason,
+                        "last_trade_price": last_trade_price,
+                        "last_trade_side": last_trade_side,
+                        "last_trade_present": last_trade_present,
+                        "last_trade_http_status_code": last_trade_http_status_code,
+                        "last_trade_error_message": last_trade_error_message,
                         "http_status_code": http_status_code,
                         "error_message": error_message,
                         "raw_path": raw_path,
@@ -893,6 +961,10 @@ class BackfillPipeline:
             timeseries["timestamp"] = pd.to_datetime(timeseries["timestamp"], errors="coerce", utc=True)
             if "price" in timeseries.columns:
                 timeseries["price"] = pd.to_numeric(timeseries["price"], errors="coerce")
+        else:
+            # Preserve the expected schema so empty price history fails closed as
+            # `coverage_status="missing"` instead of raising on missing columns.
+            timeseries = pd.DataFrame(columns=["market_id", "token_id", "timestamp", "price"])
         max_age_seconds = float(max_price_age_minutes * 60)
         rows: list[dict[str, object]] = []
         for _, dataset_row in dataset.iterrows():
@@ -964,6 +1036,14 @@ class BackfillPipeline:
 
         bronze = self.warehouse.read_table("bronze_price_history_requests")
         panel = self.warehouse.read_table("gold_backtest_panel")
+        if not bronze.empty and {"market_id", "token_id", "requested_at"}.issubset(bronze.columns):
+            bronze = bronze.copy()
+            bronze["requested_at"] = pd.to_datetime(bronze["requested_at"], errors="coerce", utc=True)
+            bronze = (
+                bronze.sort_values(["market_id", "token_id", "requested_at"], ignore_index=True)
+                .drop_duplicates(subset=["market_id", "token_id"], keep="last")
+                .reset_index(drop=True)
+            )
         if market_ids:
             wanted = {str(market_id) for market_id in market_ids}
             if not bronze.empty and "market_id" in bronze.columns:
@@ -974,13 +1054,45 @@ class BackfillPipeline:
         request_summary = pd.DataFrame()
         request_details = pd.DataFrame()
         if not bronze.empty:
+            summary_agg: dict[str, tuple[str, object]] = {
+                "request_count": ("token_id", "size"),
+                "market_count": ("market_id", lambda series: series.astype(str).nunique()),
+                "total_points": ("point_count", "sum"),
+            }
+            if "last_trade_present" in bronze.columns:
+                summary_agg["last_trade_probe_count"] = ("last_trade_present", lambda series: series.notna().sum())
+                summary_agg["last_trade_present_count"] = (
+                    "last_trade_present",
+                    lambda series: series.fillna(False).astype(bool).sum(),
+                )
+            if "empty_reason" in bronze.columns:
+                summary_agg["history_empty_with_last_trade_count"] = (
+                    "empty_reason",
+                    lambda series: (
+                        series.fillna("").astype(str) == "history_unavailable_last_trade_present"
+                    ).sum(),
+                )
+                summary_agg["history_empty_without_last_trade_count"] = (
+                    "empty_reason",
+                    lambda series: (
+                        series.fillna("").astype(str) == "history_unavailable_last_trade_missing"
+                    ).sum(),
+                )
+                summary_agg["history_empty_last_trade_error_count"] = (
+                    "empty_reason",
+                    lambda series: (
+                        series.fillna("").astype(str).str.startswith("history_unavailable_last_trade_")
+                        & ~series.fillna("").astype(str).isin(
+                            [
+                                "history_unavailable_last_trade_present",
+                                "history_unavailable_last_trade_missing",
+                            ]
+                        )
+                    ).sum(),
+                )
             request_summary = (
                 bronze.groupby(["status", "city"], dropna=False)
-                .agg(
-                    request_count=("token_id", "size"),
-                    market_count=("market_id", lambda series: series.astype(str).nunique()),
-                    total_points=("point_count", "sum"),
-                )
+                .agg(**summary_agg)
                 .reset_index()
                 .sort_values(["status", "city"], ignore_index=True)
             )
@@ -998,6 +1110,12 @@ class BackfillPipeline:
                         "point_count",
                         "first_price_ts",
                         "last_price_ts",
+                        "empty_reason",
+                        "last_trade_price",
+                        "last_trade_side",
+                        "last_trade_present",
+                        "last_trade_http_status_code",
+                        "last_trade_error_message",
                         "http_status_code",
                         "error_message",
                     )
@@ -1185,7 +1303,8 @@ class BackfillPipeline:
         if any(snapshot.spec is not None and snapshot.spec.adapter_key() == "wunderground" for snapshot in snapshots):
             message += (
                 " Wunderground-family markets require a documented same-airport public truth response "
-                "(for example, AMO AIR_CALP for Seoul/RKSI or NOAA Global Hourly for other supported cities) "
+                "(for example, AMO AIR_CALP for Seoul/RKSI, the Wunderground public historical API for "
+                "core Wunderground airport cities, or NOAA Global Hourly for station-catalog cities mapped there) "
                 "or a local station snapshot for truth backfill."
             )
         truth_bronze = self.warehouse.read_table("bronze_truth_snapshots")
