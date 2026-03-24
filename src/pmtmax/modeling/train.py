@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
-import json
-
 import numpy as np
+import pandas as pd
 
 from pmtmax.modeling.advanced.aifs_nwp_blend import AifsNwpBlendModel
 from pmtmax.modeling.advanced.det2prob_nn import Det2ProbNNModel
@@ -39,12 +37,21 @@ def sanitize_model_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def default_feature_names(frame: pd.DataFrame) -> list[str]:
     """Infer the default modeling features from a dataset."""
 
-    excluded = {"market_id", "station_id", "target_date", "realized_daily_max", "winning_outcome"}
+    excluded = {
+        "market_id",
+        "station_id",
+        "target_date",
+        "realized_daily_max",
+        "winning_outcome",
+        "source_priority",
+        "settlement_eligible",
+    }
     return [
         column
         for column in frame.columns
         if column not in excluded
         and pd.api.types.is_numeric_dtype(frame[column])
+        and frame[column].nunique(dropna=False) > 1
         and not column.startswith("kma_ldps_")
         and not column.endswith("_num_hours")
     ]

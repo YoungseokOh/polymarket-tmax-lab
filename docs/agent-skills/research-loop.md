@@ -7,6 +7,7 @@
 - `paper-trader`
 - `opportunity-report`
 - `opportunity-shadow`
+- `open-phase-shadow`
 
 ## Default Workflow
 ```bash
@@ -16,6 +17,7 @@ uv run pmtmax backtest --model-name gaussian_emos
 uv run pmtmax paper-trader --model-name gaussian_emos
 uv run pmtmax opportunity-report --model-name gaussian_emos
 uv run pmtmax opportunity-shadow --model-name gaussian_emos --max-cycles 1
+uv run pmtmax open-phase-shadow --model-name gaussian_emos --max-cycles 1
 ```
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
@@ -62,6 +64,7 @@ uv run python scripts/build_active_weather_watchlist.py
 - paper outputs: `artifacts/paper_signals.json`
 - opportunity outputs: `artifacts/opportunity_report.json`
 - shadow validation outputs: `artifacts/opportunity_shadow.jsonl`, `artifacts/opportunity_shadow_latest.json`, `artifacts/opportunity_shadow_summary.json`
+- open-phase validation outputs: `artifacts/open_phase_shadow.jsonl`, `artifacts/open_phase_shadow_latest.json`, `artifacts/open_phase_shadow_summary.json`
 - closed-event manifests: `data/manifests/historical_event_candidates.json`, `data/manifests/historical_event_page_fetches.json`, `data/manifests/historical_collection_status.json`
 - active watchlist: `artifacts/active_weather_watchlist.json`
 
@@ -71,5 +74,6 @@ uv run python scripts/build_active_weather_watchlist.py
 - 모델보다 settlement fidelity와 lookahead 방지가 우선이다
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다
+- `open-phase-shadow`는 `componentMarkets[*].acceptingOrdersTimestamp` 기준 최근 상장 시장만 골라 `market_open` horizon으로 평가하는 실험 경로다
 - active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다
 - 현재 기본 horizon policy는 `Seoul=market_open+previous_evening+morning_of`, `NYC=market_open+previous_evening`, `London=previous_evening`이다

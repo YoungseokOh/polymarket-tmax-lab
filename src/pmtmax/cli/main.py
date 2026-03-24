@@ -10,9 +10,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import typer
-from typer.models import OptionInfo
 from rich.console import Console
 from rich.table import Table
+from typer.models import OptionInfo
 
 from pmtmax.backfill import BackfillPipeline
 from pmtmax.backtest.dataset_builder import DatasetBuilder
@@ -30,6 +30,12 @@ from pmtmax.execution.sizing import capped_kelly
 from pmtmax.execution.slippage import estimate_book_slippage
 from pmtmax.http import CachedHttpClient
 from pmtmax.logging_utils import configure_logging
+from pmtmax.markets.book_utils import (
+    fetch_book as _fetch_book,
+)
+from pmtmax.markets.book_utils import (
+    synthetic_book as _synthetic_book,
+)
 from pmtmax.markets.clob_read_client import ClobReadClient
 from pmtmax.markets.gamma_client import GammaClient
 from pmtmax.markets.inventory import (
@@ -46,6 +52,7 @@ from pmtmax.markets.repository import (
 from pmtmax.modeling.evaluation import brier_score, crps_from_samples, gaussian_nll, mae, rmse
 from pmtmax.modeling.predict import predict_market
 from pmtmax.modeling.train import train_model
+from pmtmax.monitoring.open_phase import OpenPhaseShadowRunner, select_open_phase_candidates
 from pmtmax.storage.duckdb_store import DuckDBStore
 from pmtmax.storage.firebase_mirror import FirebaseMirror
 from pmtmax.storage.lab_bootstrap import (
@@ -57,17 +64,13 @@ from pmtmax.storage.lab_bootstrap import (
     restore_warehouse_from_seed,
 )
 from pmtmax.storage.parquet_store import ParquetStore
-from pmtmax.markets.book_utils import (
-    book_snapshot_from_payload as _book_snapshot_from_payload,
-    fetch_book as _fetch_book,
-    synthetic_book as _synthetic_book,
-)
 from pmtmax.storage.schemas import (
-    BookLevel,
     BookSnapshot,
     LegacyRunInventory,
     MarketSnapshot,
+    OpenPhaseObservation,
     OpportunityObservation,
+    ProbForecast,
     RiskLimits,
     TradeSignal,
 )
@@ -742,6 +745,46 @@ def _serialize_opportunity_observation(observation: OpportunityObservation) -> d
         row["liquidity"] = round(observation.visible_liquidity, 6)
     if observation.best_ask is not None:
         row["executable_price"] = round(observation.best_ask, 6)
+    return row
+
+
+def _open_phase_observation_from_opportunity(
+    observation: OpportunityObservation,
+    *,
+    market_created_at: datetime | None,
+    market_deploying_at: datetime | None,
+    market_accepting_orders_at: datetime | None,
+    market_opened_at: datetime | None,
+    open_phase_age_hours: float,
+) -> OpenPhaseObservation:
+    """Attach listing/open-phase metadata to a standard opportunity observation."""
+
+    payload = observation.model_dump(mode="python")
+    payload.update(
+        {
+            "market_created_at": market_created_at,
+            "market_deploying_at": market_deploying_at,
+            "market_accepting_orders_at": market_accepting_orders_at,
+            "market_opened_at": market_opened_at,
+            "open_phase_age_hours": open_phase_age_hours,
+        }
+    )
+    return OpenPhaseObservation.model_validate(payload)
+
+
+def _serialize_open_phase_observation(observation: OpenPhaseObservation) -> dict[str, object]:
+    """Normalize an open-phase observation for CLI JSON outputs."""
+
+    row = observation.model_dump(mode="json")
+    row["target_local_date"] = observation.target_local_date.isoformat()
+    if observation.after_cost_edge is not None:
+        row["edge"] = round(observation.after_cost_edge, 6)
+    if observation.visible_liquidity is not None:
+        row["liquidity"] = round(observation.visible_liquidity, 6)
+    if observation.best_ask is not None:
+        row["executable_price"] = round(observation.best_ask, 6)
+    if observation.open_phase_age_hours is not None:
+        row["open_phase_age_hours"] = round(observation.open_phase_age_hours, 4)
     return row
 
 
@@ -2963,6 +3006,132 @@ def opportunity_shadow(
     console.print(f"Wrote latest {latest_output_path}")
     console.print(f"Wrote history {history_output_path}")
     console.print(f"Wrote summary {summary_output_path}")
+
+
+@app.command("open-phase-shadow")
+def open_phase_shadow(
+    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    interval: int | None = typer.Option(None, help="Seconds between scan cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    open_window_hours: float = typer.Option(24.0, help="Only include markets opened within this many hours"),
+    horizon: str = typer.Option("market_open", help="Forecast horizon for open-phase evaluation"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path = typer.Option(Path("artifacts/open_phase_shadow.jsonl"), help="Append-only JSONL output"),
+    latest_output: Path = typer.Option(Path("artifacts/open_phase_shadow_latest.json"), help="Latest cycle JSON output"),
+    summary_output: Path = typer.Option(Path("artifacts/open_phase_shadow_summary.json"), help="Summary JSON output"),
+    state_path: Path = typer.Option(Path("artifacts/open_phase_shadow_state.json"), help="State JSON path"),
+) -> None:
+    """Continuously watch newly listed markets and score them at listing/open phase."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
+    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    cities = _resolve_option_value(cities)
+    markets_path = _resolve_option_value(markets_path)
+    interval = _resolve_option_value(interval)
+    max_cycles = _resolve_option_value(max_cycles)
+    open_window_hours = float(_resolve_option_value(open_window_hours, 24.0))
+    horizon = _resolve_option_value(horizon, "market_open")
+    min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output, Path("artifacts/open_phase_shadow.jsonl"))
+    latest_output = _resolve_option_value(latest_output, Path("artifacts/open_phase_shadow_latest.json"))
+    summary_output = _resolve_option_value(summary_output, Path("artifacts/open_phase_shadow_summary.json"))
+    state_path = _resolve_option_value(state_path, Path("artifacts/open_phase_shadow_state.json"))
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    effective_interval = interval or config.opportunity_shadow.interval_seconds
+    effective_max_cycles = config.opportunity_shadow.max_cycles if max_cycles is None else max_cycles
+    edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+
+    def _snapshot_fetcher() -> list[MarketSnapshot]:
+        return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+
+    def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[OpenPhaseObservation]:
+        observations: list[OpenPhaseObservation] = []
+        candidates = select_open_phase_candidates(
+            snapshots,
+            observed_at=observed_at,
+            open_window_hours=open_window_hours,
+        )
+        for candidate in candidates:
+            observation = _evaluate_opportunity_snapshot(
+                candidate.snapshot,
+                builder=builder,
+                clob=clob,
+                model_path=model_path,
+                model_name=model_name,
+                config=config,
+                observed_at=observed_at,
+                decision_horizon=horizon,
+                edge_threshold=edge_threshold,
+            )
+            if observation is None:
+                continue
+            observations.append(
+                _open_phase_observation_from_opportunity(
+                    observation,
+                    market_created_at=candidate.market_created_at,
+                    market_deploying_at=candidate.market_deploying_at,
+                    market_accepting_orders_at=candidate.market_accepting_orders_at,
+                    market_opened_at=candidate.market_opened_at,
+                    open_phase_age_hours=candidate.open_phase_age_hours,
+                )
+            )
+        return observations
+
+    runner = OpenPhaseShadowRunner(
+        config=config,
+        interval_seconds=effective_interval,
+        max_cycles=effective_max_cycles or 0,
+        state_path=state_path,
+        latest_output_path=latest_output,
+        history_output_path=output,
+        summary_output_path=summary_output,
+        snapshot_fetcher=_snapshot_fetcher,
+        evaluator=_evaluator,
+    )
+
+    console.print(
+        "Open-phase shadow: "
+        f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
+        f"open_window_hours={open_window_hours}, horizon={horizon}"
+    )
+    runner.run_loop()
+
+    rows = json.loads(latest_output.read_text()) if latest_output.exists() else []
+    table = Table(title="Open-Phase Shadow")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Age(h)")
+    table.add_column("Outcome")
+    table.add_column("Edge")
+    table.add_column("Reason")
+    for row in rows[:20]:
+        edge = row.get("after_cost_edge")
+        table.add_row(
+            str(row.get("city", "")),
+            str(row.get("target_local_date", "")),
+            f"{float(row['open_phase_age_hours']):.2f}" if row.get("open_phase_age_hours") is not None else "—",
+            str(row.get("outcome_label", "—")),
+            f"{float(edge):+.4f}" if edge is not None else "—",
+            str(row.get("reason", "")),
+        )
+    console.print(table)
+    console.print(f"Wrote latest {latest_output}")
+    console.print(f"Wrote history {output}")
+    console.print(f"Wrote summary {summary_output}")
 
 
 @app.command("forecast-daemon")

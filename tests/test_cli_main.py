@@ -3,25 +3,27 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
 from pmtmax.cli.main import (
-    backtest,
     _bootstrap_snapshots,
     _collection_preflight_report,
     _evaluate_market_signal,
     _load_snapshots,
     _quote_proxy_prices,
-    _run_quote_proxy_backtest,
-    _resolve_signal_horizon_with_reason,
     _resolve_opportunity_shadow_horizon,
+    _resolve_signal_horizon_with_reason,
+    _run_quote_proxy_backtest,
     _run_real_history_backtest,
+    backtest,
     live_mm,
     materialize_backtest_panel,
-    opportunity_shadow,
+    open_phase_shadow,
     opportunity_report,
+    opportunity_shadow,
     summarize_dataset_readiness,
     summarize_price_history_coverage,
     summarize_truth_coverage,
@@ -34,8 +36,9 @@ from pmtmax.storage.schemas import BookLevel, BookSnapshot, OpportunityObservati
 def _future_snapshot(city: str = "Seoul"):
     snapshot = bundled_market_snapshots([city])[0].model_copy(deep=True)
     assert snapshot.spec is not None
+    local_today = datetime.now(tz=UTC).astimezone(ZoneInfo(snapshot.spec.timezone)).date()
     snapshot.spec = snapshot.spec.model_copy(
-        update={"target_local_date": datetime.now(tz=UTC).date() + timedelta(days=1)}
+        update={"target_local_date": local_today + timedelta(days=1)}
     )
     return snapshot
 
@@ -50,8 +53,9 @@ def _future_snapshot_days(city: str, days: int):
             if snap.spec is not None and snap.spec.city == city
         )
     assert snapshot.spec is not None
+    local_today = datetime.now(tz=UTC).astimezone(ZoneInfo(snapshot.spec.timezone)).date()
     snapshot.spec = snapshot.spec.model_copy(
-        update={"target_local_date": datetime.now(tz=UTC).date() + timedelta(days=days)}
+        update={"target_local_date": local_today + timedelta(days=days)}
     )
     return snapshot
 
@@ -929,8 +933,9 @@ def test_opportunity_shadow_command_writes_outputs(
 ) -> None:
     snapshot = _future_snapshot("Seoul")
     assert snapshot.spec is not None
+    local_today = datetime.now(tz=UTC).astimezone(ZoneInfo(snapshot.spec.timezone)).date()
     snapshot.spec = snapshot.spec.model_copy(
-        update={"target_local_date": datetime.now(tz=UTC).date()}
+        update={"target_local_date": local_today}
     )
 
     class _FakeBuilder:
@@ -1015,6 +1020,104 @@ def test_opportunity_shadow_command_writes_outputs(
 
     assert latest[0]["reason"] == "tradable"
     assert latest[0]["decision_horizon"] == "morning_of"
+    assert summary["tradable_count"] == 1
+    assert state["tradable_count"] == 1
+    assert len(history_lines) == 1
+
+
+def test_open_phase_shadow_command_writes_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot_days("NYC", 2)
+    assert snapshot.spec is not None
+    opened_at = datetime.now(tz=UTC) - timedelta(hours=2)
+    snapshot.market["componentMarkets"] = [
+        {
+            "createdAt": (opened_at - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+            "created_at": (opened_at - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+            "deployingTimestamp": (opened_at - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "acceptingOrdersTimestamp": opened_at.isoformat().replace("+00:00", "Z"),
+        }
+    ]
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.02})(),
+            "opportunity_shadow": type("_Shadow", (), {"interval_seconds": 1, "max_cycles": 1})(),
+        },
+    )()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+
+    def _fake_eval(
+        snapshot,
+        *,
+        builder,
+        clob,
+        model_path,
+        model_name,
+        config,
+        observed_at,
+        decision_horizon,
+        edge_threshold,
+    ):
+        assert decision_horizon == "market_open"
+        return OpportunityObservation(
+            observed_at=observed_at,
+            market_id=snapshot.spec.market_id,
+            city=snapshot.spec.city,
+            question=snapshot.spec.question,
+            target_local_date=snapshot.spec.target_local_date,
+            decision_horizon=decision_horizon,
+            reason="tradable",
+            market_url=f"https://polymarket.com/event/{snapshot.spec.slug}",
+            outcome_label=snapshot.spec.outcome_labels()[0],
+            fair_probability=0.62,
+            best_bid=0.58,
+            best_ask=0.60,
+            spread=0.02,
+            visible_liquidity=500.0,
+            fee_estimate=0.012,
+            slippage_estimate=0.011,
+            raw_gap=0.02,
+            after_cost_edge=-0.003,
+            book_source="clob",
+        )
+
+    monkeypatch.setattr("pmtmax.cli.main._evaluate_opportunity_snapshot", _fake_eval)
+
+    open_phase_shadow(
+        max_cycles=1,
+        open_window_hours=24.0,
+        output=tmp_path / "open_phase_history.jsonl",
+        latest_output=tmp_path / "open_phase_latest.json",
+        summary_output=tmp_path / "open_phase_summary.json",
+        state_path=tmp_path / "open_phase_state.json",
+    )
+
+    latest = json.loads((tmp_path / "open_phase_latest.json").read_text())
+    summary = json.loads((tmp_path / "open_phase_summary.json").read_text())
+    state = json.loads((tmp_path / "open_phase_state.json").read_text())
+    history_lines = (tmp_path / "open_phase_history.jsonl").read_text().strip().splitlines()
+
+    assert latest[0]["reason"] == "tradable"
+    assert latest[0]["decision_horizon"] == "market_open"
+    assert latest[0]["open_phase_age_hours"] > 0
     assert summary["tradable_count"] == 1
     assert state["tradable_count"] == 1
     assert len(history_lines) == 1

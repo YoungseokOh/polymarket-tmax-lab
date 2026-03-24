@@ -108,6 +108,18 @@ uv run pmtmax opportunity-report --model-name gaussian_emos
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
 use the same policy-aware horizon selection where applicable.
 
+If you want to test the listing/open-phase hypothesis instead of the near-term
+policy path, run:
+
+```bash
+uv run pmtmax open-phase-shadow --model-name gaussian_emos --max-cycles 1
+```
+
+`open-phase-shadow` filters active markets by `componentMarkets[*].acceptingOrdersTimestamp`
+(falling back to `createdAt` / `deployingTimestamp`) and scores only markets that
+opened recently. It defaults to `--horizon market_open` rather than the near-term
+policy horizon.
+
 ## Install
 ```bash
 uv sync --all-extras
@@ -420,6 +432,23 @@ This keeps a near-term (`today` / `tomorrow` in each market timezone) append-onl
 audit trail in `artifacts/opportunity_shadow.jsonl`, plus latest and summary views
 under `artifacts/opportunity_shadow_latest.json` and
 `artifacts/opportunity_shadow_summary.json`.
+
+If you want to watch the hypothesis that taker alpha exists right after listing,
+use the open-phase watcher instead:
+
+```bash
+uv run pmtmax open-phase-shadow \
+  --model-path artifacts/models/gaussian_emos.pkl \
+  --model-name gaussian_emos \
+  --open-window-hours 24 \
+  --interval 60
+```
+
+This writes `artifacts/open_phase_shadow.jsonl`, `artifacts/open_phase_shadow_latest.json`,
+and `artifacts/open_phase_shadow_summary.json`. The watcher keys off
+`componentMarkets[*].acceptingOrdersTimestamp` when available and falls back to
+market creation/deploy timestamps, so it can test whether spreads or raw gaps
+look different immediately after listing.
 
 ## Dry-Run Live Workflow
 ```bash
