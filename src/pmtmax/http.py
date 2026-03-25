@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,12 +54,13 @@ class CachedHttpClient:
         wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
-    def get_json(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True) -> Any:
-        """Fetch JSON with optional disk cache."""
+    def get_json(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True, cache_ttl_seconds: float | None = None) -> Any:
+        """Fetch JSON with optional disk cache and optional TTL expiry."""
 
         cache_path = self._request_cache_path(url, "json", payload=params, payload_key="params")
         if use_cache and cache_path.exists():
-            return json.loads(cache_path.read_text())
+            if cache_ttl_seconds is None or (time.time() - cache_path.stat().st_mtime) < cache_ttl_seconds:
+                return json.loads(cache_path.read_text())
 
         response = self.client.get(url, params=params)
         response.raise_for_status()

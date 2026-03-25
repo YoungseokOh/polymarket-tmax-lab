@@ -32,7 +32,7 @@ class OpenMeteoClient:
         forecast_days: int = 7,
         timezone: str = "UTC",
     ) -> dict[str, Any]:
-        """Fetch current forecast data."""
+        """Fetch current forecast data. Cached for 6 hours to avoid rate limits."""
 
         payload = self.http.get_json(
             f"{self.base_url}/v1/forecast",
@@ -44,7 +44,8 @@ class OpenMeteoClient:
                 "forecast_days": forecast_days,
                 "timezone": timezone,
             },
-            use_cache=False,
+            use_cache=True,
+            cache_ttl_seconds=6 * 3600,
         )
         return cast(dict[str, Any], payload)
 
@@ -59,7 +60,7 @@ class OpenMeteoClient:
         end_date: str,
         timezone: str = "UTC",
     ) -> dict[str, Any]:
-        """Fetch historical forecast archives."""
+        """Fetch historical forecast archives. Cached indefinitely (stable data)."""
 
         payload = self.http.get_json(
             f"{self.archive_base_url}/v1/forecast",
@@ -72,7 +73,7 @@ class OpenMeteoClient:
                 "end_date": end_date,
                 "timezone": timezone,
             },
-            use_cache=False,
+            use_cache=True,
         )
         return cast(dict[str, Any], payload)
 
@@ -87,7 +88,7 @@ class OpenMeteoClient:
         forecast_days: int = 7,
         timezone: str = "UTC",
     ) -> dict[str, Any]:
-        """Fetch an exact archived weather-model run."""
+        """Fetch an exact archived weather-model run. Cached indefinitely (immutable run)."""
 
         payload = self.http.get_json(
             f"{self.single_runs_base_url}/v1/forecast",
@@ -100,7 +101,7 @@ class OpenMeteoClient:
                 "forecast_days": forecast_days,
                 "timezone": timezone,
             },
-            use_cache=False,
+            use_cache=True,
         )
         return cast(dict[str, Any], payload)
 
@@ -114,7 +115,7 @@ class OpenMeteoClient:
         forecast_days: int = 7,
         timezone: str = "UTC",
     ) -> dict[str, Any]:
-        """Fetch previous forecast runs for pseudo-ensemble construction."""
+        """Fetch previous forecast runs for pseudo-ensemble construction. Cached 6 hours."""
 
         payload = self.http.get_json(
             f"{self.base_url}/v1/forecast",
@@ -127,7 +128,8 @@ class OpenMeteoClient:
                 "previous_runs": "true",
                 "timezone": timezone,
             },
-            use_cache=False,
+            use_cache=True,
+            cache_ttl_seconds=6 * 3600,
         )
         return cast(dict[str, Any], payload)
 
