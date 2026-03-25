@@ -153,7 +153,7 @@ class DatasetBuilder:
         if unit != "F":
             return features
         # Suffixes that are absolute temperatures (need full C→F: ×1.8 + 32)
-        temp_suffixes = ("_max", "_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
+        temp_suffixes = ("_max", "_daily_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
         # Suffixes that are temperature differences (need scale only: ×1.8)
         diff_suffixes = ("diurnal_amplitude",)
         converted = {}

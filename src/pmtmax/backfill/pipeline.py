@@ -49,7 +49,7 @@ def _convert_celsius_features(features: dict[str, float], unit: str) -> dict[str
     """Convert Celsius NWP features to market unit if needed."""
     if unit != "F":
         return features
-    temp_suffixes = ("_max", "_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
+    temp_suffixes = ("_max", "_daily_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
     diff_suffixes = ("diurnal_amplitude",)
     converted = {}
     for key, value in features.items():

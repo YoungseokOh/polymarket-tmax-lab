@@ -57,7 +57,6 @@ weather:
   lagged_run_offsets_hours: [0, 6, 12, 24]
   models:
     - ecmwf_ifs025
-    - ecmwf_ifs04
     - ecmwf_aifs025_single
     - kma_gdps
     - gfs_seamless
