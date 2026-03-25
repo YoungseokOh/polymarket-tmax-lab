@@ -45,6 +45,23 @@ VARIABLE_FALLBACKS: list[list[str]] = [
 ]
 
 
+def _convert_celsius_features(features: dict[str, float], unit: str) -> dict[str, float]:
+    """Convert Celsius NWP features to market unit if needed."""
+    if unit != "F":
+        return features
+    temp_suffixes = ("_max", "_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
+    diff_suffixes = ("diurnal_amplitude",)
+    converted = {}
+    for key, value in features.items():
+        if any(key.endswith(s) or key == s for s in temp_suffixes):
+            converted[key] = value * 9.0 / 5.0 + 32.0
+        elif any(key.endswith(s) or key == s for s in diff_suffixes):
+            converted[key] = value * 9.0 / 5.0
+        else:
+            converted[key] = value
+    return converted
+
+
 def _coerce_float(value: object) -> float:
     """Convert mixed row values to floats for feature aggregation."""
 
@@ -1240,7 +1257,7 @@ class BackfillPipeline:
                     "forecast_source_kind": self._forecast_source_kind(selected_forecasts),
                     **self._metadata_fields(source_priority=self._source_priority(self._forecast_source_kind(selected_forecasts))),
                 }
-                self._populate_feature_row(row, selected_forecasts, spec.target_local_date, spec.timezone)
+                self._populate_feature_row(row, selected_forecasts, spec.target_local_date, spec.timezone, unit=spec.unit)
                 rows.append(row)
                 sequence_rows.extend(
                     self._build_sequence_rows(
@@ -1339,10 +1356,12 @@ class BackfillPipeline:
         market_forecasts: pd.DataFrame,
         target_date: dt.date,
         timezone: str,
+        unit: str = "C",
     ) -> None:
         for model in self.models:
             subset = market_forecasts.loc[market_forecasts["model_name"] == model].copy()
-            features = self._features_from_hourly_rows(subset, target_date, timezone)
+            raw_features = self._features_from_hourly_rows(subset, target_date, timezone)
+            features = _convert_celsius_features(raw_features, unit)
             for key, value in features.items():
                 row[f"{model}_{key}"] = value
             if "model_daily_max" in features and "model_daily_max" not in row:

@@ -32,7 +32,7 @@ HORIZON_OFFSETS: dict[str, tuple[int, int]] = {
     "morning_of": (0, 6),
     "hourly_refresh": (0, 9),
 }
-DEFAULT_MODELS = ["ecmwf_ifs025", "ecmwf_aifs025_single", "kma_gdps"]
+DEFAULT_MODELS = ["ecmwf_ifs025", "ecmwf_aifs025_single", "kma_gdps", "gfs_seamless"]
 HOURLY = ["temperature_2m", "dew_point_2m", "relative_humidity_2m", "wind_speed_10m", "cloud_cover"]
 
 
@@ -94,9 +94,12 @@ class DatasetBuilder:
 
         lat, lon, timezone = self._station_coords(spec)
         decision_point = self._decision_point(spec, horizon)
+        tz = ZoneInfo(timezone)
+        now_local_date = dt.datetime.now(tz=tz).date()
         forecast_days = max(
             1,
-            (spec.target_local_date - decision_point.decision_time_utc.astimezone(ZoneInfo(timezone)).date()).days + 1,
+            (spec.target_local_date - decision_point.decision_time_utc.astimezone(tz).date()).days + 1,
+            (spec.target_local_date - now_local_date).days + 2,
         )
 
         row: dict[str, object] = {
@@ -112,7 +115,7 @@ class DatasetBuilder:
             "lead_hours": decision_point.lead_hours,
             "market_spec_json": spec.model_dump_json(),
         }
-        self._populate_weather_features(row, lat, lon, timezone, spec.target_local_date, historical=False, city=spec.city, forecast_days=forecast_days)
+        self._populate_weather_features(row, lat, lon, timezone, spec.target_local_date, historical=False, city=spec.city, forecast_days=forecast_days, unit=spec.unit)
         return pd.DataFrame([row])
 
     def _build_historical_row(self, snapshot: MarketSnapshot, horizon: str) -> dict[str, object]:
@@ -136,13 +139,32 @@ class DatasetBuilder:
             "market_spec_json": spec.model_dump_json(),
             "market_prices_json": json.dumps(snapshot.outcome_prices, sort_keys=True),
         }
-        self._populate_weather_features(row, lat, lon, timezone, spec.target_local_date, historical=True, city=spec.city)
+        self._populate_weather_features(row, lat, lon, timezone, spec.target_local_date, historical=True, city=spec.city, unit=spec.unit)
 
         truth_source = make_truth_source(spec, self.http, snapshot_dir=self.snapshot_dir)
         observation = truth_source.fetch_daily_observation(spec, spec.target_local_date)
         row["realized_daily_max"] = observation.daily_max
         row["winning_outcome"] = infer_winning_label(spec, observation.daily_max)
         return row
+
+    @staticmethod
+    def _convert_features(features: dict[str, float], unit: str) -> dict[str, float]:
+        """Convert Celsius NWP features to the market's unit if needed."""
+        if unit != "F":
+            return features
+        # Suffixes that are absolute temperatures (need full C→F: ×1.8 + 32)
+        temp_suffixes = ("_max", "_mean", "_min", "_midday_temp", "midday_temp", "_dew_point_mean", "dew_point_mean")
+        # Suffixes that are temperature differences (need scale only: ×1.8)
+        diff_suffixes = ("diurnal_amplitude",)
+        converted = {}
+        for key, value in features.items():
+            if any(key.endswith(s) or key == s for s in temp_suffixes):
+                converted[key] = value * 9.0 / 5.0 + 32.0
+            elif any(key.endswith(s) or key == s for s in diff_suffixes):
+                converted[key] = value * 9.0 / 5.0
+            else:
+                converted[key] = value
+        return converted
 
     def _populate_weather_features(
         self,
@@ -155,6 +177,7 @@ class DatasetBuilder:
         historical: bool,
         city: str,
         forecast_days: int = 1,
+        unit: str = "C",
     ) -> None:
         for model in (self.models or DEFAULT_MODELS):
             if historical:
@@ -180,7 +203,8 @@ class DatasetBuilder:
                     LOGGER.debug("Forecast unavailable for model %s at (%s, %s), skipping", model, latitude, longitude)
                     continue
             package = build_hourly_feature_frame(payload)
-            features = target_day_features(package, target_date)
+            raw_features = target_day_features(package, target_date)
+            features = self._convert_features(raw_features, unit)
             for key, value in features.items():
                 row[f"{model}_{key}"] = value
             if "model_daily_max" in features and "model_daily_max" not in row:

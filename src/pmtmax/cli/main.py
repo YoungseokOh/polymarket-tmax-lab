@@ -1174,7 +1174,7 @@ def init_warehouse() -> None:
 
 @app.command("scan-markets")
 def scan_markets(
-    active: bool = True,
+    active_only: Annotated[bool, typer.Option("--active-only/--all", help="Restrict to currently active markets (default: include upcoming).")] = False,
     closed: bool = False,
     include_bundled: bool = False,
     output: Annotated[
@@ -1189,7 +1189,7 @@ def scan_markets(
     refs = discover_temperature_event_refs_from_gamma(
         gamma,
         supported_cities=config.app.supported_cities,
-        active=active,
+        active=True if active_only else None,
         closed=closed,
         max_pages=config.polymarket.max_pages,
     )
@@ -1221,6 +1221,130 @@ def scan_markets(
             )
     console.print(table)
     console.print(f"Saved {len(snapshots)} snapshots -> {output}")
+
+
+@app.command("scan-edge")
+def scan_edge(
+    model_path: Path = Path("artifacts/models/gaussian_emos.pkl"),
+    model_name: str = "gaussian_emos",
+    markets_path: Annotated[
+        Path,
+        typer.Option("--markets-path", help="Discovered markets snapshot file (run scan-markets first)."),
+    ] = Path("artifacts/discovered_markets.json"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    horizon: str = "policy",
+    min_edge: float = 0.01,
+    output: Annotated[
+        Path,
+        typer.Option("--output", "--output-json"),
+    ] = Path("artifacts/edge_scan.json"),
+) -> None:
+    """Scan every outcome bin across discovered markets for YES and NO edge.
+
+    Uses Gamma API outcomePrices (mid-prices) rather than CLOB bid/ask, since CLOB
+    books for inactive/illiquid bins typically show phantom 0.001/0.999 spreads.
+
+    For each bin, computes:
+      YES edge = model_prob - gamma_price - fee
+      NO edge  = (1 - model_prob) - (1 - gamma_price) - fee
+
+    Reports all bins where abs(best_edge) >= min_edge, sorted by |edge| descending.
+    Run scan-markets first to refresh the market snapshot file.
+    """
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    if not markets_path.exists():
+        console.print(f"[red]Markets file not found: {markets_path}[/red]")
+        console.print("Run [bold]pmtmax scan-markets[/bold] first.")
+        raise typer.Exit(1)
+
+    snapshots = load_market_snapshots(markets_path)
+    snapshots = _filter_snapshots_by_city(snapshots, cities)
+    horizon_policy = _load_recent_horizon_policy()
+    fee_bps = _default_fee_bps(config)
+
+    rows: list[dict[str, object]] = []
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None:
+            continue
+        now_utc = datetime.now(tz=UTC)
+        if spec.target_local_date < now_utc.date():
+            continue
+        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+            spec,
+            now_utc=now_utc,
+            horizon=horizon,
+            horizon_policy=horizon_policy,
+        )
+        if decision_horizon is None or horizon_reason == "policy_filtered":
+            continue
+        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
+        forecast = predict_market(model_path, model_name, spec, feature_frame)
+        if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
+            continue
+        for outcome_label, model_prob in forecast.outcome_probabilities.items():
+            # Use Gamma mid-price: avoids the phantom 0.001/0.999 CLOB spread on illiquid bins
+            gamma_price = snapshot.outcome_prices.get(outcome_label)
+            if gamma_price is None or gamma_price <= 0.0 or gamma_price >= 1.0:
+                continue
+            fee = estimate_fee(gamma_price, taker_bps=fee_bps)
+            yes_edge = model_prob - gamma_price - fee
+            no_edge = (1.0 - model_prob) - (1.0 - gamma_price) - fee
+            best_edge = max(yes_edge, no_edge)
+            if abs(best_edge) < min_edge:
+                continue
+            direction = "yes" if yes_edge >= no_edge else "no"
+            rows.append(
+                {
+                    "city": spec.city,
+                    "date": str(spec.target_local_date),
+                    "question": spec.question,
+                    "bin": outcome_label,
+                    "model_prob": round(model_prob, 4),
+                    "gamma_price": round(gamma_price, 4),
+                    "yes_edge": round(yes_edge, 4),
+                    "no_edge": round(no_edge, 4),
+                    "best_edge": round(best_edge, 4),
+                    "direction": direction,
+                    "horizon": decision_horizon,
+                }
+            )
+
+    rows.sort(key=lambda x: abs(float(x["best_edge"])), reverse=True)
+    dump_json(output, rows)
+
+    table = Table(title=f"Edge Scan — {len(rows)} signals (min_edge={min_edge:.0%})")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Bin")
+    table.add_column("Dir")
+    table.add_column("Model%")
+    table.add_column("Mkt%")
+    table.add_column("Edge")
+    table.add_column("Horizon")
+    for row in rows[:50]:
+        table.add_row(
+            str(row["city"]),
+            str(row["date"]),
+            str(row["bin"]),
+            str(row["direction"]).upper(),
+            f"{float(row['model_prob']):.1%}",
+            f"{float(row['gamma_price']):.1%}",
+            f"{float(row['best_edge']):+.1%}",
+            str(row["horizon"]),
+        )
+    console.print(table)
+    console.print(f"Saved {len(rows)} signals → {output}")
 
 
 @app.command("build-dataset")
