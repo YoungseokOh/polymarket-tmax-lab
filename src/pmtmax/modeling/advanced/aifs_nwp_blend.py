@@ -20,9 +20,13 @@ class AifsNwpBlendModel:
     def __post_init__(self) -> None:
         self.model = LinearRegression()
         self.weights_: dict[str, float] = {}
+        self.constant_mean_: float | None = None
 
     def fit(self, frame: pd.DataFrame) -> None:
         columns = self.nwp_features + self.ai_features
+        if not columns:
+            self.constant_mean_ = float(frame["realized_daily_max"].mean())
+            return
         if self.use_learned_blend:
             self.model.fit(frame[columns], frame["realized_daily_max"])
             coefficients = self.model.coef_
@@ -32,6 +36,9 @@ class AifsNwpBlendModel:
             self.weights_ = dict.fromkeys(columns, weight)
 
     def predict(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        if self.constant_mean_ is not None:
+            size = len(frame)
+            return np.full(size, self.constant_mean_, dtype=float), np.full(size, 1.0, dtype=float)
         columns = self.nwp_features + self.ai_features
         if self.use_learned_blend and self.weights_:
             mean = self.model.predict(frame[columns])
