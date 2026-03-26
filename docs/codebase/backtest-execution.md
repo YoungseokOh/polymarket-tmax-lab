@@ -24,13 +24,16 @@ from signal generation and broker behavior.
 
 ## Boundary Between The Two
 - `backtest/` measures what the model knew and when it knew it.
+- grouped split policies (`market_day` or `target_day`) are mandatory; row-level splits are not part of the supported workflow.
 - `execution/` decides whether an actionable edge survives spread, fees, slippage, and guardrails.
 - Live trading must remain gated and isolated from the default research/paper path.
 - `opportunity-report`, `paper-trader`, `live-trader`, `paper-mm`, and `live-mm` should treat missing live books as explicit skip states, not synthetic liquidity.
+- signal paths should also treat missing calibrators or forecast-contract mismatches as explicit fail-closed states.
 - `opportunity-shadow` reuses the same guardrails but logs the best raw gap and after-cost edge even for rejected markets, so “strategy is dead” and “book is unusable” remain distinct diagnoses.
 - `open-phase-shadow` is the listing/opening observer. It filters active markets by the earliest `acceptingOrdersTimestamp`/`createdAt` metadata and evaluates only recently opened markets with the configured horizon.
 - Execution diagnostics should distinguish `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, and `after_cost_positive_but_spread_too_wide` instead of collapsing everything into a generic “no edge”.
 - `backtest --pricing-source quote_proxy` still is not exact replay. It keeps official historical last-price coverage but overlays a configurable half-spread proxy so execution assumptions are stricter than raw `real_history`.
+- `benchmark-models` is the canonical model-selection path. It writes the leaderboard under `artifacts/benchmarks/v2/` and publishes the active `champion` alias for consumer commands.
 
 ## Change Checklist
 - Dataset-column changes affect both training and paper-trading workflows.

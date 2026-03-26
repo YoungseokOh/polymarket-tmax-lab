@@ -91,20 +91,9 @@ execution:
 
 models:
   benchmark_ladder:
-    - climatology
-    - raw_best_model
-    - raw_multimodel_average
     - gaussian_emos
-    - heteroscedastic_linear
-    - ts_emos
-    - leadtime_continuous
-    - det2prob_nn
-    - pinn_postproc
-    - flexible_flow_nn
-    - transformer_postproc
-    - spatial_gnn
-    - aifs_nwp_blend
     - tuned_ensemble
+    - det2prob_nn
 
 scanner:
   interval_seconds: 60

@@ -68,17 +68,34 @@ class CalibrationMetadata(BaseModel):
     calibration_method: str
     fitted_at: datetime
     notes: str = ""
+    path: str | None = None
 
 
 class ProbForecast(BaseModel):
     target_market: str
     generated_at: datetime
+    contract_version: str = "v2"
     samples: list[float] = Field(default_factory=list)
     mean: float
     std: float
+    distribution_family: str = "gaussian"
+    distribution_payload: dict[str, Any] = Field(default_factory=dict)
     daily_max_distribution: dict[str, Any] = Field(default_factory=dict)
     outcome_probabilities: dict[str, float] = Field(default_factory=dict)
+    outcome_probabilities_raw: dict[str, float] = Field(default_factory=dict)
+    outcome_probabilities_calibrated: dict[str, float] = Field(default_factory=dict)
+    probability_source: Literal["raw", "calibrated"] = "raw"
+    feature_availability: dict[str, bool] = Field(default_factory=dict)
     calibration_metadata: CalibrationMetadata | None = None
+
+    def active_outcome_probabilities(self) -> dict[str, float]:
+        """Return the probability vector currently intended for trading decisions."""
+
+        if self.outcome_probabilities:
+            return self.outcome_probabilities
+        if self.outcome_probabilities_calibrated:
+            return self.outcome_probabilities_calibrated
+        return self.outcome_probabilities_raw
 
 
 class TradeSignal(BaseModel):
@@ -94,6 +111,11 @@ class TradeSignal(BaseModel):
     confidence: float
     rationale: str
     mode: Literal["paper", "live"] = "paper"
+    forecast_contract_version: str = "v2"
+    probability_source: Literal["raw", "calibrated"] = "raw"
+    distribution_family: str = "gaussian"
+    decision_horizon: str | None = None
+    rejection_reason: str | None = None
 
 
 class ExecutionFill(BaseModel):
@@ -121,6 +143,14 @@ class ModelArtifact(BaseModel):
     features: list[str]
     metrics: dict[str, float]
     path: str
+    contract_version: str = "v2"
+    seed: int | None = None
+    dataset_signature: str | None = None
+    split_policy: str | None = None
+    variant: str | None = None
+    calibration_path: str | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["stable", "experimental"] = "stable"
 
 
 class SequenceExample(BaseModel):
@@ -319,6 +349,9 @@ class OpportunityObservation(BaseModel):
     market_url: str = ""
     book_source_counts: dict[str, int] = Field(default_factory=dict)
     forecast_generated_at: datetime | None = None
+    forecast_contract_version: str = "v1"
+    probability_source: Literal["raw", "calibrated"] = "raw"
+    distribution_family: str = "gaussian"
     forecast_mean: float | None = None
     forecast_std: float | None = None
     outcome_label: str | None = None
@@ -351,6 +384,9 @@ class OpenPhaseObservation(BaseModel):
     open_phase_age_hours: float | None = None
     book_source_counts: dict[str, int] = Field(default_factory=dict)
     forecast_generated_at: datetime | None = None
+    forecast_contract_version: str = "v1"
+    probability_source: Literal["raw", "calibrated"] = "raw"
+    distribution_family: str = "gaussian"
     forecast_mean: float | None = None
     forecast_std: float | None = None
     outcome_label: str | None = None

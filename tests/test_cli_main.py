@@ -305,13 +305,20 @@ def test_backtest_real_history_writes_separate_artifacts(
     monkeypatch.setattr(
         "pmtmax.cli.main.load_settings",
         lambda: (
-            type("_Config", (), {"execution": type("_Exec", (), {"default_fee_bps": 0.0})()})(),
+            type(
+                "_Config",
+                (),
+                {
+                    "app": type("_App", (), {"random_seed": 7})(),
+                    "execution": type("_Exec", (), {"default_fee_bps": 0.0})(),
+                },
+            )(),
             EnvSettings(),
         ),
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_real_history_backtest",
-        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps: (
+        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, split_policy, seed: (
             {"mae": 1.0, "rmse": 1.0, "nll": 1.0, "avg_brier": 0.1, "avg_crps": 0.2, "num_trades": 1.0, "pnl": 0.5, "hit_rate": 1.0, "avg_edge": 0.1},
             [{"market_id": "101025", "pricing_source": "real_history"}],
         ),
@@ -321,10 +328,11 @@ def test_backtest_real_history_writes_separate_artifacts(
         dataset_path=dataset_path,
         panel_path=panel_path,
         pricing_source="real_history",
+        model_name="gaussian_emos",
     )
 
-    metrics = json.loads((tmp_path / "artifacts" / "backtest_metrics_real_history.json").read_text())
-    trades = json.loads((tmp_path / "artifacts" / "backtest_trades_real_history.json").read_text())
+    metrics = json.loads((tmp_path / "artifacts" / "backtests" / "v2" / "backtest_metrics_real_history.json").read_text())
+    trades = json.loads((tmp_path / "artifacts" / "backtests" / "v2" / "backtest_trades_real_history.json").read_text())
     assert metrics["num_trades"] == 1.0
     assert trades[0]["pricing_source"] == "real_history"
 
@@ -369,13 +377,20 @@ def test_backtest_quote_proxy_writes_separate_artifacts(
     monkeypatch.setattr(
         "pmtmax.cli.main.load_settings",
         lambda: (
-            type("_Config", (), {"execution": type("_Exec", (), {"default_fee_bps": 0.0})()})(),
+            type(
+                "_Config",
+                (),
+                {
+                    "app": type("_App", (), {"random_seed": 7})(),
+                    "execution": type("_Exec", (), {"default_fee_bps": 0.0})(),
+                },
+            )(),
             EnvSettings(),
         ),
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_quote_proxy_backtest",
-        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread: (
+        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread, split_policy, seed: (
             {
                 "mae": 1.0,
                 "rmse": 1.0,
@@ -396,10 +411,11 @@ def test_backtest_quote_proxy_writes_separate_artifacts(
         panel_path=panel_path,
         pricing_source="quote_proxy",
         quote_proxy_half_spread=0.02,
+        model_name="gaussian_emos",
     )
 
-    metrics = json.loads((tmp_path / "artifacts" / "backtest_metrics_quote_proxy.json").read_text())
-    trades = json.loads((tmp_path / "artifacts" / "backtest_trades_quote_proxy.json").read_text())
+    metrics = json.loads((tmp_path / "artifacts" / "backtests" / "v2" / "backtest_metrics_quote_proxy.json").read_text())
+    trades = json.loads((tmp_path / "artifacts" / "backtests" / "v2" / "backtest_trades_quote_proxy.json").read_text())
     assert metrics["num_trades"] == 1.0
     assert trades[0]["pricing_source"] == "quote_proxy"
 
@@ -449,7 +465,11 @@ def test_run_real_history_backtest_counts_missing_coverage_separately(
 
     monkeypatch.setattr(
         "pmtmax.cli.main.train_model",
-        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+        lambda model_name, train, artifacts_dir, *, split_policy, seed: type(
+            "_Artifact",
+            (),
+            {"path": str(tmp_path / "model.pkl")},
+        )(),
     )
     monkeypatch.setattr(
         "pmtmax.cli.main.predict_market",
@@ -525,7 +545,11 @@ def test_run_real_history_backtest_counts_stale_coverage_separately(
 
     monkeypatch.setattr(
         "pmtmax.cli.main.train_model",
-        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+        lambda model_name, train, artifacts_dir, *, split_policy, seed: type(
+            "_Artifact",
+            (),
+            {"path": str(tmp_path / "model.pkl")},
+        )(),
     )
     monkeypatch.setattr(
         "pmtmax.cli.main.predict_market",
@@ -602,7 +626,11 @@ def test_run_quote_proxy_backtest_uses_proxy_execution_price(
 
     monkeypatch.setattr(
         "pmtmax.cli.main.train_model",
-        lambda model_name, train, artifacts_dir: type("_Artifact", (), {"path": str(tmp_path / "model.pkl")})(),
+        lambda model_name, train, artifacts_dir, *, split_policy, seed: type(
+            "_Artifact",
+            (),
+            {"path": str(tmp_path / "model.pkl")},
+        )(),
     )
     monkeypatch.setattr(
         "pmtmax.cli.main.predict_market",
@@ -659,6 +687,9 @@ def test_opportunity_report_marks_missing_books_explicitly(
 
     class _Forecast:
         generated_at = datetime.now(tz=UTC)
+        contract_version = "v2"
+        probability_source = "calibrated"
+        distribution_family = "gaussian"
         mean = 11.0
         std = 1.5
         outcome_probabilities = {outcome_label: 0.55}
@@ -686,6 +717,7 @@ def test_opportunity_report_marks_missing_books_explicitly(
         "pmtmax.cli.main._runtime",
         lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
     monkeypatch.setattr("pmtmax.cli.main.predict_market", lambda *args, **kwargs: _Forecast())
@@ -705,6 +737,10 @@ def test_opportunity_report_marks_missing_books_explicitly(
                 asks=[],
             )
         },
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._resolve_model_path",
+        lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
     )
 
     output = tmp_path / "opportunity_report.json"
@@ -788,12 +824,17 @@ def test_opportunity_report_marks_policy_filtered_markets(
         "pmtmax.cli.main._runtime",
         lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
     monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
     monkeypatch.setattr(
         "pmtmax.cli.main._load_recent_horizon_policy",
         lambda path=Path("configs/recent-core-horizon-policy.yaml"): {"London": ["previous_evening"]},
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._resolve_model_path",
+        lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
     )
 
     output = tmp_path / "opportunity_report_policy.json"
@@ -970,9 +1011,14 @@ def test_opportunity_shadow_command_writes_outputs(
         "pmtmax.cli.main._runtime",
         lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
     monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr(
+        "pmtmax.cli.main._resolve_model_path",
+        lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
+    )
 
     def _fake_eval(
         snapshot,
@@ -1013,10 +1059,10 @@ def test_opportunity_shadow_command_writes_outputs(
 
     opportunity_shadow(max_cycles=1)
 
-    latest = json.loads((tmp_path / "shadow_latest.json").read_text())
-    summary = json.loads((tmp_path / "shadow_summary.json").read_text())
-    state = json.loads((tmp_path / "shadow_state.json").read_text())
-    history_lines = (tmp_path / "shadow_history.jsonl").read_text().strip().splitlines()
+    latest = json.loads((tmp_path / "artifacts" / "signals" / "v2" / "shadow_latest.json").read_text())
+    summary = json.loads((tmp_path / "artifacts" / "signals" / "v2" / "shadow_summary.json").read_text())
+    state = json.loads((tmp_path / "artifacts" / "signals" / "v2" / "shadow_state.json").read_text())
+    history_lines = (tmp_path / "artifacts" / "signals" / "v2" / "shadow_history.jsonl").read_text().strip().splitlines()
 
     assert latest[0]["reason"] == "tradable"
     assert latest[0]["decision_horizon"] == "morning_of"
@@ -1063,6 +1109,10 @@ def test_open_phase_shadow_command_writes_outputs(
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
     monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr(
+        "pmtmax.cli.main._resolve_model_path",
+        lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
+    )
 
     def _fake_eval(
         snapshot,
@@ -1214,7 +1264,7 @@ def test_live_mm_uses_inventory_mapping_for_quoter(
         _fake_compute_quotes,
     )
 
-    live_mm(model_path=Path("artifacts/models/test.pkl"), dry_run=True, post_orders=False)
+    live_mm(model_path=Path("artifacts/models/test.pkl"), model_name="gaussian_emos", dry_run=True, post_orders=False)
 
     assert called["inventory_type"] is dict
     payload = json.loads((tmp_path / "artifacts" / "live_mm_preview.json").read_text())

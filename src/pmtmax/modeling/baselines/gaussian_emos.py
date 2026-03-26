@@ -16,6 +16,20 @@ class GaussianEMOSModel:
         self.std_model = LinearRegression()
         self.constant_mean_: float | None = None
         self.constant_std_: float | None = None
+        self._medians: dict[str, float] = {}
+
+    def _prepare_features(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not self.feature_names:
+            return pd.DataFrame(index=frame.index)
+
+        data: dict[str, pd.Series] = {}
+        for feature in self.feature_names:
+            if feature in frame.columns:
+                numeric = pd.to_numeric(frame[feature], errors="coerce")
+            else:
+                numeric = pd.Series(np.nan, index=frame.index, dtype=float)
+            data[feature] = numeric.fillna(self._medians.get(feature, 0.0)).astype(float)
+        return pd.DataFrame(data, index=frame.index)
 
     def fit(self, frame: pd.DataFrame) -> None:
         y = frame["realized_daily_max"]
@@ -24,7 +38,11 @@ class GaussianEMOSModel:
             residuals = np.abs(y - self.constant_mean_)
             self.constant_std_ = float(np.clip(residuals.mean(), 0.5, None))
             return
-        x = frame[self.feature_names]
+        for feature in self.feature_names:
+            numeric = pd.to_numeric(frame.get(feature), errors="coerce") if feature in frame.columns else pd.Series(np.nan, index=frame.index, dtype=float)
+            median = numeric.median()
+            self._medians[feature] = float(median) if pd.notna(median) else 0.0
+        x = self._prepare_features(frame)
         self.mean_model.fit(x, y)
         residuals = np.abs(y - self.mean_model.predict(x))
         self.std_model.fit(x, residuals)
@@ -38,7 +56,7 @@ class GaussianEMOSModel:
             mean = np.full(size, self.constant_mean_, dtype=float)
             std = np.full(size, self.constant_std_, dtype=float)
             return mean, std
-        x = frame[self.feature_names]
+        x = self._prepare_features(frame)
         mean = self.mean_model.predict(x)
         std = np.clip(self.std_model.predict(x), 0.5, None)
         return mean.astype(float), std.astype(float)

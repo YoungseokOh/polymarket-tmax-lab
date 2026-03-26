@@ -89,7 +89,11 @@ class DatasetBuilder:
         )
         return frame
 
-    def build_live_row(self, spec: MarketSpec, horizon: str = "morning_of") -> pd.DataFrame:
+    def build_live_row(
+        self,
+        spec: MarketSpec,
+        horizon: str = "morning_of",
+    ) -> pd.DataFrame:
         """Build a single-row feature DataFrame for live or paper trading."""
 
         lat, lon, timezone = self._station_coords(spec)
@@ -116,9 +120,14 @@ class DatasetBuilder:
             "market_spec_json": spec.model_dump_json(),
         }
         self._populate_weather_features(row, lat, lon, timezone, spec.target_local_date, historical=False, city=spec.city, forecast_days=forecast_days, unit=spec.unit)
+        self._attach_v2_contract_fields(row)
         return pd.DataFrame([row])
 
-    def _build_historical_row(self, snapshot: MarketSnapshot, horizon: str) -> dict[str, object]:
+    def _build_historical_row(
+        self,
+        snapshot: MarketSnapshot,
+        horizon: str,
+    ) -> dict[str, object]:
         spec = snapshot.spec
         if spec is None:
             msg = "Snapshot is missing a parsed spec"
@@ -145,7 +154,24 @@ class DatasetBuilder:
         observation = truth_source.fetch_daily_observation(spec, spec.target_local_date)
         row["realized_daily_max"] = observation.daily_max
         row["winning_outcome"] = infer_winning_label(spec, observation.daily_max)
+        self._attach_v2_contract_fields(row)
         return row
+
+    def _attach_v2_contract_fields(self, row: dict[str, object]) -> None:
+        """Attach v2 contract metadata to a row."""
+
+        market_id = str(row.get("market_id", ""))
+        raw_target_date = row.get("target_date", "")
+        target_ts = pd.to_datetime(raw_target_date, errors="coerce")
+        target_date = target_ts.date().isoformat() if pd.notna(target_ts) else str(raw_target_date)
+        availability = {
+            model: bool(f"{model}_model_daily_max" in row)
+            for model in (self.models or DEFAULT_MODELS)
+        }
+        row["contract_version"] = "v2"
+        row["group_id"] = f"{market_id}|{target_date}"
+        row["split_group"] = row["group_id"]
+        row["feature_availability_json"] = json.dumps(availability, sort_keys=True)
 
     @staticmethod
     def _convert_features(features: dict[str, float], unit: str) -> dict[str, float]:

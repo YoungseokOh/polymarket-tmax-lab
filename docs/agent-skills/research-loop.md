@@ -12,12 +12,16 @@
 ## Default Workflow
 ```bash
 uv run pmtmax bootstrap-lab
+uv run pmtmax build-dataset
+uv run pmtmax materialize-backtest-panel
 uv run pmtmax train-baseline --model-name gaussian_emos
-uv run pmtmax backtest --model-name gaussian_emos
-uv run pmtmax paper-trader --model-name gaussian_emos
-uv run pmtmax opportunity-report --model-name gaussian_emos
-uv run pmtmax opportunity-shadow --model-name gaussian_emos --max-cycles 1
-uv run pmtmax open-phase-shadow --model-name gaussian_emos --max-cycles 1
+uv run pmtmax benchmark-models
+uv run pmtmax benchmark-ablations --model-name tuned_ensemble
+uv run pmtmax backtest --model-name champion
+uv run pmtmax paper-trader
+uv run pmtmax opportunity-report
+uv run pmtmax opportunity-shadow --max-cycles 1
+uv run pmtmax open-phase-shadow --max-cycles 1
 ```
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
@@ -57,14 +61,17 @@ uv run python scripts/build_active_weather_watchlist.py
 ```
 
 ## Artifacts
-- gold dataset: `data/parquet/gold/historical_training_set.parquet`
-- sequence dataset: `data/parquet/gold/historical_training_set_sequence.parquet`
-- model artifacts: `artifacts/models/`
-- backtest outputs: `artifacts/backtest_metrics.json`, `artifacts/backtest_trades.json`
-- paper outputs: `artifacts/paper_signals.json`
-- opportunity outputs: `artifacts/opportunity_report.json`
-- shadow validation outputs: `artifacts/opportunity_shadow.jsonl`, `artifacts/opportunity_shadow_latest.json`, `artifacts/opportunity_shadow_summary.json`
-- open-phase validation outputs: `artifacts/open_phase_shadow.jsonl`, `artifacts/open_phase_shadow_latest.json`, `artifacts/open_phase_shadow_summary.json`
+- gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`
+- sequence dataset: `data/parquet/gold/v2/historical_training_set_sequence.parquet`
+- model artifacts: `artifacts/models/v2/`
+- benchmark outputs: `artifacts/benchmarks/v2/leaderboard.json`, `artifacts/benchmarks/v2/leaderboard.csv`
+- ablation outputs: `artifacts/benchmarks/v2/*_ablation_leaderboard.json`, `artifacts/benchmarks/v2/*_ablation_leaderboard.csv`
+- champion alias: `artifacts/models/v2/champion.pkl`, `artifacts/models/v2/champion.json`
+- backtest outputs: `artifacts/backtests/v2/`
+- paper outputs: `artifacts/signals/v2/paper_signals.json`
+- opportunity outputs: `artifacts/signals/v2/opportunity_report.json`
+- shadow validation outputs: `artifacts/signals/v2/opportunity_shadow.jsonl`, `artifacts/signals/v2/opportunity_shadow_latest.json`, `artifacts/signals/v2/opportunity_shadow_summary.json`
+- open-phase validation outputs: `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`, `artifacts/signals/v2/open_phase_shadow_summary.json`
 - closed-event manifests: `data/manifests/historical_event_candidates.json`, `data/manifests/historical_event_page_fetches.json`, `data/manifests/historical_collection_status.json`
 - active watchlist: `artifacts/active_weather_watchlist.json`
 
@@ -72,7 +79,10 @@ uv run python scripts/build_active_weather_watchlist.py
 - `backtest`는 최소 2개 row가 필요하다
 - 단일 도시 smoke면 horizon을 2개 이상 주는 편이 안전하다
 - 모델보다 settlement fidelity와 lookahead 방지가 우선이다
+- grouped split이 기본이며 row split은 지원 workflow가 아니다
+- `benchmark-ablations`는 grouped one-shot holdout 전용 내부 연구 command이며 champion alias는 publish하지 않는다
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
+- live/paper/opportunity 경로는 calibrated probability가 없으면 `missing_calibrator`로 fail closed 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다
 - `open-phase-shadow`는 `componentMarkets[*].acceptingOrdersTimestamp` 기준 최근 상장 시장만 골라 `market_open` horizon으로 평가하는 실험 경로다
 - active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다

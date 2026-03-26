@@ -123,10 +123,47 @@ def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> N
     assert len(truth_tables["silver_observations_daily"]) == 4
     assert len(gold) == 8
     assert (tmp_path / "parquet" / "silver" / "silver_forecast_runs_hourly.parquet").exists()
-    assert (tmp_path / "parquet" / "gold" / "test_training_set.parquet").exists()
-    assert (tmp_path / "parquet" / "gold" / "test_training_set_sequence.parquet").exists()
+    assert (tmp_path / "parquet" / "gold" / "v2" / "test_training_set.parquet").exists()
+    assert (tmp_path / "parquet" / "gold" / "v2" / "test_training_set_sequence.parquet").exists()
     assert (tmp_path / "manifests" / "warehouse_manifest.json").exists()
     assert any((tmp_path / "raw").rglob("*.json"))
+
+
+def test_backfill_pipeline_materializes_gold_contracts(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "test_v2.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025", "ecmwf_aifs025_single"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets(snapshots, source_name="test_v2")
+    pipeline.backfill_forecasts(
+        snapshots,
+        allow_fixture_fallback=True,
+        strict_archive=False,
+    )
+    pipeline.backfill_truth(snapshots)
+    gold = pipeline.materialize_training_set(
+        snapshots,
+        output_name="test_training_set_v2",
+        decision_horizons=["market_open", "morning_of"],
+    )
+
+    assert gold["contract_version"].eq("v2").all()
+    assert gold["split_group"].eq(gold["group_id"]).all()
+    assert (tmp_path / "parquet" / "gold" / "v2" / "test_training_set_v2.parquet").exists()
+    assert (tmp_path / "parquet" / "gold" / "v2" / "test_training_set_v2_sequence.parquet").exists()
 
 
 def test_backfill_pipeline_strict_archive_skips_fixture_fallback(tmp_path: Path) -> None:

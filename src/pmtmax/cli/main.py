@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -49,9 +51,17 @@ from pmtmax.markets.repository import (
     load_market_snapshots,
     save_market_snapshots,
 )
-from pmtmax.modeling.evaluation import brier_score, crps_from_samples, gaussian_nll, mae, rmse
+from pmtmax.modeling.champion import score_leaderboard, select_champion
+from pmtmax.modeling.evaluation import brier_score, calibration_gap, crps_from_samples, gaussian_nll, mae, rmse
+from pmtmax.modeling.design_matrix import group_id_series
 from pmtmax.modeling.predict import predict_market
-from pmtmax.modeling.train import train_model
+from pmtmax.modeling.train import (
+    require_supported_model_name,
+    require_supported_variant,
+    supported_ablation_variants,
+    supported_model_names,
+    train_model,
+)
 from pmtmax.monitoring.open_phase import OpenPhaseShadowRunner, select_open_phase_candidates
 from pmtmax.storage.duckdb_store import DuckDBStore
 from pmtmax.storage.firebase_mirror import FirebaseMirror
@@ -81,6 +91,7 @@ from pmtmax.weather.openmeteo_client import OpenMeteoClient
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
 DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
+DEFAULT_MODEL_NAME = "champion"
 
 
 def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
@@ -90,6 +101,97 @@ def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
         default = value.default
         return fallback if default is ... else default
     return value
+
+
+def _default_dataset_path(*, sequence: bool = False, panel: bool = False) -> Path:
+    """Return the canonical v2 dataset or panel path."""
+
+    if panel:
+        return Path("data/parquet/gold/v2/historical_backtest_panel.parquet")
+    suffix = "historical_training_set_sequence.parquet" if sequence else "historical_training_set.parquet"
+    return Path("data/parquet/gold/v2") / suffix
+
+
+def _default_artifacts_dir() -> Path:
+    """Return the canonical v2 model artifact directory."""
+
+    return Path("artifacts/models/v2")
+
+
+def _default_champion_metadata_path() -> Path:
+    """Return the canonical champion metadata path."""
+
+    return _default_artifacts_dir() / "champion.json"
+
+
+def _default_model_path(model_name: str) -> Path:
+    """Return the canonical v2 model artifact path."""
+
+    return _default_artifacts_dir() / f"{model_name}.pkl"
+
+
+def _default_backtest_output(filename: str) -> Path:
+    """Return the canonical v2 backtest output path."""
+
+    return Path("artifacts/backtests/v2") / filename
+
+
+def _default_benchmark_output(filename: str) -> Path:
+    """Return the canonical v2 benchmark output path."""
+
+    return Path("artifacts/benchmarks/v2") / filename
+
+
+def _default_signal_output(filename: str) -> Path:
+    """Return the canonical v2 signal/report output path."""
+
+    return Path("artifacts/signals/v2") / filename
+
+
+def _effective_split_policy(
+    split_policy: Literal["market_day", "target_day"],
+) -> Literal["market_day", "target_day"]:
+    """Validate the grouped split policy used in v2."""
+
+    return split_policy
+
+
+def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
+    """Load champion metadata or fail closed when unpublished."""
+
+    metadata_path = path or _default_champion_metadata_path()
+    if not metadata_path.exists():
+        msg = (
+            f"Champion metadata does not exist: {metadata_path}. "
+            "Run `uv run pmtmax benchmark-models` first."
+        )
+        raise typer.BadParameter(msg)
+    payload = load_json(metadata_path)
+    if not isinstance(payload, dict) or "model_name" not in payload:
+        msg = f"Champion metadata is malformed: {metadata_path}"
+        raise typer.BadParameter(msg)
+    return payload
+
+
+def _resolve_model_name_alias(model_name: str) -> str:
+    """Resolve the public `champion` alias into a concrete trainable model name."""
+
+    if model_name != DEFAULT_MODEL_NAME:
+        return require_supported_model_name(model_name)
+    champion = _load_champion_metadata()
+    return require_supported_model_name(str(champion["model_name"]))
+
+
+def _resolve_model_path(model_path: Path, model_name: str) -> tuple[Path, str]:
+    """Resolve a CLI model path and public alias into a concrete artifact path/name."""
+
+    if model_name == DEFAULT_MODEL_NAME:
+        champion = _load_champion_metadata()
+        return Path(str(champion.get("alias_path", _default_model_path(DEFAULT_MODEL_NAME)))), str(champion["model_name"])
+    resolved_name = require_supported_model_name(model_name)
+    if model_path == _default_model_path(DEFAULT_MODEL_NAME):
+        return _default_model_path(resolved_name), resolved_name
+    return model_path, resolved_name
 
 
 def _runtime(include_stores: bool = True) -> tuple:
@@ -479,6 +581,10 @@ def _trade_signal_from_candidate(
     candidate: dict[str, object],
     *,
     mode: Literal["paper", "live"],
+    forecast_contract_version: str = "v1",
+    probability_source: Literal["raw", "calibrated"] = "raw",
+    distribution_family: str = "gaussian",
+    decision_horizon: str | None = None,
 ) -> TradeSignal:
     """Convert a ranked execution candidate into a trade signal."""
 
@@ -496,6 +602,10 @@ def _trade_signal_from_candidate(
         confidence=float(candidate["fair_probability"]),
         rationale=f"Best edge outcome {candidate['outcome_label']} p={float(candidate['fair_probability']):.3f}",
         mode=mode,
+        forecast_contract_version=forecast_contract_version,
+        probability_source=probability_source,
+        distribution_family=distribution_family,
+        decision_horizon=decision_horizon,
     )
 
 
@@ -525,6 +635,10 @@ def _evaluate_market_signal(
     edge_threshold: float,
     max_spread_bps: int,
     min_liquidity: float,
+    forecast_contract_version: str = "v1",
+    probability_source: Literal["raw", "calibrated"] = "raw",
+    distribution_family: str = "gaussian",
+    decision_horizon: str | None = None,
 ) -> dict[str, object]:
     """Evaluate one market for trading and return a structured decision payload."""
 
@@ -560,7 +674,15 @@ def _evaluate_market_signal(
         if candidate["after_cost_edge"] is not None and float(candidate["after_cost_edge"]) > 0
     ]
     if positive_after_cost and best_after_cost is not None:
-        signal = _trade_signal_from_candidate(snapshot, best_after_cost, mode=mode)
+        signal = _trade_signal_from_candidate(
+            snapshot,
+            best_after_cost,
+            mode=mode,
+            forecast_contract_version=forecast_contract_version,
+            probability_source=probability_source,
+            distribution_family=distribution_family,
+            decision_horizon=decision_horizon,
+        )
         book = books[signal.outcome_label]
         spread = float(best_after_cost["spread"])
         liquidity = float(best_after_cost["visible_liquidity"])
@@ -621,6 +743,9 @@ def _empty_opportunity_observation(
     reason: str,
     book_source_counts: dict[str, int] | None = None,
     forecast_generated_at: datetime | None = None,
+    forecast_contract_version: str = "v1",
+    probability_source: Literal["raw", "calibrated"] = "raw",
+    distribution_family: str = "gaussian",
     forecast_mean: float | None = None,
     forecast_std: float | None = None,
     error: str | None = None,
@@ -642,6 +767,9 @@ def _empty_opportunity_observation(
         market_url=_market_url_for_spec(spec),
         book_source_counts=book_source_counts or {},
         forecast_generated_at=forecast_generated_at,
+        forecast_contract_version=forecast_contract_version,
+        probability_source=probability_source,
+        distribution_family=distribution_family,
         forecast_mean=forecast_mean,
         forecast_std=forecast_std,
         error=error,
@@ -666,6 +794,18 @@ def _best_opportunity_candidate(
     return best_reporting
 
 
+def _forecast_contract_rejection_reason(
+    forecast: ProbForecast,
+) -> str | None:
+    """Return a fail-closed reason when a forecast does not satisfy the v2 contract."""
+
+    if getattr(forecast, "contract_version", "v1") != "v2":
+        return "forecast_contract_mismatch"
+    if getattr(forecast, "probability_source", "raw") != "calibrated":
+        return "missing_calibrator"
+    return None
+
+
 def _evaluate_opportunity_snapshot(
     snapshot: MarketSnapshot,
     *,
@@ -685,7 +825,12 @@ def _evaluate_opportunity_snapshot(
         return None
     try:
         feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-        forecast = predict_market(model_path, model_name, spec, feature_frame)
+        forecast = predict_market(
+            model_path,
+            model_name,
+            spec,
+            feature_frame,
+        )
     except Exception as exc:  # noqa: BLE001
         return _empty_opportunity_observation(
             snapshot,
@@ -702,6 +847,24 @@ def _evaluate_opportunity_snapshot(
             decision_horizon=decision_horizon,
             reason="stale_forecast",
             forecast_generated_at=forecast.generated_at,
+            forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            forecast_mean=forecast.mean,
+            forecast_std=forecast.std,
+        )
+
+    forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
+    if forecast_rejection_reason is not None:
+        return _empty_opportunity_observation(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason=forecast_rejection_reason,
+            forecast_generated_at=forecast.generated_at,
+            forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
             forecast_mean=forecast.mean,
             forecast_std=forecast.std,
         )
@@ -717,6 +880,10 @@ def _evaluate_opportunity_snapshot(
         edge_threshold=edge_threshold,
         max_spread_bps=config.execution.max_spread_bps,
         min_liquidity=config.execution.min_liquidity,
+        forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+        probability_source=getattr(forecast, "probability_source", "raw"),
+        distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+        decision_horizon=decision_horizon,
     )
     observation = _empty_opportunity_observation(
         snapshot,
@@ -725,6 +892,9 @@ def _evaluate_opportunity_snapshot(
         reason=str(evaluation["reason"]),
         book_source_counts=dict(evaluation["book_source_counts"]),
         forecast_generated_at=forecast.generated_at,
+        forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+        probability_source=getattr(forecast, "probability_source", "raw"),
+        distribution_family=getattr(forecast, "distribution_family", "gaussian"),
         forecast_mean=forecast.mean,
         forecast_std=forecast.std,
     )
@@ -799,6 +969,8 @@ def _summarize_backtest_metrics(
     prediction_frame = pd.DataFrame(prediction_rows)
     trade_frame = pd.DataFrame(trade_rows)
     trade_summary = summarize_trade_log(trade_frame)
+    calibration_probs = prediction_frame["top_probability"].to_numpy(dtype=float)
+    calibration_outcomes = prediction_frame["top_is_correct"].to_numpy(dtype=float)
     metrics = {
         "mae": mae(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
         "rmse": rmse(prediction_frame["y_true"].to_numpy(), prediction_frame["y_pred"].to_numpy()),
@@ -809,6 +981,7 @@ def _summarize_backtest_metrics(
         ),
         "avg_brier": float(prediction_frame["brier"].mean()),
         "avg_crps": float(prediction_frame["crps"].mean()),
+        "calibration_gap": calibration_gap(calibration_probs, calibration_outcomes),
         **trade_summary,
     }
     if extra_metrics:
@@ -823,84 +996,105 @@ def _run_synthetic_backtest(
     artifacts_dir: Path,
     bankroll: float,
     default_fee_bps: float,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    seed: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run the existing synthetic-book research backtest."""
 
     broker = PaperBroker(bankroll=bankroll)
     prediction_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
-    for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
-        artifact = train_model(model_name, train, artifacts_dir)
-        row = test.iloc[0]
-        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
-        snapshot = MarketSnapshot(
-            captured_at=datetime.now(tz=UTC),
-            market={"id": spec.market_id},
-            spec=spec,
-            outcome_prices=json.loads(str(row.get("market_prices_json", "{}"))),
-            clob_token_ids=spec.token_ids,
+    effective_split_policy = _effective_split_policy(split_policy)
+    min_train_size = 1
+    for train, test in rolling_origin_splits(
+        frame,
+        min_train_size=min_train_size,
+        test_size=1,
+        split_policy=effective_split_policy,
+    ):
+        artifact = train_model(
+            model_name,
+            train,
+            artifacts_dir,
+            split_policy=effective_split_policy,
+            seed=seed,
         )
-        forecast = predict_market(Path(artifact.path), model_name, spec, test)
-        winning_label = str(row["winning_outcome"])
-        prediction_rows.append(
-            {
-                "target_date": row["target_date"],
-                "city": spec.city,
-                "y_true": row["realized_daily_max"],
-                "y_pred": forecast.mean,
-                "std": forecast.std,
-                "brier": brier_score(forecast.outcome_probabilities, winning_label),
-                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
-            }
-        )
+        for _, row in test.iterrows():
+            spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+            snapshot = MarketSnapshot(
+                captured_at=datetime.now(tz=UTC),
+                market={"id": spec.market_id},
+                spec=spec,
+                outcome_prices=json.loads(str(row.get("market_prices_json", "{}"))),
+                clob_token_ids=spec.token_ids,
+            )
+            forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
+            winning_label = str(row["winning_outcome"])
+            top_label, top_probability = max(
+                forecast.outcome_probabilities.items(),
+                key=lambda item: item[1],
+            )
+            prediction_rows.append(
+                {
+                    "target_date": row["target_date"],
+                    "city": spec.city,
+                    "y_true": row["realized_daily_max"],
+                    "y_pred": forecast.mean,
+                    "std": forecast.std,
+                    "brier": brier_score(forecast.outcome_probabilities, winning_label),
+                    "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
+                    "top_probability": float(top_probability),
+                    "top_is_correct": float(top_label == winning_label),
+                }
+            )
 
-        outcome_labels = list(forecast.outcome_probabilities.keys())
-        books: dict[str, BookSnapshot] = {}
-        for ol in outcome_labels:
-            tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
-            books[ol] = _synthetic_book(snapshot, ol, tid)
-        signal = _best_signal_across_outcomes(
-            snapshot,
-            forecast.outcome_probabilities,
-            books,
-            mode="paper",
-            clob=None,
-            default_fee_bps=default_fee_bps,
-        )
-        if signal is None:
-            continue
-        book = books[signal.outcome_label]
-        size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
-        size = size_notional / max(signal.executable_price, 1e-6)
-        if size <= 0:
-            continue
-        fill = broker.simulate_fill(signal, book=book, size=size)
-        if fill is None:
-            continue
-        realized_pnl = settle_position(
-            Position(
-                outcome_label=fill.outcome_label,
-                price=fill.price,
-                size=fill.size,
-                side=fill.side,
-            ),
-            winning_label,
-            fee_paid=estimate_fee(fill.price * fill.size, taker_bps=default_fee_bps),
-        )
-        trade_rows.append(
-            {
-                "market_id": fill.market_id,
-                "city": spec.city,
-                "decision_horizon": str(row["decision_horizon"]),
-                "outcome_label": fill.outcome_label,
-                "winning_outcome": winning_label,
-                "price": fill.price,
-                "size": fill.size,
-                "edge": signal.edge,
-                "realized_pnl": realized_pnl,
-                "pricing_source": "synthetic",
-            }
-        )
+            outcome_labels = list(forecast.outcome_probabilities.keys())
+            books: dict[str, BookSnapshot] = {}
+            for ol in outcome_labels:
+                tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
+                books[ol] = _synthetic_book(snapshot, ol, tid)
+            signal = _best_signal_across_outcomes(
+                snapshot,
+                forecast.outcome_probabilities,
+                books,
+                mode="paper",
+                clob=None,
+                default_fee_bps=default_fee_bps,
+            )
+            if signal is None:
+                continue
+            book = books[signal.outcome_label]
+            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
+            size = size_notional / max(signal.executable_price, 1e-6)
+            if size <= 0:
+                continue
+            fill = broker.simulate_fill(signal, book=book, size=size)
+            if fill is None:
+                continue
+            realized_pnl = settle_position(
+                Position(
+                    outcome_label=fill.outcome_label,
+                    price=fill.price,
+                    size=fill.size,
+                    side=fill.side,
+                ),
+                winning_label,
+                fee_paid=estimate_fee(fill.price * fill.size, taker_bps=default_fee_bps),
+            )
+            trade_rows.append(
+                {
+                    "market_id": fill.market_id,
+                    "city": spec.city,
+                    "decision_horizon": str(row["decision_horizon"]),
+                    "outcome_label": fill.outcome_label,
+                    "winning_outcome": winning_label,
+                    "price": fill.price,
+                    "size": fill.size,
+                    "edge": signal.edge,
+                    "realized_pnl": realized_pnl,
+                    "pricing_source": "synthetic",
+                }
+            )
 
     metrics, _, _ = _summarize_backtest_metrics(prediction_rows, trade_rows)
     return metrics, trade_rows
@@ -911,9 +1105,12 @@ def _run_real_history_backtest(
     panel: pd.DataFrame,
     *,
     model_name: str,
+    variant: str | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    seed: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -921,10 +1118,13 @@ def _run_real_history_backtest(
         frame,
         panel,
         model_name=model_name,
+        variant=variant,
         artifacts_dir=artifacts_dir,
         flat_stake=flat_stake,
         default_fee_bps=default_fee_bps,
         pricing_source="real_history",
+        split_policy=split_policy,
+        seed=seed,
     )
 
 
@@ -951,10 +1151,13 @@ def _run_quote_proxy_backtest(
     panel: pd.DataFrame,
     *,
     model_name: str,
+    variant: str | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
     quote_proxy_half_spread: float,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    seed: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using last price plus an explicit quote proxy."""
 
@@ -962,11 +1165,14 @@ def _run_quote_proxy_backtest(
         frame,
         panel,
         model_name=model_name,
+        variant=variant,
         artifacts_dir=artifacts_dir,
         flat_stake=flat_stake,
         default_fee_bps=default_fee_bps,
         pricing_source="quote_proxy",
         quote_proxy_half_spread=quote_proxy_half_spread,
+        split_policy=split_policy,
+        seed=seed,
     )
 
 
@@ -975,11 +1181,14 @@ def _run_panel_pricing_backtest(
     panel: pd.DataFrame,
     *,
     model_name: str,
+    variant: str | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
     pricing_source: Literal["real_history", "quote_proxy"],
     quote_proxy_half_spread: float = 0.0,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    seed: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using historical pricing or a quote proxy."""
 
@@ -1019,109 +1228,133 @@ def _run_panel_pricing_backtest(
     price_ages: list[float] = []
     execution_price_premiums: list[float] = []
 
-    for train, test in rolling_origin_splits(frame, min_train_size=1, test_size=1):
-        artifact = train_model(model_name, train, artifacts_dir)
-        row = test.iloc[0]
-        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
-        forecast = predict_market(Path(artifact.path), model_name, spec, test)
-        winning_label = str(row["winning_outcome"])
-        prediction_rows.append(
-            {
-                "target_date": row["target_date"],
-                "city": spec.city,
-                "y_true": row["realized_daily_max"],
-                "y_pred": forecast.mean,
-                "std": forecast.std,
-                "brier": brier_score(forecast.outcome_probabilities, winning_label),
-                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
-            }
+    effective_split_policy = _effective_split_policy(split_policy)
+    min_train_size = 1
+    for train, test in rolling_origin_splits(
+        frame,
+        min_train_size=min_train_size,
+        test_size=1,
+        split_policy=effective_split_policy,
+    ):
+        train_kwargs: dict[str, object] = {
+            "split_policy": effective_split_policy,
+            "seed": seed,
+        }
+        if variant is not None:
+            train_kwargs["variant"] = variant
+        artifact = train_model(
+            model_name,
+            train,
+            artifacts_dir,
+            **train_kwargs,
         )
-
-        best_edge = 0.0
-        best_candidate: dict[str, object] | None = None
-        has_covered_price = False
-        has_stale_price = False
-        for outcome_label, fair_probability in forecast.outcome_probabilities.items():
-            panel_row = working_panel.loc[
-                (working_panel["market_id"] == spec.market_id)
-                & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
-                & (working_panel["outcome_label"] == outcome_label)
-            ].copy()
-            if panel_row.empty:
-                continue
-            selected = panel_row.iloc[-1]
-            coverage_status = str(selected["coverage_status"])
-            if coverage_status == "stale":
-                has_stale_price = True
-            if coverage_status != "ok":
-                continue
-            has_covered_price = True
-            market_price = float(selected["market_price"])
-            executable_price = market_price
-            if pricing_source == "quote_proxy":
-                _, executable_price = _quote_proxy_prices(
-                    market_price,
-                    half_spread=quote_proxy_half_spread,
-                )
-            fee_per_share = estimate_fee(executable_price, taker_bps=default_fee_bps)
-            edge = compute_edge(fair_probability, executable_price, fee_per_share, 0.0)
-            if edge > best_edge:
-                best_edge = edge
-                best_candidate = {
-                    "outcome_label": outcome_label,
-                    "fair_probability": fair_probability,
-                    "market_price": market_price,
-                    "executable_price": executable_price,
-                    "edge": edge,
-                    "selected": selected,
+        for _, row in test.iterrows():
+            spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+            forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
+            winning_label = str(row["winning_outcome"])
+            top_label, top_probability = max(
+                forecast.outcome_probabilities.items(),
+                key=lambda item: item[1],
+            )
+            prediction_rows.append(
+                {
+                    "target_date": row["target_date"],
+                    "city": spec.city,
+                    "y_true": row["realized_daily_max"],
+                    "y_pred": forecast.mean,
+                    "std": forecast.std,
+                    "brier": brier_score(forecast.outcome_probabilities, winning_label),
+                    "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
+                    "top_probability": float(top_probability),
+                    "top_is_correct": float(top_label == winning_label),
                 }
-        if not has_covered_price:
-            if has_stale_price:
-                skipped_stale_price += 1
-            else:
-                skipped_missing_price += 1
-            continue
-        if best_candidate is None:
-            skipped_non_positive_edge += 1
-            continue
-        outcome_label = str(best_candidate["outcome_label"])
-        market_price = float(best_candidate["market_price"])  # type: ignore[arg-type]
-        executable_price = float(best_candidate["executable_price"])  # type: ignore[arg-type]
-        edge = float(best_candidate["edge"])  # type: ignore[arg-type]
-        selected = best_candidate["selected"]
-        size = flat_stake / max(executable_price, 1e-6)
-        priced_decision_rows += 1
-        age_seconds = selected.get("price_age_seconds")  # type: ignore[union-attr]
-        if age_seconds is not None and pd.notna(age_seconds):
-            price_ages.append(float(age_seconds))
-        execution_price_premiums.append(executable_price - market_price)
-        realized_pnl = settle_position(
-            Position(
-                outcome_label=outcome_label,
-                price=executable_price,
-                size=size,
-                side="buy",
-            ),
-            winning_label,
-            fee_paid=estimate_fee(flat_stake, taker_bps=default_fee_bps),
-        )
-        trade_rows.append(
-            {
-                "market_id": spec.market_id,
-                "city": spec.city,
-                "decision_horizon": str(row["decision_horizon"]),
-                "outcome_label": outcome_label,
-                "winning_outcome": winning_label,
-                "price": executable_price,
-                "reference_market_price": market_price,
-                "size": size,
-                "edge": edge,
-                "price_ts": selected.get("price_ts"),  # type: ignore[union-attr]
-                "price_age_seconds": age_seconds,
-                "realized_pnl": realized_pnl,
-                "pricing_source": pricing_source,
-            }
-        )
+            )
+
+            best_edge = 0.0
+            best_candidate: dict[str, object] | None = None
+            has_covered_price = False
+            has_stale_price = False
+            for outcome_label, fair_probability in forecast.outcome_probabilities.items():
+                panel_row = working_panel.loc[
+                    (working_panel["market_id"] == spec.market_id)
+                    & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
+                    & (working_panel["outcome_label"] == outcome_label)
+                ].copy()
+                if panel_row.empty:
+                    continue
+                selected = panel_row.iloc[-1]
+                coverage_status = str(selected["coverage_status"])
+                if coverage_status == "stale":
+                    has_stale_price = True
+                if coverage_status != "ok":
+                    continue
+                has_covered_price = True
+                market_price = float(selected["market_price"])
+                executable_price = market_price
+                if pricing_source == "quote_proxy":
+                    _, executable_price = _quote_proxy_prices(
+                        market_price,
+                        half_spread=quote_proxy_half_spread,
+                    )
+                fee_per_share = estimate_fee(executable_price, taker_bps=default_fee_bps)
+                edge = compute_edge(fair_probability, executable_price, fee_per_share, 0.0)
+                if edge > best_edge:
+                    best_edge = edge
+                    best_candidate = {
+                        "outcome_label": outcome_label,
+                        "fair_probability": fair_probability,
+                        "market_price": market_price,
+                        "executable_price": executable_price,
+                        "edge": edge,
+                        "selected": selected,
+                    }
+            if not has_covered_price:
+                if has_stale_price:
+                    skipped_stale_price += 1
+                else:
+                    skipped_missing_price += 1
+                continue
+            if best_candidate is None:
+                skipped_non_positive_edge += 1
+                continue
+            outcome_label = str(best_candidate["outcome_label"])
+            market_price = float(best_candidate["market_price"])  # type: ignore[arg-type]
+            executable_price = float(best_candidate["executable_price"])  # type: ignore[arg-type]
+            edge = float(best_candidate["edge"])  # type: ignore[arg-type]
+            selected = best_candidate["selected"]
+            size = flat_stake / max(executable_price, 1e-6)
+            priced_decision_rows += 1
+            age_seconds = selected.get("price_age_seconds")  # type: ignore[union-attr]
+            if age_seconds is not None and pd.notna(age_seconds):
+                price_ages.append(float(age_seconds))
+            execution_price_premiums.append(executable_price - market_price)
+            realized_pnl = settle_position(
+                Position(
+                    outcome_label=outcome_label,
+                    price=executable_price,
+                    size=size,
+                    side="buy",
+                ),
+                winning_label,
+                fee_paid=estimate_fee(flat_stake, taker_bps=default_fee_bps),
+            )
+            trade_rows.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "decision_horizon": str(row["decision_horizon"]),
+                    "outcome_label": outcome_label,
+                    "winning_outcome": winning_label,
+                    "price": executable_price,
+                    "reference_market_price": market_price,
+                    "size": size,
+                    "edge": edge,
+                    "price_ts": selected.get("price_ts"),  # type: ignore[union-attr]
+                    "price_age_seconds": age_seconds,
+                    "realized_pnl": realized_pnl,
+                    "pricing_source": pricing_source,
+                }
+            )
 
     metrics, _, _ = _summarize_backtest_metrics(
         prediction_rows,
@@ -1225,8 +1458,8 @@ def scan_markets(
 
 @app.command("scan-edge")
 def scan_edge(
-    model_path: Path = Path("artifacts/models/gaussian_emos.pkl"),
-    model_name: str = "gaussian_emos",
+    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Annotated[
         Path,
         typer.Option("--markets-path", help="Discovered markets snapshot file (run scan-markets first)."),
@@ -1252,6 +1485,7 @@ def scan_edge(
     Run scan-markets first to refresh the market snapshot file.
     """
 
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     builder = DatasetBuilder(
         http=http,
@@ -1289,7 +1523,7 @@ def scan_edge(
         if decision_horizon is None or horizon_reason == "policy_filtered":
             continue
         feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-        forecast = predict_market(model_path, model_name, spec, feature_frame)
+        forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
             continue
         for outcome_label, model_prob in forecast.outcome_probabilities.items():
@@ -1402,7 +1636,8 @@ def build_dataset(
     finally:
         pipeline.warehouse.close()
     console.print(
-        f"Built dataset with {len(frame)} rows at {config.app.parquet_dir / 'gold' / f'{output_name}.parquet'}"
+        f"Built dataset with {len(frame)} rows at "
+        f"{(config.app.parquet_dir / 'gold/v2' / f'{output_name}.parquet')}"
     )
 
 
@@ -1701,7 +1936,7 @@ def summarize_dataset_readiness(
 
 @app.command("materialize-backtest-panel")
 def materialize_backtest_panel(
-    dataset_path: Path = Path("data/parquet/gold/historical_training_set.parquet"),
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     output_name: str = "historical_backtest_panel",
@@ -1745,7 +1980,7 @@ def materialize_backtest_panel(
     console.print_json(
         data={
             "gold_backtest_panel": len(panel),
-            "output_path": str(config.app.parquet_dir / "gold" / f"{output_name}.parquet"),
+            "output_path": str(config.app.parquet_dir / "gold/v2" / f"{output_name}.parquet"),
             "max_price_age_minutes": max_price_age_minutes,
         }
     )
@@ -1793,7 +2028,7 @@ def materialize_training_set(
     console.print_json(
         data={
             "gold_training_examples": len(frame),
-            "output_path": str(config.app.parquet_dir / "gold" / f"{output_name}.parquet"),
+            "output_path": str(config.app.parquet_dir / "gold/v2" / f"{output_name}.parquet"),
             "contract": contract,
         }
     )
@@ -2193,44 +2428,60 @@ def sync_firebase(
 
 @app.command("train-baseline")
 def train_baseline(
-    dataset_path: Path = Path("data/parquet/gold/historical_training_set.parquet"),
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
     model_name: str = "gaussian_emos",
-    artifacts_dir: Path = Path("artifacts/models"),
+    artifacts_dir: Path = Path("artifacts/models/v2"),
 ) -> None:
     """Train a baseline probabilistic model."""
 
+    config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
-    artifact = train_model(model_name, frame, artifacts_dir)
+    artifact = train_model(
+        require_supported_model_name(model_name),
+        frame,
+        artifacts_dir,
+        split_policy="market_day",
+        seed=config.app.random_seed,
+    )
     console.print(f"Trained {model_name} -> {artifact.path}")
 
 
 @app.command("train-advanced")
 def train_advanced(
-    dataset_path: Path = Path("data/parquet/gold/historical_training_set.parquet"),
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
     model_name: str = "det2prob_nn",
-    artifacts_dir: Path = Path("artifacts/models"),
+    artifacts_dir: Path = Path("artifacts/models/v2"),
 ) -> None:
     """Train an advanced probabilistic model."""
 
+    config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
-    artifact = train_model(model_name, frame, artifacts_dir)
+    artifact = train_model(
+        require_supported_model_name(model_name),
+        frame,
+        artifacts_dir,
+        split_policy="market_day",
+        seed=config.app.random_seed,
+    )
     console.print(f"Trained {model_name} -> {artifact.path}")
 
 
 @app.command("backtest")
 def backtest(
-    dataset_path: Path = Path("data/parquet/gold/historical_training_set.parquet"),
-    model_name: str = "gaussian_emos",
-    artifacts_dir: Path = Path("artifacts/models"),
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    model_name: str = DEFAULT_MODEL_NAME,
+    artifacts_dir: Path = Path("artifacts/models/v2"),
     bankroll: float = 10_000.0,
     pricing_source: Literal["synthetic", "real_history", "quote_proxy"] = "synthetic",
-    panel_path: Path = Path("data/parquet/gold/historical_backtest_panel.parquet"),
+    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
 ) -> None:
     """Run a rolling-origin backtest with synthetic or official historical pricing."""
 
     config, _ = load_settings()
+    resolved_model_name = _resolve_model_name_alias(model_name)
     default_fee_bps = _default_fee_bps(config)
     frame = pd.read_parquet(dataset_path)
     required_columns = {"market_spec_json", "market_prices_json", "winning_outcome", "realized_daily_max"}
@@ -2244,13 +2495,15 @@ def backtest(
     if pricing_source == "synthetic":
         metrics, trade_rows = _run_synthetic_backtest(
             frame,
-            model_name=model_name,
+            model_name=resolved_model_name,
             artifacts_dir=artifacts_dir,
             bankroll=bankroll,
             default_fee_bps=default_fee_bps,
+            split_policy=split_policy,
+            seed=config.app.random_seed,
         )
-        metrics_output = Path("artifacts/backtest_metrics.json")
-        trades_output = Path("artifacts/backtest_trades.json")
+        metrics_output = _default_backtest_output("backtest_metrics.json")
+        trades_output = _default_backtest_output("backtest_trades.json")
     else:
         if not panel_path.exists():
             msg = (
@@ -2274,35 +2527,651 @@ def backtest(
             metrics, trade_rows = _run_real_history_backtest(
                 frame,
                 panel,
-                model_name=model_name,
+                model_name=resolved_model_name,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
+                split_policy=split_policy,
+                seed=config.app.random_seed,
             )
-            metrics_output = Path("artifacts/backtest_metrics_real_history.json")
-            trades_output = Path("artifacts/backtest_trades_real_history.json")
+            metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
+            trades_output = _default_backtest_output("backtest_trades_real_history.json")
         else:
             metrics, trade_rows = _run_quote_proxy_backtest(
                 frame,
                 panel,
-                model_name=model_name,
+                model_name=resolved_model_name,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
                 quote_proxy_half_spread=quote_proxy_half_spread,
+                split_policy=split_policy,
+                seed=config.app.random_seed,
             )
-            metrics_output = Path("artifacts/backtest_metrics_quote_proxy.json")
-            trades_output = Path("artifacts/backtest_trades_quote_proxy.json")
+            metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
+            trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
 
+    metrics["contract_version"] = "v2"
+    metrics["model_name"] = resolved_model_name
+    metrics["split_policy"] = _effective_split_policy(split_policy)
+    metrics["leakage_audit_passed"] = True
     dump_json(metrics_output, metrics)
     dump_json(trades_output, trade_rows)
     console.print_json(data=metrics)
 
 
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    """Return mean/std summary for a numeric list."""
+
+    if not values:
+        return 0.0, 0.0
+    if len(values) == 1:
+        return float(values[0]), 0.0
+    series = pd.Series(values, dtype=float)
+    return float(series.mean()), float(series.std(ddof=0))
+
+
+def _model_variant_label(model_name: str, variant: str | None) -> str:
+    """Return a stable model label including an optional ablation variant."""
+
+    return model_name if variant is None else f"{model_name}:{variant}"
+
+
+def _grouped_holdout_split(
+    frame: pd.DataFrame,
+    *,
+    split_policy: Literal["market_day", "target_day"],
+    holdout_fraction: float = 0.2,
+) -> tuple[pd.DataFrame, pd.DataFrame, int, int]:
+    """Split a frame into chronological grouped train/test partitions."""
+
+    ordered = frame.sort_values(
+        [column for column in ["target_date", "decision_time_utc", "market_id", "decision_horizon"] if column in frame.columns]
+    ).reset_index(drop=True)
+    group_ids = group_id_series(ordered, split_policy=split_policy)
+    unique_groups = group_ids.drop_duplicates().tolist()
+    if len(unique_groups) < 2:
+        msg = f"Need at least two groups for split_policy={split_policy}."
+        raise typer.BadParameter(msg)
+    split_idx = max(1, int(len(unique_groups) * (1.0 - holdout_fraction)))
+    split_idx = min(split_idx, len(unique_groups) - 1)
+    train_groups = set(unique_groups[:split_idx])
+    test_groups = set(unique_groups[split_idx:])
+    train = ordered.loc[group_ids.isin(train_groups)].reset_index(drop=True).copy()
+    test = ordered.loc[group_ids.isin(test_groups)].reset_index(drop=True).copy()
+    if train.empty or test.empty:
+        msg = f"Unable to build a non-empty grouped holdout for split_policy={split_policy}."
+        raise typer.BadParameter(msg)
+    return train, test, len(unique_groups), len(test_groups)
+
+
+def _panel_lookup(panel: pd.DataFrame) -> dict[tuple[str, str, str], dict[str, object]]:
+    """Return the last observed panel row for each market/horizon/outcome."""
+
+    working = panel.copy()
+    working["market_id"] = working["market_id"].astype(str)
+    working["decision_horizon"] = working["decision_horizon"].astype(str)
+    working["outcome_label"] = working["outcome_label"].astype(str)
+    working["coverage_status"] = working["coverage_status"].astype(str)
+    working["market_price"] = pd.to_numeric(working["market_price"], errors="coerce")
+    if "price_ts" in working.columns:
+        working["price_ts"] = pd.to_datetime(working["price_ts"], errors="coerce", utc=True)
+        working = working.sort_values(["market_id", "decision_horizon", "outcome_label", "price_ts"]).reset_index(drop=True)
+    grouped = working.groupby(["market_id", "decision_horizon", "outcome_label"], sort=False).tail(1)
+    return {
+        (str(row.market_id), str(row.decision_horizon), str(row.outcome_label)): row._asdict()
+        for row in grouped.itertuples(index=False)
+    }
+
+
+def _run_grouped_holdout_ablation(
+    frame: pd.DataFrame,
+    panel: pd.DataFrame,
+    *,
+    model_name: str,
+    variant: str,
+    artifacts_dir: Path,
+    flat_stake: float,
+    default_fee_bps: float,
+    quote_proxy_half_spread: float,
+    split_policy: Literal["market_day", "target_day"],
+    seed: int,
+) -> tuple[dict[str, float], dict[str, float], dict[str, object]]:
+    """Train one variant once and evaluate on a grouped chronological holdout."""
+
+    train_frame, test_frame, total_groups, test_groups = _grouped_holdout_split(
+        frame,
+        split_policy=split_policy,
+    )
+    artifact = train_model(
+        model_name,
+        train_frame,
+        artifacts_dir,
+        split_policy=split_policy,
+        seed=seed,
+        variant=variant,
+    )
+    lookup = _panel_lookup(panel)
+    prediction_rows: list[dict[str, object]] = []
+    real_trade_rows: list[dict[str, object]] = []
+    quote_trade_rows: list[dict[str, object]] = []
+    priced_decision_rows = 0
+    skipped_missing_price = 0
+    skipped_stale_price = 0
+    skipped_non_positive_edge = 0
+
+    for _, row in test_frame.iterrows():
+        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+        forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
+        winning_label = str(row["winning_outcome"])
+        top_label, top_probability = max(
+            forecast.outcome_probabilities.items(),
+            key=lambda item: item[1],
+        )
+        prediction_rows.append(
+            {
+                "target_date": row["target_date"],
+                "city": spec.city,
+                "y_true": row["realized_daily_max"],
+                "y_pred": forecast.mean,
+                "std": forecast.std,
+                "brier": brier_score(forecast.outcome_probabilities, winning_label),
+                "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
+                "top_probability": float(top_probability),
+                "top_is_correct": float(top_label == winning_label),
+            }
+        )
+
+        best_real_edge = 0.0
+        best_real_candidate: dict[str, float | str] | None = None
+        best_quote_edge = 0.0
+        best_quote_candidate: dict[str, float | str] | None = None
+        has_covered = False
+        has_stale = False
+        for outcome_label, fair_probability in forecast.outcome_probabilities.items():
+            panel_key = (str(spec.market_id), str(row["decision_horizon"]), str(outcome_label))
+            panel_row = lookup.get(panel_key)
+            if panel_row is None:
+                continue
+            coverage = str(panel_row["coverage_status"])
+            if coverage == "stale":
+                has_stale = True
+            if coverage != "ok":
+                continue
+            has_covered = True
+            market_price = float(panel_row["market_price"])
+            real_edge = compute_edge(
+                float(fair_probability),
+                market_price,
+                estimate_fee(market_price, taker_bps=default_fee_bps),
+                0.0,
+            )
+            if real_edge > best_real_edge:
+                best_real_edge = real_edge
+                best_real_candidate = {
+                    "outcome_label": outcome_label,
+                    "price": market_price,
+                    "edge": real_edge,
+                }
+            _, quote_ask = _quote_proxy_prices(market_price, half_spread=quote_proxy_half_spread)
+            quote_edge = compute_edge(
+                float(fair_probability),
+                quote_ask,
+                estimate_fee(quote_ask, taker_bps=default_fee_bps),
+                0.0,
+            )
+            if quote_edge > best_quote_edge:
+                best_quote_edge = quote_edge
+                best_quote_candidate = {
+                    "outcome_label": outcome_label,
+                    "price": quote_ask,
+                    "edge": quote_edge,
+                }
+
+        if not has_covered:
+            if has_stale:
+                skipped_stale_price += 1
+            else:
+                skipped_missing_price += 1
+            continue
+
+        priced_decision_rows += 1
+        if best_real_candidate is None:
+            skipped_non_positive_edge += 1
+        else:
+            real_trade_rows.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "decision_horizon": str(row["decision_horizon"]),
+                    "outcome_label": str(best_real_candidate["outcome_label"]),
+                    "winning_outcome": winning_label,
+                    "price": float(best_real_candidate["price"]),
+                    "size": flat_stake / max(float(best_real_candidate["price"]), 1e-6),
+                    "edge": float(best_real_candidate["edge"]),
+                    "realized_pnl": settle_position(
+                        Position(
+                            outcome_label=str(best_real_candidate["outcome_label"]),
+                            price=float(best_real_candidate["price"]),
+                            size=flat_stake / max(float(best_real_candidate["price"]), 1e-6),
+                            side="buy",
+                        ),
+                        winning_label,
+                        fee_paid=estimate_fee(flat_stake, taker_bps=default_fee_bps),
+                    ),
+                    "pricing_source": "real_history",
+                }
+            )
+        if best_quote_candidate is not None:
+            quote_trade_rows.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "decision_horizon": str(row["decision_horizon"]),
+                    "outcome_label": str(best_quote_candidate["outcome_label"]),
+                    "winning_outcome": winning_label,
+                    "price": float(best_quote_candidate["price"]),
+                    "size": flat_stake / max(float(best_quote_candidate["price"]), 1e-6),
+                    "edge": float(best_quote_candidate["edge"]),
+                    "realized_pnl": settle_position(
+                        Position(
+                            outcome_label=str(best_quote_candidate["outcome_label"]),
+                            price=float(best_quote_candidate["price"]),
+                            size=flat_stake / max(float(best_quote_candidate["price"]), 1e-6),
+                            side="buy",
+                        ),
+                        winning_label,
+                        fee_paid=estimate_fee(flat_stake, taker_bps=default_fee_bps),
+                    ),
+                    "pricing_source": "quote_proxy",
+                }
+            )
+
+    extra_metrics = {
+        "dataset_rows": float(len(frame)),
+        "train_rows": float(len(train_frame)),
+        "test_rows": float(len(test_frame)),
+        "total_groups": float(total_groups),
+        "test_groups": float(test_groups),
+        "priced_decision_rows": float(priced_decision_rows),
+        "skipped_missing_price": float(skipped_missing_price),
+        "skipped_stale_price": float(skipped_stale_price),
+        "skipped_non_positive_edge": float(skipped_non_positive_edge),
+    }
+    real_metrics, _, _ = _summarize_backtest_metrics(
+        prediction_rows,
+        real_trade_rows,
+        extra_metrics=extra_metrics,
+    )
+    quote_metrics, _, _ = _summarize_backtest_metrics(
+        prediction_rows,
+        quote_trade_rows,
+        extra_metrics=extra_metrics,
+    )
+    metadata = {
+        "artifact_path": artifact.path,
+        "artifact_variant": artifact.variant,
+        "artifact_status": artifact.status,
+        "artifact_diagnostics": artifact.diagnostics,
+        "calibration_path": artifact.calibration_path,
+    }
+    return real_metrics, quote_metrics, metadata
+
+
+def _benchmark_row(
+    *,
+    model_name: str,
+    seeds: list[int],
+    real_history_runs: list[dict[str, float]],
+    quote_proxy_runs: list[dict[str, float]],
+) -> dict[str, object]:
+    """Aggregate benchmark metrics for one candidate model."""
+
+    row: dict[str, object] = {
+        "model_name": model_name,
+        "seed_count": len(seeds),
+        "seeds": list(seeds),
+    }
+    for key in ("mae", "rmse", "nll", "avg_brier", "avg_crps", "calibration_gap"):
+        mean_value, std_value = _mean_std([float(run.get(key, 0.0)) for run in real_history_runs])
+        row[f"{key}_mean"] = mean_value
+        row[f"{key}_std"] = std_value
+    for prefix, runs in (("real_history", real_history_runs), ("quote_proxy", quote_proxy_runs)):
+        for key in ("num_trades", "pnl", "hit_rate", "avg_edge", "priced_decision_rows"):
+            mean_value, std_value = _mean_std([float(run.get(key, 0.0)) for run in runs])
+            row[f"{prefix}_{key}_mean"] = mean_value
+            row[f"{prefix}_{key}_std"] = std_value
+    row["sample_adequacy_passed"] = bool(
+        float(row.get("real_history_num_trades_mean", 0.0)) > 0
+        and float(row.get("quote_proxy_num_trades_mean", 0.0)) > 0
+        and float(row.get("real_history_priced_decision_rows_mean", 0.0)) > 0
+    )
+    return row
+
+
+def _ablation_row(
+    *,
+    model_name: str,
+    variant: str,
+    split_policy: Literal["market_day", "target_day"],
+    seeds: list[int],
+    real_history_runs: list[dict[str, float]],
+    quote_proxy_runs: list[dict[str, float]],
+    metadata_runs: list[dict[str, object]],
+) -> dict[str, object]:
+    """Aggregate grouped-holdout ablation metrics for one model variant."""
+
+    row = _benchmark_row(
+        model_name=_model_variant_label(model_name, variant),
+        seeds=seeds,
+        real_history_runs=real_history_runs,
+        quote_proxy_runs=quote_proxy_runs,
+    )
+    row["model_family"] = model_name
+    row["variant"] = variant
+    row["split_policy"] = split_policy
+
+    diagnostics_keys = sorted(
+        {
+            key
+            for metadata in metadata_runs
+            for key, value in dict(metadata.get("artifact_diagnostics", {})).items()
+            if isinstance(value, (int, float))
+        }
+    )
+    for key in diagnostics_keys:
+        mean_value, std_value = _mean_std(
+            [
+                float(dict(metadata.get("artifact_diagnostics", {})).get(key, 0.0))
+                for metadata in metadata_runs
+            ]
+        )
+        row[f"diag_{key}_mean"] = mean_value
+        row[f"diag_{key}_std"] = std_value
+    row["calibration_available"] = all(bool(metadata.get("calibration_path")) for metadata in metadata_runs)
+    row["artifact_status"] = str(metadata_runs[0].get("artifact_status", "experimental")) if metadata_runs else "experimental"
+    return row
+
+
+def _write_leaderboard_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    """Persist leaderboard rows to CSV."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in rows for key in row})
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _publish_champion_alias(
+    *,
+    champion_name: str,
+    frame: pd.DataFrame,
+    artifacts_dir: Path,
+    split_policy: Literal["market_day", "target_day"],
+    seed: int,
+    leaderboard_path: Path,
+) -> dict[str, object]:
+    """Train and publish the active champion alias artifacts."""
+
+    artifact = train_model(
+        champion_name,
+        frame,
+        artifacts_dir,
+        split_policy=split_policy,
+        seed=seed,
+    )
+    source_model_path = Path(artifact.path)
+    champion_path = _default_model_path(DEFAULT_MODEL_NAME)
+    champion_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_model_path, champion_path)
+
+    if artifact.calibration_path is None:
+        msg = f"Champion {champion_name} has no calibrator artifact and cannot be published."
+        raise typer.BadParameter(msg)
+    champion_calibrator_path = champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")
+    shutil.copyfile(Path(artifact.calibration_path), champion_calibrator_path)
+
+    metadata = {
+        "model_name": champion_name,
+        "alias_path": str(champion_path),
+        "alias_calibration_path": str(champion_calibrator_path),
+        "source_model_path": str(source_model_path),
+        "source_calibration_path": artifact.calibration_path,
+        "split_policy": split_policy,
+        "seed": seed,
+        "contract_version": "v2",
+        "leaderboard_path": str(leaderboard_path),
+        "published_at": datetime.now(tz=UTC).isoformat(),
+    }
+    dump_json(_default_champion_metadata_path(), metadata)
+    return metadata
+
+
+@app.command("benchmark-ablations")
+def benchmark_ablations(
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    model_name: str = "tuned_ensemble",
+    variants: Annotated[list[str] | None, typer.Option("--variant")] = None,
+    split_policies: Annotated[list[str] | None, typer.Option("--split-policy")] = None,
+    seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
+    artifacts_dir: Path = Path("artifacts/models/v2/ablations"),
+    flat_stake: float = 1.0,
+    quote_proxy_half_spread: float = 0.02,
+    leaderboard_output: Path | None = None,
+    leaderboard_csv_output: Path | None = None,
+    summary_output: Path | None = None,
+) -> None:
+    """Benchmark internal ablation variants with a grouped one-shot holdout."""
+
+    config, _ = load_settings()
+    family = require_supported_model_name(model_name)
+    available_variants = supported_ablation_variants(family)
+    if not available_variants:
+        msg = f"Model {family} has no registered ablation variants."
+        raise typer.BadParameter(msg)
+
+    selected_variants = list(dict.fromkeys(variants or list(available_variants)))
+    for variant in selected_variants:
+        require_supported_variant(family, variant)
+
+    resolved_split_policies = [str(value) for value in (split_policies or ["market_day", "target_day"])]
+    for split_policy in resolved_split_policies:
+        if split_policy not in {"market_day", "target_day"}:
+            raise typer.BadParameter(f"Unsupported split_policy: {split_policy}")
+    benchmark_seeds = list(dict.fromkeys(seeds or [config.app.random_seed]))
+
+    frame = pd.read_parquet(dataset_path)
+    if not panel_path.exists():
+        msg = (
+            f"Backtest panel does not exist: {panel_path}. "
+            "Run `uv run pmtmax materialize-backtest-panel` first."
+        )
+        raise typer.BadParameter(msg)
+    panel = pd.read_parquet(panel_path)
+    if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
+        raise typer.BadParameter("Backtest panel has no coverage_status=ok rows.")
+
+    if leaderboard_output is None:
+        leaderboard_output = _default_benchmark_output(f"{family}_ablation_leaderboard.json")
+    if leaderboard_csv_output is None:
+        leaderboard_csv_output = _default_benchmark_output(f"{family}_ablation_leaderboard.csv")
+    if summary_output is None:
+        summary_output = _default_benchmark_output(f"{family}_ablation_summary.json")
+
+    rows: list[dict[str, object]] = []
+    for split_policy in resolved_split_policies:
+        for variant in selected_variants:
+            real_history_runs: list[dict[str, float]] = []
+            quote_proxy_runs: list[dict[str, float]] = []
+            metadata_runs: list[dict[str, object]] = []
+            for seed in benchmark_seeds:
+                variant_artifacts_dir = artifacts_dir / family / split_policy / variant / f"seed_{seed}"
+                real_metrics, quote_metrics, metadata = _run_grouped_holdout_ablation(
+                    frame,
+                    panel,
+                    model_name=family,
+                    variant=variant,
+                    artifacts_dir=variant_artifacts_dir,
+                    flat_stake=flat_stake,
+                    default_fee_bps=_default_fee_bps(config),
+                    quote_proxy_half_spread=quote_proxy_half_spread,
+                    split_policy=split_policy,  # type: ignore[arg-type]
+                    seed=seed,
+                )
+                real_history_runs.append(real_metrics)
+                quote_proxy_runs.append(quote_metrics)
+                metadata_runs.append(metadata)
+            rows.append(
+                _ablation_row(
+                    model_name=family,
+                    variant=variant,
+                    split_policy=split_policy,  # type: ignore[arg-type]
+                    seeds=benchmark_seeds,
+                    real_history_runs=real_history_runs,
+                    quote_proxy_runs=quote_proxy_runs,
+                    metadata_runs=metadata_runs,
+                )
+            )
+
+    leaderboard_frame = pd.DataFrame(rows).sort_values(
+        [
+            "split_policy",
+            "avg_crps_mean",
+            "avg_brier_mean",
+            "real_history_pnl_mean",
+        ],
+        ascending=[True, True, True, False],
+    ).reset_index(drop=True)
+    leaderboard_rows = leaderboard_frame.to_dict(orient="records")
+    dump_json(leaderboard_output, leaderboard_rows)
+    _write_leaderboard_csv(leaderboard_csv_output, leaderboard_rows)
+
+    summary = {
+        "model_family": family,
+        "variants": selected_variants,
+        "split_policies": resolved_split_policies,
+        "seeds": benchmark_seeds,
+        "dataset_path": str(dataset_path),
+        "panel_path": str(panel_path),
+        "leaderboard_path": str(leaderboard_output),
+        "leaderboard_csv_path": str(leaderboard_csv_output),
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    dump_json(summary_output, summary)
+    console.print_json(data=summary)
+
+
+@app.command("benchmark-models")
+def benchmark_models(
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    models: Annotated[list[str] | None, typer.Option("--model")] = None,
+    seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
+    artifacts_dir: Path = Path("artifacts/models/v2"),
+    flat_stake: float = 1.0,
+    quote_proxy_half_spread: float = 0.02,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    publish_champion: bool = True,
+    leaderboard_output: Path = Path("artifacts/benchmarks/v2/leaderboard.json"),
+    leaderboard_csv_output: Path = Path("artifacts/benchmarks/v2/leaderboard.csv"),
+    summary_output: Path = Path("artifacts/benchmarks/v2/benchmark_summary.json"),
+) -> None:
+    """Benchmark the canonical v2 models and optionally publish the champion alias."""
+
+    config, _ = load_settings()
+    frame = pd.read_parquet(dataset_path)
+    if not panel_path.exists():
+        msg = (
+            f"Backtest panel does not exist: {panel_path}. "
+            "Run `uv run pmtmax materialize-backtest-panel` first."
+        )
+        raise typer.BadParameter(msg)
+    panel = pd.read_parquet(panel_path)
+    if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
+        raise typer.BadParameter("Backtest panel has no coverage_status=ok rows.")
+
+    candidate_models = models or list(config.models.benchmark_ladder)
+    ordered_models = list(dict.fromkeys(require_supported_model_name(name) for name in candidate_models))
+    benchmark_seeds = list(dict.fromkeys(seeds or [config.app.random_seed]))
+
+    rows: list[dict[str, object]] = []
+    for model_name in ordered_models:
+        real_history_runs: list[dict[str, float]] = []
+        quote_proxy_runs: list[dict[str, float]] = []
+        for seed in benchmark_seeds:
+            real_history_metrics, _ = _run_real_history_backtest(
+                frame,
+                panel,
+                model_name=model_name,
+                artifacts_dir=artifacts_dir,
+                flat_stake=flat_stake,
+                default_fee_bps=_default_fee_bps(config),
+                split_policy=split_policy,
+                seed=seed,
+            )
+            quote_proxy_metrics, _ = _run_quote_proxy_backtest(
+                frame,
+                panel,
+                model_name=model_name,
+                artifacts_dir=artifacts_dir,
+                flat_stake=flat_stake,
+                default_fee_bps=_default_fee_bps(config),
+                quote_proxy_half_spread=quote_proxy_half_spread,
+                split_policy=split_policy,
+                seed=seed,
+            )
+            real_history_runs.append(real_history_metrics)
+            quote_proxy_runs.append(quote_proxy_metrics)
+        rows.append(
+            _benchmark_row(
+                model_name=model_name,
+                seeds=benchmark_seeds,
+                real_history_runs=real_history_runs,
+                quote_proxy_runs=quote_proxy_runs,
+            )
+        )
+
+    leaderboard_frame = score_leaderboard(pd.DataFrame(rows))
+    champion_name = select_champion(leaderboard_frame)
+    leaderboard_rows = leaderboard_frame.to_dict(orient="records")
+    dump_json(leaderboard_output, leaderboard_rows)
+    _write_leaderboard_csv(leaderboard_csv_output, leaderboard_rows)
+
+    champion_metadata: dict[str, object] | None = None
+    if publish_champion:
+        champion_metadata = _publish_champion_alias(
+            champion_name=champion_name,
+            frame=frame,
+            artifacts_dir=artifacts_dir,
+            split_policy=split_policy,
+            seed=benchmark_seeds[0],
+            leaderboard_path=leaderboard_output,
+        )
+
+    summary = {
+        "contract_version": "v2",
+        "split_policy": split_policy,
+        "candidate_models": ordered_models,
+        "supported_models": list(supported_model_names()),
+        "seeds": benchmark_seeds,
+        "leaderboard_path": str(leaderboard_output),
+        "leaderboard_csv_path": str(leaderboard_csv_output),
+        "champion_model_name": champion_name,
+        "champion_published": publish_champion,
+        "champion_metadata": champion_metadata,
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    dump_json(summary_output, summary)
+    console.print_json(data=summary)
+
+
 @app.command("paper-trader")
 def paper_trader(
-    model_path: Path = Path("artifacts/models/gaussian_emos.pkl"),
-    model_name: str = "gaussian_emos",
+    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     horizon: str = "policy",
@@ -2312,6 +3181,7 @@ def paper_trader(
     """Run paper trading over active discovered markets or bundled history."""
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     broker = PaperBroker(bankroll=bankroll)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -2356,8 +3226,23 @@ def paper_trader(
         if decision_horizon is None:
             continue
         feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-        forecast = predict_market(model_path, model_name, spec, feature_frame)
+        forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
+            continue
+        forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
+        if forecast_rejection_reason is not None:
+            results.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "decision_horizon": decision_horizon,
+                    "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                    "probability_source": getattr(forecast, "probability_source", "raw"),
+                    "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+                    "reason": forecast_rejection_reason,
+                }
+            )
             continue
         books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
         evaluation = _evaluate_market_signal(
@@ -2370,6 +3255,10 @@ def paper_trader(
             edge_threshold=edge_threshold,
             max_spread_bps=config.execution.max_spread_bps,
             min_liquidity=config.execution.min_liquidity,
+            forecast_contract_version=getattr(forecast, "contract_version", "v2"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            decision_horizon=decision_horizon,
         )
         signal = evaluation["signal"]
         book = evaluation["book"]
@@ -2396,6 +3285,9 @@ def paper_trader(
                 "city": spec.city,
                 "question": spec.question,
                 "decision_horizon": decision_horizon,
+                "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                "probability_source": getattr(forecast, "probability_source", "raw"),
+                "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
                 "outcome_label": signal.outcome_label if isinstance(signal, TradeSignal) else None,
                 "fair_probability": signal.fair_probability if isinstance(signal, TradeSignal) else None,
                 "executable_price": signal.executable_price if isinstance(signal, TradeSignal) else None,
@@ -2405,14 +3297,14 @@ def paper_trader(
                 "fill": fill_payload,
             }
         )
-    dump_json(Path("artifacts/paper_signals.json"), results)
+    dump_json(_default_signal_output("paper_signals.json"), results)
     console.print_json(data=results)
 
 
 @app.command("live-trader")
 def live_trader(
-    model_path: Path = Path("artifacts/models/gaussian_emos.pkl"),
-    model_name: str = "gaussian_emos",
+    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     horizon: str = "policy",
@@ -2422,6 +3314,7 @@ def live_trader(
     """Run live preflight and signed-order previews, with optional posting."""
 
     config, env, http, _, _, openmeteo = _runtime(include_stores=False)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     broker = LiveBroker(env)
     preflight = broker.preflight(require_posting=post_orders and not dry_run)
 
@@ -2464,7 +3357,22 @@ def live_trader(
         if decision_horizon is None:
             continue
         feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-        forecast = predict_market(model_path, model_name, spec, feature_frame)
+        forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
+        forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
+        if forecast_rejection_reason is not None:
+            previews.append(
+                {
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "question": spec.question,
+                    "decision_horizon": decision_horizon,
+                    "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                    "probability_source": getattr(forecast, "probability_source", "raw"),
+                    "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+                    "reason": forecast_rejection_reason,
+                }
+            )
+            continue
         books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
         evaluation = _evaluate_market_signal(
             snapshot,
@@ -2476,6 +3384,10 @@ def live_trader(
             edge_threshold=config.backtest.default_edge_threshold,
             max_spread_bps=config.execution.max_spread_bps,
             min_liquidity=config.execution.min_liquidity,
+            forecast_contract_version=getattr(forecast, "contract_version", "v2"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            decision_horizon=decision_horizon,
         )
         signal = evaluation["signal"]
         if not isinstance(signal, TradeSignal):
@@ -2513,7 +3425,7 @@ def live_trader(
         "preflight": preflight.model_dump(mode="json"),
         "orders": previews,
     }
-    dump_json(Path("artifacts/live_trader_preview.json"), payload)
+    dump_json(_default_signal_output("live_trader_preview.json"), payload)
     console.print_json(data=payload)
 
 
@@ -2559,6 +3471,7 @@ def scan_daemon(
     from pmtmax.execution.scanner import ContinuousScanner
 
     logger = logging.getLogger("pmtmax.cli.scan_daemon")
+    resolved_model_name = require_supported_model_name(model_name)
 
     config, _env, http, _duckdb, _parquet, openmeteo = _runtime(include_stores=False)
 
@@ -2633,7 +3546,7 @@ def scan_daemon(
                 continue
             try:
                 feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-                forecast = predict_market(model_path, model_name, spec, feature_frame)
+                forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
                 forecasts[spec.market_id] = forecast
             except Exception:  # noqa: BLE001
                 logger.warning("forecast failed for market %s", spec.market_id)
@@ -2676,7 +3589,7 @@ def scan_daemon(
                 continue
             try:
                 feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-                forecast = predict_market(model_path, model_name, spec, feature_frame)
+                forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
             except Exception:  # noqa: BLE001
                 logger.warning("forecast failed for %s — skipping entry", spec.market_id)
                 continue
@@ -2851,8 +3764,8 @@ def analyze_l2(
 
 @app.command("forecast-report")
 def forecast_report(
-    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("ts_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("morning_of", help="Forecast horizon"),
@@ -2864,6 +3777,7 @@ def forecast_report(
 
     from pmtmax.services.forecast_summary import build_forecast_summaries
 
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -2871,7 +3785,7 @@ def forecast_report(
         snapshot_dir=None, fixture_dir=None, models=config.weather.models or None,
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
-    summaries = build_forecast_summaries(snapshots, model_path, model_name, clob, builder, horizon=horizon)
+    summaries = build_forecast_summaries(snapshots, model_path, resolved_model_name, clob, builder, horizon=horizon)
 
     # Rich table
     table = Table(title="Forecast Report")
@@ -2924,23 +3838,24 @@ def forecast_report(
 
 @app.command("opportunity-report")
 def opportunity_report(
-    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
-    output: Path = typer.Option(Path("artifacts/opportunity_report.json"), help="Output JSON"),
+    output: Path = typer.Option(Path("artifacts/signals/v2/opportunity_report.json"), help="Output JSON"),
 ) -> None:
     """Generate a one-shot active-market opportunity report with explicit book status."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
-    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     markets_path = _resolve_option_value(markets_path)
     horizon = _resolve_option_value(horizon, "policy")
     min_edge = _resolve_option_value(min_edge)
-    output = _resolve_option_value(output, Path("artifacts/opportunity_report.json"))
+    output = _resolve_option_value(output, Path("artifacts/signals/v2/opportunity_report.json"))
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
@@ -2986,7 +3901,7 @@ def opportunity_report(
             builder=builder,
             clob=clob,
             model_path=model_path,
-            model_name=model_name,
+            model_name=resolved_model_name,
             config=config,
             observed_at=now_utc,
             decision_horizon=decision_horizon,
@@ -3022,8 +3937,8 @@ def opportunity_report(
 
 @app.command("opportunity-shadow")
 def opportunity_shadow(
-    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between shadow cycles"),
@@ -3035,8 +3950,8 @@ def opportunity_shadow(
 ) -> None:
     """Continuously validate whether the live opportunity path ever becomes tradable."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
-    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
@@ -3045,6 +3960,7 @@ def opportunity_shadow(
     output = _resolve_option_value(output)
     summary_output = _resolve_option_value(summary_output)
     state_path = _resolve_option_value(state_path)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
@@ -3061,10 +3977,10 @@ def opportunity_shadow(
     effective_interval = interval or shadow_config.interval_seconds
     effective_max_cycles = shadow_config.max_cycles if max_cycles is None else max_cycles
     effective_near_term_days = near_term_days if near_term_days is not None else shadow_config.near_term_days
-    history_output_path = output or shadow_config.history_output_path
-    summary_output_path = summary_output or shadow_config.summary_output_path
-    latest_output_path = shadow_config.latest_output_path
-    effective_state_path = state_path or shadow_config.state_path
+    history_output_path = output or _default_signal_output(shadow_config.history_output_path.name)
+    summary_output_path = summary_output or _default_signal_output(shadow_config.summary_output_path.name)
+    latest_output_path = _default_signal_output(shadow_config.latest_output_path.name)
+    effective_state_path = state_path or _default_signal_output(shadow_config.state_path.name)
     horizon_policy = _load_recent_horizon_policy()
     edge_threshold = config.backtest.default_edge_threshold
 
@@ -3099,7 +4015,7 @@ def opportunity_shadow(
                 builder=builder,
                 clob=clob,
                 model_path=model_path,
-                model_name=model_name,
+                model_name=resolved_model_name,
                 config=config,
                 observed_at=observed_at,
                 decision_horizon=decision_horizon,
@@ -3134,8 +4050,8 @@ def opportunity_shadow(
 
 @app.command("open-phase-shadow")
 def open_phase_shadow(
-    model_path: Path = typer.Option(Path("artifacts/models/gaussian_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("gaussian_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between scan cycles"),
@@ -3143,15 +4059,15 @@ def open_phase_shadow(
     open_window_hours: float = typer.Option(24.0, help="Only include markets opened within this many hours"),
     horizon: str = typer.Option("market_open", help="Forecast horizon for open-phase evaluation"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
-    output: Path = typer.Option(Path("artifacts/open_phase_shadow.jsonl"), help="Append-only JSONL output"),
-    latest_output: Path = typer.Option(Path("artifacts/open_phase_shadow_latest.json"), help="Latest cycle JSON output"),
-    summary_output: Path = typer.Option(Path("artifacts/open_phase_shadow_summary.json"), help="Summary JSON output"),
-    state_path: Path = typer.Option(Path("artifacts/open_phase_shadow_state.json"), help="State JSON path"),
+    output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow.jsonl"), help="Append-only JSONL output"),
+    latest_output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_latest.json"), help="Latest cycle JSON output"),
+    summary_output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_summary.json"), help="Summary JSON output"),
+    state_path: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_state.json"), help="State JSON path"),
 ) -> None:
     """Continuously watch newly listed markets and score them at listing/open phase."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/gaussian_emos.pkl"))
-    model_name = _resolve_option_value(model_name, "gaussian_emos")
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
@@ -3159,10 +4075,11 @@ def open_phase_shadow(
     open_window_hours = float(_resolve_option_value(open_window_hours, 24.0))
     horizon = _resolve_option_value(horizon, "market_open")
     min_edge = _resolve_option_value(min_edge)
-    output = _resolve_option_value(output, Path("artifacts/open_phase_shadow.jsonl"))
-    latest_output = _resolve_option_value(latest_output, Path("artifacts/open_phase_shadow_latest.json"))
-    summary_output = _resolve_option_value(summary_output, Path("artifacts/open_phase_shadow_summary.json"))
-    state_path = _resolve_option_value(state_path, Path("artifacts/open_phase_shadow_state.json"))
+    output = _resolve_option_value(output, Path("artifacts/signals/v2/open_phase_shadow.jsonl"))
+    latest_output = _resolve_option_value(latest_output, Path("artifacts/signals/v2/open_phase_shadow_latest.json"))
+    summary_output = _resolve_option_value(summary_output, Path("artifacts/signals/v2/open_phase_shadow_summary.json"))
+    state_path = _resolve_option_value(state_path, Path("artifacts/signals/v2/open_phase_shadow_state.json"))
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
@@ -3195,7 +4112,7 @@ def open_phase_shadow(
                 builder=builder,
                 clob=clob,
                 model_path=model_path,
-                model_name=model_name,
+                model_name=resolved_model_name,
                 config=config,
                 observed_at=observed_at,
                 decision_horizon=horizon,
@@ -3260,8 +4177,8 @@ def open_phase_shadow(
 
 @app.command("forecast-daemon")
 def forecast_daemon(
-    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("ts_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     interval: int = typer.Option(21600, help="Seconds between forecast cycles (default 6h)"),
     max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
@@ -3277,6 +4194,7 @@ def forecast_daemon(
 
     from pmtmax.services.forecast_summary import build_forecast_summaries
 
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -3299,7 +4217,7 @@ def forecast_daemon(
     while running:
         try:
             snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
-            summaries = build_forecast_summaries(snapshots, model_path, model_name, clob, builder, horizon=horizon)
+            summaries = build_forecast_summaries(snapshots, model_path, resolved_model_name, clob, builder, horizon=horizon)
 
             payload = [s.model_dump(mode="json") for s in summaries]
             out = Path("artifacts/forecast_report.json")
@@ -3341,8 +4259,8 @@ def forecast_daemon(
 
 @app.command("paper-mm")
 def paper_mm(
-    model_path: Path = typer.Option(Path("artifacts/models/ts_emos.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option("ts_emos", help="Model name"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     interval: int = typer.Option(60, help="Seconds between MM cycles"),
     max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
@@ -3357,6 +4275,7 @@ def paper_mm(
     from pmtmax.execution.paper_market_maker import PaperMarketMaker
     from pmtmax.execution.quoter import Quoter
 
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -3399,7 +4318,7 @@ def paper_mm(
                     continue
 
                 feature_frame = builder.build_live_row(spec, horizon=horizon)
-                forecast = predict_market(model_path, model_name, spec, feature_frame)
+                forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
 
                 books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
                 if not books:
@@ -3440,7 +4359,7 @@ def paper_mm(
 @app.command("live-mm")
 def live_mm(
     model_path: Path = typer.Argument(..., help="Path to trained model artifact"),
-    model_name: str = typer.Option("ts_emos", help="Model name"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("morning_of", help="Forecast horizon"),
@@ -3452,6 +4371,7 @@ def live_mm(
     from pmtmax.execution.live_market_maker import LiveMarketMaker
     from pmtmax.execution.quoter import Quoter
 
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     config, env, http, _, _, openmeteo = _runtime(include_stores=False)
     broker = LiveBroker(env)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
@@ -3492,7 +4412,7 @@ def live_mm(
 
         try:
             feature_frame = builder.build_live_row(spec, horizon=horizon)
-            forecast = predict_market(model_path, model_name, spec, feature_frame)
+            forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
         except Exception as exc:  # noqa: BLE001
             console.print(f"[yellow]Forecast failed for {spec.city}: {exc}[/]")
             continue

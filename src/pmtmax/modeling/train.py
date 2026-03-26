@@ -5,34 +5,80 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
-from pmtmax.modeling.advanced.aifs_nwp_blend import AifsNwpBlendModel
-from pmtmax.modeling.advanced.tuned_ensemble import TunedEnsembleModel
-from pmtmax.modeling.advanced.det2prob_nn import Det2ProbNNModel
-from pmtmax.modeling.advanced.flexible_flow_nn import FlexibleProbNNModel
-from pmtmax.modeling.advanced.pinn_postproc import PermutationInvariantNNModel
-from pmtmax.modeling.advanced.spatial_gnn import SpatialGNNModel
-from pmtmax.modeling.advanced.transformer_postproc import TransformerPostprocModel
-from pmtmax.modeling.baselines.climatology import ClimatologyModel
+from pmtmax.markets.market_spec import MarketSpec
+from pmtmax.modeling.advanced.det2prob_nn import (
+    Det2ProbNNModel,
+    resolve_det2prob_variant,
+    supported_det2prob_variants,
+)
+from pmtmax.modeling.advanced.tuned_ensemble import (
+    TunedEnsembleModel,
+    resolve_tuned_ensemble_variant,
+    supported_tuned_ensemble_variants,
+)
 from pmtmax.modeling.baselines.gaussian_emos import GaussianEMOSModel
-from pmtmax.modeling.baselines.heteroscedastic_linear import HeteroscedasticLinearModel
-from pmtmax.modeling.baselines.leadtime_continuous import LeadTimeContinuousModel
-from pmtmax.modeling.baselines.raw_nwp import RawBestModelBaseline, RawMultiModelAverageBaseline
-from pmtmax.modeling.baselines.ts_emos import TSEmosModel
+from pmtmax.modeling.calibration import OutcomeCalibrator
 from pmtmax.storage.schemas import ModelArtifact
+from pmtmax.utils import set_global_seed, stable_hash
+
+SUPPORTED_MODEL_NAMES = ("gaussian_emos", "tuned_ensemble", "det2prob_nn")
+
+
+def supported_model_names() -> tuple[str, ...]:
+    """Return the canonical v2 model registry."""
+
+    return SUPPORTED_MODEL_NAMES
+
+
+def require_supported_model_name(model_name: str) -> str:
+    """Validate a public model name against the v2 registry."""
+
+    if model_name not in SUPPORTED_MODEL_NAMES:
+        supported = ", ".join(SUPPORTED_MODEL_NAMES)
+        msg = f"Unsupported model: {model_name}. Supported models: {supported}."
+        raise ValueError(msg)
+    return model_name
+
+
+def supported_ablation_variants(model_name: str) -> tuple[str, ...]:
+    """Return supported ablation variants for a model family."""
+
+    require_supported_model_name(model_name)
+    if model_name == "tuned_ensemble":
+        return supported_tuned_ensemble_variants()
+    if model_name == "det2prob_nn":
+        return supported_det2prob_variants()
+    return ()
+
+
+def require_supported_variant(model_name: str, variant: str | None) -> str | None:
+    """Validate an optional internal ablation variant for a model family."""
+
+    if variant is None:
+        return None
+    supported = supported_ablation_variants(model_name)
+    if not supported:
+        msg = f"Model {model_name} does not expose ablation variants."
+        raise ValueError(msg)
+    if variant not in supported:
+        msg = f"Unsupported {model_name} variant: {variant}. Supported variants: {', '.join(supported)}."
+        raise ValueError(msg)
+    return variant
 
 
 def sanitize_model_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing numeric feature values so legacy-merged datasets remain trainable."""
+    """Return a shallow copy without global imputation.
 
-    clean = frame.copy()
-    numeric_columns = clean.select_dtypes(include=["number"]).columns
-    clean.loc[:, numeric_columns] = clean.loc[:, numeric_columns].fillna(0.0)
-    return clean
+    Individual models now own their missing-value strategy so availability and
+    missingness indicators remain recoverable at fit/predict time.
+    """
+
+    return frame.copy()
 
 
 def default_feature_names(frame: pd.DataFrame) -> list[str]:
@@ -58,121 +104,180 @@ def default_feature_names(frame: pd.DataFrame) -> list[str]:
     ]
 
 
-def train_model(model_name: str, frame: pd.DataFrame, artifacts_dir: Path) -> ModelArtifact:
+def _artifact_calibration_path(model_path: Path) -> Path:
+    """Return the sibling calibrator path for a stored model artifact."""
+
+    return model_path.with_name(f"{model_path.stem}.calibrator.pkl")
+
+
+def _dataset_signature(frame: pd.DataFrame) -> str:
+    """Return a stable dataset fingerprint for a training frame."""
+
+    payload = {
+        "rows": len(frame),
+        "columns": list(frame.columns),
+        "target_date_min": str(frame["target_date"].min()) if "target_date" in frame.columns and not frame.empty else None,
+        "target_date_max": str(frame["target_date"].max()) if "target_date" in frame.columns and not frame.empty else None,
+    }
+    return stable_hash(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _calibration_split(
+    frame: pd.DataFrame,
+    *,
+    split_policy: Literal["market_day", "target_day"],
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Split a frame into fit/calibration partitions."""
+
+    if frame.empty or "winning_outcome" not in frame.columns or "market_spec_json" not in frame.columns:
+        return frame, None
+    if len(frame) < 40:
+        return frame, None
+
+    sort_columns = [column for column in ["target_date", "decision_time_utc", "market_id", "decision_horizon"] if column in frame.columns]
+    ordered = frame.sort_values(sort_columns).reset_index(drop=True)
+    if split_policy == "market_day" and {"market_id", "target_date"}.issubset(ordered.columns):
+        group_ids = ordered[["market_id", "target_date"]].astype(str).agg("|".join, axis=1)
+    elif "target_date" in ordered.columns:
+        group_ids = ordered["target_date"].astype(str)
+    else:
+        return ordered, None
+
+    ordered = ordered.assign(_cal_group_id=group_ids)
+    unique_groups = ordered["_cal_group_id"].drop_duplicates().tolist()
+    calibration_groups = max(int(len(unique_groups) * 0.2), 1)
+    if len(unique_groups) - calibration_groups < 2:
+        return ordered.drop(columns="_cal_group_id"), None
+    fit_groups = set(unique_groups[:-calibration_groups])
+    holdout_groups = set(unique_groups[-calibration_groups:])
+    fit_frame = ordered.loc[ordered["_cal_group_id"].isin(fit_groups)].drop(columns="_cal_group_id").copy()
+    calibration_frame = ordered.loc[ordered["_cal_group_id"].isin(holdout_groups)].drop(columns="_cal_group_id").copy()
+    if fit_frame.empty or calibration_frame.empty:
+        return ordered.drop(columns="_cal_group_id"), None
+    return fit_frame, calibration_frame
+
+
+def _fit_and_persist_calibrator(
+    *,
+    model_path: Path,
+    model_name: str,
+    calibration_frame: pd.DataFrame,
+) -> Path | None:
+    """Fit an outcome calibrator on held-out rows and persist it next to the model."""
+
+    if calibration_frame.empty or "winning_outcome" not in calibration_frame.columns or "market_spec_json" not in calibration_frame.columns:
+        return None
+
+    from pmtmax.modeling.predict import predict_market
+
+    probability_rows: list[dict[str, float]] = []
+    winners: list[str] = []
+    for _, row in calibration_frame.iterrows():
+        spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
+        forecast = predict_market(
+            model_path,
+            model_name,
+            spec,
+            row.to_frame().T,
+            calibrate=False,
+        )
+        raw_probs = forecast.outcome_probabilities_raw or forecast.outcome_probabilities
+        probability_rows.append({label: float(value) for label, value in raw_probs.items()})
+        winners.append(str(row["winning_outcome"]))
+
+    if len(probability_rows) < 10 or len(set(winners)) < 2:
+        return None
+
+    labels = sorted({label for row in probability_rows for label in row})
+    probabilities = {
+        label: np.asarray([row.get(label, 0.0) for row in probability_rows], dtype=float)
+        for label in labels
+    }
+    calibrator = OutcomeCalibrator()
+    calibrator.fit(probabilities, np.asarray(winners, dtype=object))
+    path = _artifact_calibration_path(model_path)
+    with path.open("wb") as handle:
+        pickle.dump(calibrator, handle)
+    return path
+
+
+def train_model(
+    model_name: str,
+    frame: pd.DataFrame,
+    artifacts_dir: Path,
+    *,
+    split_policy: Literal["market_day", "target_day"] = "market_day",
+    seed: int | None = None,
+    variant: str | None = None,
+) -> ModelArtifact:
     """Train a named model and persist it to disk."""
 
+    require_supported_model_name(model_name)
+    require_supported_variant(model_name, variant)
+    if seed is not None:
+        set_global_seed(seed)
+
     clean_frame = sanitize_model_frame(frame)
+    fit_frame, calibration_frame = _calibration_split(clean_frame, split_policy=split_policy)
     features = default_feature_names(clean_frame)
     model: Any
-    if model_name == "climatology":
-        model = ClimatologyModel()
-        model.fit(clean_frame)
-    elif model_name == "raw_best_model":
-        model = RawBestModelBaseline()
-        model.fit(clean_frame)
-    elif model_name == "raw_multimodel_average":
-        model = RawMultiModelAverageBaseline([name for name in features if name.endswith("_daily_max")][:3] or ["model_daily_max"])
-        model.fit(clean_frame)
-    elif model_name == "gaussian_emos":
+    if model_name == "gaussian_emos":
         model = GaussianEMOSModel(features)
-        model.fit(clean_frame)
-    elif model_name == "ts_emos":
-        model = TSEmosModel(features)
-        model.fit(clean_frame)
-    elif model_name == "leadtime_continuous":
-        model = LeadTimeContinuousModel([name for name in features if name != "lead_hours"])
-        model.fit(clean_frame)
+        model.fit(fit_frame)
     elif model_name == "det2prob_nn":
-        model = Det2ProbNNModel(features)
-        model.fit(clean_frame)
-    elif model_name == "aifs_nwp_blend":
-        nwp = [name for name in features if "ifs" in name or "kma" in name]
-        ai = [name for name in features if "aifs" in name]
-        model = AifsNwpBlendModel(nwp_features=nwp, ai_features=ai)
-        model.fit(clean_frame)
-    elif model_name == "heteroscedastic_linear":
-        model = HeteroscedasticLinearModel(features)
-        model.fit(clean_frame)
-    elif model_name == "flexible_flow_nn":
-        model = FlexibleProbNNModel(features)
-        model.fit(clean_frame)
-    elif model_name == "spatial_gnn":
-        gnn_features = [f for f in features if f not in ("neighbor_mean_temp", "neighbor_spread")]
-        model = SpatialGNNModel(gnn_features)
-        model.fit(clean_frame)
-    elif model_name == "transformer_postproc":
-        model = _train_transformer(clean_frame)
-    elif model_name == "pinn_postproc":
-        model = _train_pinn(clean_frame)
+        resolved_variant = resolve_det2prob_variant(variant)
+        model = Det2ProbNNModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        model.fit(fit_frame)
     elif model_name == "tuned_ensemble":
-        model = TunedEnsembleModel(features)
-        model.fit(clean_frame)
+        resolved_variant = resolve_tuned_ensemble_variant(variant)
+        model = TunedEnsembleModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        model.fit(fit_frame)
     else:
         msg = f"Unsupported trainable model: {model_name}"
         raise ValueError(msg)
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    path = artifacts_dir / f"{model_name}.pkl"
+    artifact_stem = model_name if variant is None else f"{model_name}__{variant}"
+    path = artifacts_dir / f"{artifact_stem}.pkl"
     with path.open("wb") as handle:
         pickle.dump(model, handle)
+
+    calibration_path = None
+    metrics: dict[str, float] = {
+        "fit_rows": float(len(fit_frame)),
+        "dataset_rows": float(len(clean_frame)),
+        "variant_is_default": float(variant is None),
+    }
+    if calibration_frame is not None:
+        metrics["calibration_rows"] = float(len(calibration_frame))
+    if calibration_frame is not None:
+        calibration_path_obj = _fit_and_persist_calibrator(
+            model_path=path,
+            model_name=model_name,
+            calibration_frame=calibration_frame,
+        )
+        if calibration_path_obj is not None:
+            calibration_path = str(calibration_path_obj)
+            metrics["calibration_fitted"] = 1.0
+        else:
+            metrics["calibration_fitted"] = 0.0
 
     return ModelArtifact(
         model_name=model_name,
         version="0.1.0",
         trained_at=pd.Timestamp.now(tz="UTC").to_pydatetime(),
         features=features,
-        metrics={},
+        metrics=metrics,
         path=str(path),
+        contract_version="v2",
+        seed=seed,
+        dataset_signature=_dataset_signature(clean_frame),
+        split_policy=split_policy,
+        variant=variant,
+        calibration_path=calibration_path,
+        diagnostics=dict(getattr(model, "diagnostics_", {})),
+        status="stable" if variant is None else "experimental",
     )
-
-
-def _extract_sequences(frame: pd.DataFrame, column: str, seq_len: int) -> np.ndarray:
-    """Extract fixed-length sequences from a JSON column, zero-padding if needed."""
-
-    rows = []
-    for raw in frame[column]:
-        arr = json.loads(raw) if isinstance(raw, str) else list(raw)
-        arr = [float(v) if v is not None else 0.0 for v in arr]
-        if len(arr) < seq_len:
-            arr = arr + [0.0] * (seq_len - len(arr))
-        rows.append(arr[:seq_len])
-    return np.array(rows, dtype=np.float32)
-
-
-def _train_transformer(frame: pd.DataFrame) -> TransformerPostprocModel:
-    """Train transformer postprocessor from tabular data with daily_max features as pseudo-sequence."""
-
-    daily_max_cols = sorted(col for col in frame.columns if col.endswith("_model_daily_max"))
-    if not daily_max_cols:
-        daily_max_cols = ["model_daily_max"]
-    seq_len = len(daily_max_cols)
-    sequences = frame[daily_max_cols].to_numpy(dtype=np.float32)
-    if sequences.ndim == 1:
-        sequences = sequences.reshape(-1, 1)
-    targets = frame["realized_daily_max"].to_numpy(dtype=np.float32)
-    model = TransformerPostprocModel(sequence_length=seq_len)
-    model.fit(sequences, targets)
-    model.feature_names = daily_max_cols
-    return model
-
-
-def _train_pinn(frame: pd.DataFrame) -> PermutationInvariantNNModel:
-    """Train permutation-invariant NN from NWP ensemble member daily_max columns."""
-
-    daily_max_cols = sorted(col for col in frame.columns if col.endswith("_model_daily_max"))
-    if not daily_max_cols:
-        daily_max_cols = ["model_daily_max"]
-    member_dim = len(daily_max_cols)
-    ensemble = frame[daily_max_cols].to_numpy(dtype=np.float32)
-    if ensemble.ndim == 1:
-        ensemble = ensemble.reshape(-1, 1)
-    # PINN expects (batch, members, member_dim) — use (batch, members, 1)
-    ensemble_3d = ensemble.reshape(ensemble.shape[0], member_dim, 1)
-    targets = frame["realized_daily_max"].to_numpy(dtype=np.float32)
-    model = PermutationInvariantNNModel(member_dim=1)
-    model.fit(ensemble_3d, targets)
-    model.feature_names = daily_max_cols
-    return model
 
 
 def load_model(path: Path) -> Any:

@@ -69,7 +69,8 @@ uv run pmtmax train-baseline --model-name gaussian_emos
 5. Run a research backtest:
 
 ```bash
-uv run pmtmax backtest --model-name gaussian_emos
+uv run pmtmax benchmark-models
+uv run pmtmax backtest --model-name champion
 ```
 
 To evaluate against official historical Polymarket prices instead of the synthetic
@@ -78,20 +79,20 @@ book, first backfill price history and materialize the decision-time panel, then
 ```bash
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel
-uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
+uv run pmtmax backtest --pricing-source real_history --model-name champion
 ```
 
 To run a more conservative execution proxy without claiming exact historical bid/ask
 replay, use the same panel with `quote_proxy`:
 
 ```bash
-uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.02 --model-name gaussian_emos
+uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.02 --model-name champion
 ```
 
 6. Emit paper-trading signals:
 
 ```bash
-uv run pmtmax paper-trader --model-name gaussian_emos
+uv run pmtmax paper-trader
 ```
 
 `paper-trader` defaults to `--horizon policy`, which applies the checked-in
@@ -102,7 +103,7 @@ Markets outside the recommended horizon set are reported explicitly as
 7. Audit active markets for executable opportunities with explicit book status:
 
 ```bash
-uv run pmtmax opportunity-report --model-name gaussian_emos
+uv run pmtmax opportunity-report
 ```
 
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
@@ -112,13 +113,19 @@ If you want to test the listing/open-phase hypothesis instead of the near-term
 policy path, run:
 
 ```bash
-uv run pmtmax open-phase-shadow --model-name gaussian_emos --max-cycles 1
+uv run pmtmax open-phase-shadow --max-cycles 1
 ```
 
 `open-phase-shadow` filters active markets by `componentMarkets[*].acceptingOrdersTimestamp`
 (falling back to `createdAt` / `deployingTimestamp`) and scores only markets that
 opened recently. It defaults to `--horizon market_open` rather than the near-term
 policy horizon.
+
+The canonical engine is now v2-only:
+
+- grouped backtest splits (`market_day` by default) replace row-level replay
+- dataset/model/backtest/signal artifacts live under `data/parquet/gold/v2/`, `artifacts/models/v2/`, `artifacts/backtests/v2/`, and `artifacts/signals/v2/`
+- paper/live/opportunity paths require calibrated probabilities and fail closed as `missing_calibrator`
 
 ## Install
 ```bash
@@ -181,9 +188,20 @@ Useful shared skills:
 ## Training Workflow
 ```bash
 uv run pmtmax bootstrap-lab
-uv run pmtmax train-baseline --dataset-path data/parquet/gold/historical_training_set.parquet
+uv run pmtmax build-dataset
+uv run pmtmax materialize-backtest-panel
+uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax train-advanced --model-name det2prob_nn
+uv run pmtmax benchmark-models
+uv run pmtmax benchmark-ablations --model-name tuned_ensemble
+uv run pmtmax paper-trader
 ```
+
+Canonical research paths are now v2-only.
+Public model support is intentionally reduced to `gaussian_emos`, `tuned_ensemble`, and `det2prob_nn`.
+`tuned_ensemble` is now the contextual mixture-of-experts candidate, while `det2prob_nn` is a standalone mixture-density neural network.
+`benchmark-models` writes the leaderboard under `artifacts/benchmarks/v2/` and publishes the active `champion` alias under `artifacts/models/v2/`.
+`benchmark-ablations` is internal research tooling for variant-level grouped-holdout diagnostics and writes family-specific leaderboards under `artifacts/benchmarks/v2/`.
 
 ## Real Historical Collection
 Use the curated inventory workflow when you want real historical temperature markets instead of bundled examples.
@@ -335,8 +353,8 @@ uv run pmtmax archive-legacy-runs --execute
 ## Backtest Workflow
 ```bash
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/historical_training_set.parquet \
-  --model-name gaussian_emos
+  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --model-name champion
 ```
 
 This default path uses the synthetic research book. To evaluate the same historical
@@ -345,13 +363,13 @@ dataset against official Polymarket prices, build the panel first:
 ```bash
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel \
-  --dataset-path data/parquet/gold/historical_training_set.parquet \
+  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/historical_training_set.parquet \
-  --panel-path data/parquet/gold/historical_backtest_panel.parquet \
+  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --panel-path data/parquet/gold/v2/historical_backtest_panel.parquet \
   --pricing-source real_history \
-  --model-name gaussian_emos
+  --model-name champion
 ```
 
 If you want an execution-aware proxy on top of the same official last-price panel,
@@ -359,19 +377,22 @@ switch the pricing source and set an explicit half-spread penalty:
 
 ```bash
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/historical_training_set.parquet \
-  --panel-path data/parquet/gold/historical_backtest_panel.parquet \
+  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --panel-path data/parquet/gold/v2/historical_backtest_panel.parquet \
   --pricing-source quote_proxy \
   --quote-proxy-half-spread 0.02 \
-  --model-name gaussian_emos
+  --model-name champion
 ```
 
-Synthetic outputs are written to `artifacts/backtest_metrics.json` and
-`artifacts/backtest_trades.json`. Official-price runs write
-`artifacts/backtest_metrics_real_history.json` and
-`artifacts/backtest_trades_real_history.json`. Quote-proxy runs write
-`artifacts/backtest_metrics_quote_proxy.json` and
-`artifacts/backtest_trades_quote_proxy.json`.
+Synthetic outputs are written to `artifacts/backtests/v2/backtest_metrics.json` and
+`artifacts/backtests/v2/backtest_trades.json`. Official-price runs write
+`artifacts/backtests/v2/backtest_metrics_real_history.json` and
+`artifacts/backtests/v2/backtest_trades_real_history.json`. Quote-proxy runs write
+`artifacts/backtests/v2/backtest_metrics_quote_proxy.json` and
+`artifacts/backtests/v2/backtest_trades_quote_proxy.json`.
+
+Backtests record `contract_version`, `split_policy`, and `leakage_audit_passed`
+in the metrics artifact.
 
 To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into isolated per-city directories, use:
 
@@ -383,9 +404,8 @@ The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy
 
 ## Paper Trading Workflow
 ```bash
-uv run pmtmax paper-trader \
-  --model-path artifacts/models/gaussian_emos.pkl \
-  --model-name gaussian_emos
+uv run pmtmax benchmark-models
+uv run pmtmax paper-trader
 ```
 
 Paper trading uses active discovered markets when available. If no active max-temperature markets are currently listed on Polymarket, the command exits cleanly with no fills.
@@ -394,15 +414,14 @@ Paper trading uses active discovered markets when available. If no active max-te
 also default to the checked-in recent horizon policy. The current recommended
 set is `Seoul=market_open+previous_evening+morning_of`,
 `NYC=market_open+previous_evening`, and `London=previous_evening`.
+Paper/live/opportunity paths use the v2 forecast contract, write outputs under `artifacts/signals/v2/`, and reject uncalibrated forecasts as `missing_calibrator`.
 
 ## Opportunity Workflow
 ```bash
-uv run pmtmax opportunity-report \
-  --model-path artifacts/models/gaussian_emos.pkl \
-  --model-name gaussian_emos
+uv run pmtmax opportunity-report
 ```
 
-This writes `artifacts/opportunity_report.json` and separates `tradable`,
+This writes `artifacts/signals/v2/opportunity_report.json` and separates `tradable`,
 `missing_book`, `raw_gap_non_positive`, `fee_killed_edge`,
 `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`, and other
 skip reasons so “no trade” and “no live book” are not conflated.
@@ -415,8 +434,6 @@ tradable over time before wiring alerts, run the shadow watcher:
 
 ```bash
 uv run pmtmax opportunity-shadow \
-  --model-path artifacts/models/gaussian_emos.pkl \
-  --model-name gaussian_emos \
   --interval 60
 ```
 
@@ -429,23 +446,21 @@ scripts/run_opportunity_shadow_watch.sh --city Seoul --interval 60
 ```
 
 This keeps a near-term (`today` / `tomorrow` in each market timezone) append-only
-audit trail in `artifacts/opportunity_shadow.jsonl`, plus latest and summary views
-under `artifacts/opportunity_shadow_latest.json` and
-`artifacts/opportunity_shadow_summary.json`.
+ audit trail in `artifacts/signals/v2/opportunity_shadow.jsonl`, plus latest and summary views
+under `artifacts/signals/v2/opportunity_shadow_latest.json` and
+`artifacts/signals/v2/opportunity_shadow_summary.json`.
 
 If you want to watch the hypothesis that taker alpha exists right after listing,
 use the open-phase watcher instead:
 
 ```bash
 uv run pmtmax open-phase-shadow \
-  --model-path artifacts/models/gaussian_emos.pkl \
-  --model-name gaussian_emos \
   --open-window-hours 24 \
   --interval 60
 ```
 
-This writes `artifacts/open_phase_shadow.jsonl`, `artifacts/open_phase_shadow_latest.json`,
-and `artifacts/open_phase_shadow_summary.json`. The watcher keys off
+This writes `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`,
+and `artifacts/signals/v2/open_phase_shadow_summary.json`. The watcher keys off
 `componentMarkets[*].acceptingOrdersTimestamp` when available and falls back to
 market creation/deploy timestamps, so it can test whether spreads or raw gaps
 look different immediately after listing.
@@ -453,8 +468,6 @@ look different immediately after listing.
 ## Dry-Run Live Workflow
 ```bash
 uv run pmtmax live-trader \
-  --model-path artifacts/models/gaussian_emos.pkl \
-  --model-name gaussian_emos \
   --dry-run
 ```
 

@@ -144,7 +144,7 @@ class BackfillPipeline:
     truth_snapshot_dir: Path | None = None
     forecast_fixture_dir: Path | None = None
     run_id: str | None = None
-    data_version: str = "v1"
+    data_version: str = "v2"
 
     def backfill_markets(self, snapshots: list[MarketSnapshot], source_name: str = "snapshot") -> dict[str, pd.DataFrame]:
         """Persist raw market payloads and normalized market specs."""
@@ -1010,6 +1010,9 @@ class BackfillPipeline:
                     "coverage_status": "missing",
                     **self._metadata_fields(source_priority=100),
                 }
+                panel_row["contract_version"] = "v2"
+                panel_row["group_id"] = str(dataset_row.get("group_id") or f"{spec.market_id}|{spec.target_local_date.isoformat()}")
+                panel_row["split_group"] = str(panel_row["group_id"])
                 if not market_timeseries.empty and "token_id" in market_timeseries.columns:
                     token_history = market_timeseries.loc[
                         market_timeseries["token_id"].astype(str) == token_id
@@ -1043,7 +1046,7 @@ class BackfillPipeline:
         self.warehouse.write_gold_table(
             "gold_backtest_panel",
             frame,
-            relative_path=f"gold/{output_name}.parquet",
+            relative_path=f"gold/v2/{output_name}.parquet",
         )
         self.warehouse.write_manifest()
         return frame
@@ -1258,6 +1261,11 @@ class BackfillPipeline:
                     **self._metadata_fields(source_priority=self._source_priority(self._forecast_source_kind(selected_forecasts))),
                 }
                 self._populate_feature_row(row, selected_forecasts, spec.target_local_date, spec.timezone, unit=spec.unit)
+                availability = {model: bool(model in selected_models) for model in (self.models or [])}
+                row["contract_version"] = "v2"
+                row["group_id"] = f"{spec.market_id}|{spec.target_local_date.isoformat()}"
+                row["split_group"] = row["group_id"]
+                row["feature_availability_json"] = json.dumps(availability, sort_keys=True)
                 rows.append(row)
                 sequence_rows.extend(
                     self._build_sequence_rows(
@@ -1283,19 +1291,19 @@ class BackfillPipeline:
             self.warehouse.write_gold_table(
                 "gold_training_examples_tabular",
                 frame,
-                relative_path=f"gold/{output_name}.parquet",
+                relative_path=f"gold/v2/{output_name}.parquet",
             )
             self.warehouse.write_gold_table(
                 "gold_training_examples",
                 frame,
-                relative_path=f"gold/{output_name}_compat.parquet",
+                relative_path=f"gold/v2/{output_name}_compat.parquet",
             )
         if contract in {"sequence", "both"} and sequence_rows:
             sequence_frame = pd.DataFrame(sequence_rows)
             self.warehouse.write_gold_table(
                 "gold_training_examples_sequence",
                 sequence_frame,
-                relative_path=f"gold/{output_name}_sequence.parquet",
+                relative_path=f"gold/v2/{output_name}_sequence.parquet",
             )
         self.warehouse.write_manifest()
         return frame
@@ -1449,6 +1457,10 @@ class BackfillPipeline:
                     **self._metadata_fields(
                         source_priority=self._source_priority(self._forecast_source_kind(subset))
                     ),
+                    "contract_version": "v2",
+                    "group_id": f"{spec.market_id}|{spec.target_local_date.isoformat()}",
+                    "split_group": f"{spec.market_id}|{spec.target_local_date.isoformat()}",
+                    "feature_availability_json": json.dumps({model_name: True}, sort_keys=True),
                 }
             )
         return rows
