@@ -104,6 +104,7 @@ models:
     - transformer_postproc
     - spatial_gnn
     - aifs_nwp_blend
+    - tuned_ensemble
 
 scanner:
   interval_seconds: 60

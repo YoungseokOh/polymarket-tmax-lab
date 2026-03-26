@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from pmtmax.modeling.advanced.torch_device import get_torch_device
+
 
 class TrajectoryTransformer(nn.Module):
     """Transformer encoder over hourly trajectories."""
@@ -38,11 +40,12 @@ class TransformerPostprocModel:
     learning_rate: float = 1e-3
 
     def __post_init__(self) -> None:
-        self.network = TrajectoryTransformer(self.sequence_length)
+        self.device = get_torch_device()
+        self.network = TrajectoryTransformer(self.sequence_length).to(self.device)
 
     def fit(self, sequences: np.ndarray, targets: np.ndarray) -> None:
-        x = torch.tensor(sequences.astype(np.float32))
-        y = torch.tensor(targets.astype(np.float32))
+        x = torch.tensor(sequences.astype(np.float32)).to(self.device)
+        y = torch.tensor(targets.astype(np.float32)).to(self.device)
         optimizer = torch.optim.Adam(self.network.parameters(), lr=self.learning_rate)
         for _ in range(self.epochs):
             mean, std = self.network(x)
@@ -53,7 +56,7 @@ class TransformerPostprocModel:
 
     def predict(self, sequences: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         with torch.no_grad():
-            x = torch.tensor(sequences.astype(np.float32))
+            x = torch.tensor(sequences.astype(np.float32)).to(self.device)
             mean, std = self.network(x)
-        return mean.numpy(), std.numpy()
+        return mean.cpu().numpy(), std.cpu().numpy()
 

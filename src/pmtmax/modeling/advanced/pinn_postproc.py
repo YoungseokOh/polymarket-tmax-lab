@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from pmtmax.modeling.advanced.torch_device import get_torch_device
+
 
 class DeepSetPostproc(nn.Module):
     """Simple Deep Sets encoder over pseudo-ensemble members."""
@@ -35,11 +37,12 @@ class PermutationInvariantNNModel:
     learning_rate: float = 1e-3
 
     def __post_init__(self) -> None:
-        self.network = DeepSetPostproc(self.member_dim)
+        self.device = get_torch_device()
+        self.network = DeepSetPostproc(self.member_dim).to(self.device)
 
     def fit(self, ensemble: np.ndarray, targets: np.ndarray) -> None:
-        x = torch.tensor(ensemble.astype(np.float32))
-        y = torch.tensor(targets.astype(np.float32))
+        x = torch.tensor(ensemble.astype(np.float32)).to(self.device)
+        y = torch.tensor(targets.astype(np.float32)).to(self.device)
         optimizer = torch.optim.Adam(self.network.parameters(), lr=self.learning_rate)
         for _ in range(self.epochs):
             mean, std = self.network(x)
@@ -50,7 +53,7 @@ class PermutationInvariantNNModel:
 
     def predict(self, ensemble: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         with torch.no_grad():
-            x = torch.tensor(ensemble.astype(np.float32))
+            x = torch.tensor(ensemble.astype(np.float32)).to(self.device)
             mean, std = self.network(x)
-        return mean.numpy(), std.numpy()
+        return mean.cpu().numpy(), std.cpu().numpy()
 

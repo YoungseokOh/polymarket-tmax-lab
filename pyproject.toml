@@ -33,7 +33,7 @@ dependencies = [
   "scikit-learn>=1.6.1",
   "scipy>=1.15.2",
   "tenacity>=9.0.0",
-  "torch>=2.6.0",
+  "torch==2.4.1",
   "typer>=0.15.2",
   "websockets>=15.0.1",
   "xgboost>=2.1.4",
@@ -57,6 +57,14 @@ pmtmax = "pmtmax.cli.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pmtmax"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
 
 [tool.ruff]
 line-length = 100

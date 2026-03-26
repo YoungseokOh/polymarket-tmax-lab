@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from pmtmax.modeling.advanced.aifs_nwp_blend import AifsNwpBlendModel
+from pmtmax.modeling.advanced.tuned_ensemble import TunedEnsembleModel
 from pmtmax.modeling.advanced.det2prob_nn import Det2ProbNNModel
 from pmtmax.modeling.advanced.flexible_flow_nn import FlexibleProbNNModel
 from pmtmax.modeling.advanced.pinn_postproc import PermutationInvariantNNModel
@@ -103,6 +104,9 @@ def train_model(model_name: str, frame: pd.DataFrame, artifacts_dir: Path) -> Mo
         model = _train_transformer(clean_frame)
     elif model_name == "pinn_postproc":
         model = _train_pinn(clean_frame)
+    elif model_name == "tuned_ensemble":
+        model = TunedEnsembleModel(features)
+        model.fit(clean_frame)
     else:
         msg = f"Unsupported trainable model: {model_name}"
         raise ValueError(msg)

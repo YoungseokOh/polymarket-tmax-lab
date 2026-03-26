@@ -2075,10 +2075,14 @@ class BackfillPipeline:
         if getattr(local_time.dt, "tz", None) is None:
             local_time = local_time.dt.tz_localize(
                 spec.timezone,
-                ambiguous="infer",
+                ambiguous="NaT",
                 nonexistent="shift_forward",
             )
         utc_time = local_time.dt.tz_convert("UTC")
+        valid_mask = local_time.notna()
+        local_time = local_time[valid_mask]
+        utc_time = utc_time[valid_mask]
+        frame = frame[valid_mask].reset_index(drop=True)
         rows: list[dict[str, object]] = []
         for idx, local_timestamp in enumerate(local_time):
             rows.append(

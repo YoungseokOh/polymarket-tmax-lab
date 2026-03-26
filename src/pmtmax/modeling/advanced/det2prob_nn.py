@@ -10,6 +10,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from pmtmax.modeling.advanced.torch_device import get_torch_device
+
 
 class Det2ProbNet(nn.Module):
     """Small MLP that predicts Gaussian mean and scale."""
@@ -41,12 +43,21 @@ class Det2ProbNNModel:
     learning_rate: float = 1e-3
 
     def __post_init__(self) -> None:
-        self.network = Det2ProbNet(len(self.feature_names))
+        self.constant_mean_: float | None = None
+        self.constant_std_: float = 1.0
+        self.device = get_torch_device()
+        if self.feature_names:
+            self.network = Det2ProbNet(len(self.feature_names)).to(self.device)
 
     def fit(self, frame: pd.DataFrame) -> None:
-        x = torch.tensor(frame[self.feature_names].to_numpy(dtype=np.float32))
-        y = torch.tensor(frame["realized_daily_max"].to_numpy(dtype=np.float32))
-        dataset = TensorDataset(x, y)
+        y = frame["realized_daily_max"]
+        if not self.feature_names:
+            self.constant_mean_ = float(y.mean())
+            self.constant_std_ = float(max((y - self.constant_mean_).abs().mean(), 0.5))
+            return
+        x = torch.tensor(frame[self.feature_names].to_numpy(dtype=np.float32)).to(self.device)
+        yt = torch.tensor(y.to_numpy(dtype=np.float32)).to(self.device)
+        dataset = TensorDataset(x, yt)
         loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
         optimizer = torch.optim.Adam(self.network.parameters(), lr=self.learning_rate)
         for _ in range(self.epochs):
@@ -58,9 +69,12 @@ class Det2ProbNNModel:
                 optimizer.step()
 
     def predict(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        if self.constant_mean_ is not None:
+            size = len(frame)
+            return np.full(size, self.constant_mean_, dtype=float), np.full(size, self.constant_std_, dtype=float)
         self.network.eval()
         with torch.no_grad():
-            x = torch.tensor(frame[self.feature_names].to_numpy(dtype=np.float32))
+            x = torch.tensor(frame[self.feature_names].to_numpy(dtype=np.float32)).to(self.device)
             mean, std = self.network(x)
-        return mean.numpy(), std.numpy()
+        return mean.cpu().numpy(), std.cpu().numpy()
 
