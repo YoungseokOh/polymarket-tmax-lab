@@ -47,6 +47,21 @@ Secondary metrics (also worth tracking):
 `legacy_gaussian` variant: CRPS ≈ 1.472, MAE ≈ 1.895 (last 100 groups)
 Full backtest: CRPS = 1.40, MAE = 1.82, PnL = +124
 
+## Current champion (autoresearch rounds 1–5)
+`champion_v1`: CRPS = 1.295, MAE = 1.646 (last 100 groups) — **+12% over baseline**
+Config: `legacy_raw` features, `hidden_dims=(128,64)`, `activation=silu`,
+`use_recency_weights=True`, `loss_name=gaussian_nll_mean`, `use_val_split=False`,
+`min_train_rows_override=30`
+
+Key findings:
+- wider network (128,64 > 64,64): +0.055 CRPS
+- recency weights: +0.118 CRPS total
+- SiLU activation (with recency): +0.177 CRPS total
+- layernorm: catastrophically bad (CRPS 2.67!)
+- contextual features: worse than raw+recency (CRPS 1.53 vs 1.29)
+- depth (3 layers) or going too wide (256,128): both hurt
+- min_train_rows 25/30/40: all equivalent
+
 ## Experiment loop (autoresearch style)
 1. Create git branch `autoresearch/<tag>`
 2. Read current `det2prob_nn.py` for full context
