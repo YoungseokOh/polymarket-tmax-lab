@@ -2457,8 +2457,10 @@ def train_advanced(
     dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
     model_name: str = "det2prob_nn",
     artifacts_dir: Path = Path("artifacts/models/v2"),
+    variant: str | None = None,
+    publish_champion: bool = False,
 ) -> None:
-    """Train an advanced probabilistic model."""
+    """Train an advanced probabilistic model, optionally publish the champion alias."""
 
     config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
@@ -2468,8 +2470,28 @@ def train_advanced(
         artifacts_dir,
         split_policy="market_day",
         seed=config.app.random_seed,
+        variant=variant,
     )
     console.print(f"Trained {model_name} -> {artifact.path}")
+    if publish_champion:
+        champion_path = _default_model_path(DEFAULT_MODEL_NAME)
+        champion_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(artifact.path), champion_path)
+        if artifact.calibration_path is not None:
+            champion_cal_path = champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")
+            shutil.copyfile(Path(artifact.calibration_path), champion_cal_path)
+        metadata: dict[str, object] = {
+            "model_name": model_name,
+            "alias_path": str(champion_path),
+            "alias_calibration_path": str(champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")),
+            "source_model_path": artifact.path,
+            "source_calibration_path": artifact.calibration_path,
+            "variant": variant,
+            "contract_version": "v2",
+            "published_at": datetime.now(tz=UTC).isoformat(),
+        }
+        dump_json(_default_champion_metadata_path(), metadata)
+        console.print(f"Champion alias published: {champion_path}")
 
 
 @app.command("backtest")
