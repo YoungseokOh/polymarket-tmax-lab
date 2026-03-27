@@ -199,6 +199,357 @@ DET2PROB_VARIANTS: dict[str, Det2ProbVariantConfig] = {
         use_val_split=False,
         min_train_rows_override=30,
     ),
+    # ---- autoresearch experiments ----
+
+    # exp_01: raw features, no val split, earlier start (min_rows=20)
+    # hypothesis: starting training even earlier captures more distribution shape
+    "exp_01_raw_novsplit_min20": Det2ProbVariantConfig(
+        name="exp_01_raw_novsplit_min20",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(64, 64),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=20,
+    ),
+    # exp_02: raw features, no val split, wider network
+    # hypothesis: (128,64) captures more non-linearity with same feature set
+    "exp_02_raw_wide_novsplit": Det2ProbVariantConfig(
+        name="exp_02_raw_wide_novsplit",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_03: raw features, no val split, recency weighting
+    # hypothesis: weighting recent observations more helps with seasonal drift
+    "exp_03_raw_recency_novsplit": Det2ProbVariantConfig(
+        name="exp_03_raw_recency_novsplit",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(64, 64),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_04: contextual features, no val split, silu activation
+    # hypothesis: SiLU handles the smooth NWP features better than ReLU
+    "exp_04_ctx_silu_novsplit": Det2ProbVariantConfig(
+        name="exp_04_ctx_silu_novsplit",
+        feature_mode="contextual",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(64, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # ---- autoresearch round 2: building on exp_02 winner (128,64) ----
+
+    # exp_05: exp_02 + recency weights
+    # hypothesis: combining wider network with recency weighting for seasonal drift
+    "exp_05_wide_recency": Det2ProbVariantConfig(
+        name="exp_05_wide_recency",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_06: even wider (256,128)
+    # hypothesis: more capacity may help given larger rolling-origin datasets
+    "exp_06_widest": Det2ProbVariantConfig(
+        name="exp_06_widest",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(256, 128),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_07: exp_02 + SiLU activation
+    # hypothesis: smoother activations may work better with wider hidden dims
+    "exp_07_wide_silu": Det2ProbVariantConfig(
+        name="exp_07_wide_silu",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_08: deeper narrowing (128,64,32)
+    # hypothesis: depth with funnel shape may outperform a simple two-layer wide net
+    "exp_08_wide_deeper": Det2ProbVariantConfig(
+        name="exp_08_wide_deeper",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64, 32),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # ---- autoresearch round 3: building on exp_05 winner (128,64 + recency) ----
+
+    # exp_09: (128,64,32) + recency — combine depth (exp_08) with recency weighting (exp_05)
+    # hypothesis: deeper + recency is even better than either alone
+    "exp_09_deeper_recency": Det2ProbVariantConfig(
+        name="exp_09_deeper_recency",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64, 32),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_10: (128,64) + recency + SiLU — add smooth activations to champion
+    # hypothesis: SiLU may work better with recency-weighted targets
+    "exp_10_wide_recency_silu": Det2ProbVariantConfig(
+        name="exp_10_wide_recency_silu",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_11: (128,128) + recency — square wider layers with recency
+    # hypothesis: symmetric wide layers + recency may capture more non-linearity
+    "exp_11_square_recency": Det2ProbVariantConfig(
+        name="exp_11_square_recency",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 128),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_12: (128,64) + recency + layernorm — stabilize champion with normalization
+    # hypothesis: layernorm reduces internal covariate shift in recency-weighted training
+    "exp_12_wide_recency_ln": Det2ProbVariantConfig(
+        name="exp_12_wide_recency_ln",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="relu",
+        use_layernorm=True,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # ---- champion: best found by autoresearch (rounds 1-3) ----
+    # exp_10 config: (128,64) + recency + SiLU + gaussian_nll_mean + no val split + min30
+    # CRPS=1.2948 vs legacy_gaussian=1.4717 baseline (improvement: +0.177, +12%)
+    "champion_v1": Det2ProbVariantConfig(
+        name="champion_v1",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # ---- autoresearch round 4: building on exp_10 champion (128,64 + recency + SiLU) ----
+
+    # exp_13: (128,64,32) + recency + SiLU — add depth to champion activation combo
+    # hypothesis: depth + SiLU smooth gradients + recency may work better than 2-layer
+    "exp_13_deeper_recency_silu": Det2ProbVariantConfig(
+        name="exp_13_deeper_recency_silu",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64, 32),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_14: (192,96) + recency + SiLU — slightly wider champion
+    # hypothesis: 50% more capacity at each layer may help without going too wide
+    "exp_14_wider_recency_silu": Det2ProbVariantConfig(
+        name="exp_14_wider_recency_silu",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(192, 96),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_15: (128,64) + recency + SiLU + dropout=0.05 — mild regularization
+    # hypothesis: small dropout prevents overfitting on narrow recency window
+    "exp_15_wide_recency_silu_drop": Det2ProbVariantConfig(
+        name="exp_15_wide_recency_silu_drop",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.05,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # exp_16: (128,64) + recency + SiLU + gaussian_nll (no mean anchor)
+    # hypothesis: the mean anchor in gaussian_nll_mean may hurt with SiLU/recency combo
+    "exp_16_wide_recency_silu_nll": Det2ProbVariantConfig(
+        name="exp_16_wide_recency_silu_nll",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
+    # ---- autoresearch round 5: min_train_rows sensitivity + contextual features ----
+
+    # exp_17: champion config + min_train_rows=25 (start earlier)
+    # hypothesis: more training steps from earlier may improve calibration
+    "exp_17_champion_min25": Det2ProbVariantConfig(
+        name="exp_17_champion_min25",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=25,
+    ),
+    # exp_18: champion config + min_train_rows=40 (start later, cleaner data)
+    # hypothesis: later start reduces noisy small-sample training
+    "exp_18_champion_min40": Det2ProbVariantConfig(
+        name="exp_18_champion_min40",
+        feature_mode="legacy_raw",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=40,
+    ),
+    # exp_19: contextual features + champion architecture
+    # hypothesis: seasonality features + champion config may push CRPS below 1.2
+    "exp_19_ctx_champion": Det2ProbVariantConfig(
+        name="exp_19_ctx_champion",
+        feature_mode="contextual",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(128, 64),
+        activation="silu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=True,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
+    ),
 }
 
 
