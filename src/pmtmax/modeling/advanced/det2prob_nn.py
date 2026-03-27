@@ -44,6 +44,10 @@ class Det2ProbVariantConfig:
         "mdn_nll_mean_entropy",
     ]
     early_stop_metric: Literal["loss", "nll", "crps"]
+    # When False, skip validation split and train on all data (better for small rolling-origin sets)
+    use_val_split: bool = True
+    # Override the global _MIN_TRAIN_ROWS threshold for this variant (0 = use global default)
+    min_train_rows_override: int = 0
 
 
 DET2PROB_VARIANTS: dict[str, Det2ProbVariantConfig] = {
@@ -176,6 +180,24 @@ DET2PROB_VARIANTS: dict[str, Det2ProbVariantConfig] = {
         use_recency_weights=True,
         loss_name="mdn_nll_mean",
         early_stop_metric="nll",
+    ),
+    # Contextual features + Gaussian head + no validation split
+    # Designed for rolling-origin backtests where training sets are small.
+    # Trains on all data from row 30 onward (no 20% val holdout waste).
+    "robust_gaussian": Det2ProbVariantConfig(
+        name="robust_gaussian",
+        feature_mode="contextual",
+        head="gaussian",
+        num_components=1,
+        hidden_dims=(64, 64),
+        activation="relu",
+        use_layernorm=False,
+        dropout=0.0,
+        use_recency_weights=False,
+        loss_name="gaussian_nll_mean",
+        early_stop_metric="loss",
+        use_val_split=False,
+        min_train_rows_override=30,
     ),
 }
 
@@ -313,7 +335,13 @@ class Det2ProbNNModel:
         self._hybrid_tuned: TunedEnsembleModel | None = None
         self.diagnostics_: dict[str, float] = {}
 
+    def _effective_min_train_rows(self) -> int:
+        override = self.variant_config.min_train_rows_override
+        return override if override > 0 else _MIN_TRAIN_ROWS
+
     def _validation_split(self, ordered: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if not self.variant_config.use_val_split:
+            return ordered, ordered.iloc[0:0].copy()
         if len(ordered) < _MIN_TRAIN_ROWS:
             return ordered, ordered.iloc[0:0].copy()
         group_ids = group_id_series(ordered, split_policy=self.split_policy)
@@ -482,12 +510,13 @@ class Det2ProbNNModel:
         self.constant_mean_ = float(y_raw.mean()) if len(y_raw) else 0.0
         self.constant_std_ = float(max(y_raw.std(), 0.5)) if len(y_raw) else 1.0
 
-        if not self.feature_names or len(ordered) < _MIN_TRAIN_ROWS:
+        min_train = self._effective_min_train_rows()
+        if not self.feature_names or len(ordered) < min_train:
             return
 
         self._fit_feature_builder(ordered)
         train_frame, valid_frame = self._validation_split(ordered)
-        if len(train_frame) < _MIN_TRAIN_ROWS:
+        if len(train_frame) < min_train:
             self._constant_fallback(y_raw)
             return
 

@@ -993,6 +993,7 @@ def _run_synthetic_backtest(
     frame: pd.DataFrame,
     *,
     model_name: str,
+    variant: str | None = None,
     artifacts_dir: Path,
     bankroll: float,
     default_fee_bps: float,
@@ -1012,12 +1013,17 @@ def _run_synthetic_backtest(
         test_size=1,
         split_policy=effective_split_policy,
     ):
+        train_kwargs: dict[str, object] = {
+            "split_policy": effective_split_policy,
+            "seed": seed,
+        }
+        if variant is not None:
+            train_kwargs["variant"] = variant
         artifact = train_model(
             model_name,
             train,
             artifacts_dir,
-            split_policy=effective_split_policy,
-            seed=seed,
+            **train_kwargs,
         )
         for _, row in test.iterrows():
             spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
@@ -2477,6 +2483,7 @@ def backtest(
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
+    variant: str | None = None,
 ) -> None:
     """Run a rolling-origin backtest with synthetic or official historical pricing."""
 
@@ -2496,6 +2503,7 @@ def backtest(
         metrics, trade_rows = _run_synthetic_backtest(
             frame,
             model_name=resolved_model_name,
+            variant=variant,
             artifacts_dir=artifacts_dir,
             bankroll=bankroll,
             default_fee_bps=default_fee_bps,
@@ -2528,6 +2536,7 @@ def backtest(
                 frame,
                 panel,
                 model_name=resolved_model_name,
+                variant=variant,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
@@ -2541,6 +2550,7 @@ def backtest(
                 frame,
                 panel,
                 model_name=resolved_model_name,
+                variant=variant,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
