@@ -999,6 +999,7 @@ def _run_synthetic_backtest(
     default_fee_bps: float,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
+    min_train_size: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run the existing synthetic-book research backtest."""
 
@@ -1006,10 +1007,10 @@ def _run_synthetic_backtest(
     prediction_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
     effective_split_policy = _effective_split_policy(split_policy)
-    min_train_size = 1
+    effective_min_train = min_train_size if min_train_size is not None else 1
     for train, test in rolling_origin_splits(
         frame,
-        min_train_size=min_train_size,
+        min_train_size=effective_min_train,
         test_size=1,
         split_policy=effective_split_policy,
     ):
@@ -1117,6 +1118,7 @@ def _run_real_history_backtest(
     default_fee_bps: float,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
+    min_train_size: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -1131,6 +1133,7 @@ def _run_real_history_backtest(
         pricing_source="real_history",
         split_policy=split_policy,
         seed=seed,
+        min_train_size=min_train_size,
     )
 
 
@@ -1164,6 +1167,7 @@ def _run_quote_proxy_backtest(
     quote_proxy_half_spread: float,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
+    min_train_size: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using last price plus an explicit quote proxy."""
 
@@ -1179,6 +1183,7 @@ def _run_quote_proxy_backtest(
         quote_proxy_half_spread=quote_proxy_half_spread,
         split_policy=split_policy,
         seed=seed,
+        min_train_size=min_train_size,
     )
 
 
@@ -1195,6 +1200,7 @@ def _run_panel_pricing_backtest(
     quote_proxy_half_spread: float = 0.0,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
+    min_train_size: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using historical pricing or a quote proxy."""
 
@@ -1235,10 +1241,10 @@ def _run_panel_pricing_backtest(
     execution_price_premiums: list[float] = []
 
     effective_split_policy = _effective_split_policy(split_policy)
-    min_train_size = 1
+    effective_min_train = min_train_size if min_train_size is not None else 1
     for train, test in rolling_origin_splits(
         frame,
-        min_train_size=min_train_size,
+        min_train_size=effective_min_train,
         test_size=1,
         split_policy=effective_split_policy,
     ):
@@ -2506,13 +2512,25 @@ def backtest(
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     variant: str | None = None,
+    last_n: int = 0,
 ) -> None:
-    """Run a rolling-origin backtest with synthetic or official historical pricing."""
+    """Run a rolling-origin backtest with synthetic or official historical pricing.
+
+    Use --last-n N to run only the final N rows as test points (fast-eval proxy).
+    """
 
     config, _ = load_settings()
     resolved_model_name = _resolve_model_name_alias(model_name)
     default_fee_bps = _default_fee_bps(config)
     frame = pd.read_parquet(dataset_path)
+    # fast-eval: pass min_train_size so only the last `last_n` groups are used as
+    # test points while training sets still use full history.
+    # min_train_size for market_day policy is measured in groups, not rows.
+    fast_eval_min_train: int | None = None
+    if last_n > 0:
+        key_frame = frame[["market_id", "target_date"]].astype({"market_id": str})
+        num_groups = int(key_frame.astype(str).agg("|".join, axis=1).nunique())
+        fast_eval_min_train = max(1, num_groups - last_n)
     required_columns = {"market_spec_json", "market_prices_json", "winning_outcome", "realized_daily_max"}
     missing = required_columns.difference(frame.columns)
     if missing:
@@ -2531,6 +2549,7 @@ def backtest(
             default_fee_bps=default_fee_bps,
             split_policy=split_policy,
             seed=config.app.random_seed,
+            min_train_size=fast_eval_min_train,
         )
         metrics_output = _default_backtest_output("backtest_metrics.json")
         trades_output = _default_backtest_output("backtest_trades.json")
@@ -2564,6 +2583,7 @@ def backtest(
                 default_fee_bps=default_fee_bps,
                 split_policy=split_policy,
                 seed=config.app.random_seed,
+                min_train_size=fast_eval_min_train,
             )
             metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
             trades_output = _default_backtest_output("backtest_trades_real_history.json")
@@ -2579,6 +2599,7 @@ def backtest(
                 quote_proxy_half_spread=quote_proxy_half_spread,
                 split_policy=split_policy,
                 seed=config.app.random_seed,
+                min_train_size=fast_eval_min_train,
             )
             metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
             trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
