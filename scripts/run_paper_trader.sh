@@ -14,5 +14,8 @@ mkdir -p "${OUTPUT_DIR}"
 TIMESTAMP="$(date -u '+%Y-%m-%d_%H')"
 OUTPUT_FILE="${OUTPUT_DIR}/${TIMESTAMP}.json"
 
-uv run pmtmax paper-trader "$@" | tee "${OUTPUT_FILE}"
+uv run pmtmax paper-trader \
+    --min-edge 0.05 \
+    --horizon market_open \
+    "$@" | tee "${OUTPUT_FILE}"
 echo "[paper-trader] saved -> ${OUTPUT_FILE}" >&2
