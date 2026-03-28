@@ -1,0 +1,10 @@
+extends: live.example.yaml
+app:
+  env: live
+execution:
+  max_city_exposure: 100.0
+  global_max_exposure: 200.0
+  min_liquidity: 250.0
+  max_spread_bps: 700
+backtest:
+  default_edge_threshold: 0.03

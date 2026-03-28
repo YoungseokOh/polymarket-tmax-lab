@@ -34,11 +34,13 @@ Live trading is implemented but disabled by default.
 - verify legal and regional eligibility before any live use
 - validate fee, nonce, and auth handling against current official docs before enabling
 - use `uv run pmtmax live-trader --dry-run` first to collect a preflight report and signed-order previews
-- use `uv run pmtmax opportunity-report` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
-- use `uv run pmtmax benchmark-models` before relying on the default `champion` alias in paper/live/opportunity paths
+- use `uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
+- use `uv run pmtmax benchmark-models` before relying on the default `champion` or `trading_champion` alias in paper/live/opportunity paths
+- use `uv run pmtmax revenue-gate-report` before promoting the small-cap live pilot; benchmark `GO` without shadow/open-phase confirmation remains insufficient
 - `live-trader`, `scan-daemon`, and `opportunity-report` now default to the
   checked-in recent horizon policy (`configs/recent-core-horizon-policy.yaml`);
   disallowed city/date combinations are surfaced as `policy_filtered`
+- `configs/revenue-pilot-core.yaml` is the conservative live-pilot preset: keep bankroll at roughly `$500`, city exposure at `100`, global exposure at `200`, and stay on the recent-core city set with manual approval
 - signal outputs are written under `artifacts/signals/v2/`
 
 ## See Also

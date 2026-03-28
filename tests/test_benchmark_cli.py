@@ -137,6 +137,10 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
         "pmtmax.cli.main._default_champion_metadata_path",
         lambda: tmp_path / "models" / "champion.json",
     )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_alias_metadata_path",
+        lambda alias_name: tmp_path / "models" / f"{alias_name}.json",
+    )
 
     leaderboard_output = tmp_path / "benchmarks" / "leaderboard.json"
     leaderboard_csv_output = tmp_path / "benchmarks" / "leaderboard.csv"
@@ -156,12 +160,20 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
     leaderboard = json.loads(leaderboard_output.read_text())
     summary = json.loads(summary_output.read_text())
     champion_metadata = json.loads((tmp_path / "models" / "champion.json").read_text())
+    trading_metadata = json.loads((tmp_path / "models" / "trading_champion.json").read_text())
 
     assert leaderboard[0]["model_name"] == "det2prob_nn"
+    assert "trading_champion_score" in leaderboard[0]
     assert summary["champion_model_name"] == "det2prob_nn"
+    assert summary["trading_champion_model_name"] == "det2prob_nn"
     assert champion_metadata["model_name"] == "det2prob_nn"
+    assert champion_metadata["alias_name"] == "champion"
+    assert trading_metadata["model_name"] == "det2prob_nn"
+    assert trading_metadata["alias_name"] == "trading_champion"
     assert Path(champion_metadata["alias_path"]).exists()
     assert Path(champion_metadata["alias_calibration_path"]).exists()
+    assert Path(trading_metadata["alias_path"]).exists()
+    assert Path(trading_metadata["alias_calibration_path"]).exists()
     assert leaderboard_csv_output.exists()
 
 

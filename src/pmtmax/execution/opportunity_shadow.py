@@ -14,6 +14,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from pmtmax.config.settings import RepoConfig
+from pmtmax.execution.revenue_gate import classify_path_viability
 from pmtmax.logging_utils import get_logger
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.storage.schemas import OpportunityObservation
@@ -56,7 +57,8 @@ def summarize_opportunity_history(history_path: Path) -> dict[str, Any]:
         edge_values = [item.after_cost_edge for item in items if item.after_cost_edge is not None]
         spread_values = [item.spread for item in items if item.spread is not None]
         liquidity_values = [item.visible_liquidity for item in items if item.visible_liquidity is not None]
-        return {
+        summary = {
+            "cycles": len({item.observed_at.isoformat() for item in items}),
             "markets_evaluated": len(items),
             "tradable_count": reason_counts.get("tradable", 0),
             "reason_counts": dict(reason_counts),
@@ -67,12 +69,20 @@ def summarize_opportunity_history(history_path: Path) -> dict[str, Any]:
             "median_spread": median(spread_values) if spread_values else None,
             "median_visible_liquidity": median(liquidity_values) if liquidity_values else None,
         }
+        gate = classify_path_viability(summary)
+        summary["gate_decision"] = gate["decision"]
+        summary["gate_reason"] = gate["decision_reason"]
+        return summary
 
     by_city: dict[str, list[OpportunityObservation]] = {}
+    by_horizon: dict[str, list[OpportunityObservation]] = {}
+    by_city_horizon: dict[str, list[OpportunityObservation]] = {}
     for row in rows:
         by_city.setdefault(row.city, []).append(row)
+        by_horizon.setdefault(row.decision_horizon, []).append(row)
+        by_city_horizon.setdefault(f"{row.city}:{row.decision_horizon}", []).append(row)
 
-    return {
+    summary = {
         "generated_at": datetime.now(tz=UTC),
         "cycles": len({row.observed_at.isoformat() for row in rows}),
         **_summary(rows),
@@ -80,7 +90,19 @@ def summarize_opportunity_history(history_path: Path) -> dict[str, Any]:
             city: _summary(city_rows)
             for city, city_rows in sorted(by_city.items())
         },
+        "by_horizon": {
+            horizon: _summary(horizon_rows)
+            for horizon, horizon_rows in sorted(by_horizon.items())
+        },
+        "by_city_horizon": {
+            key: _summary(group_rows)
+            for key, group_rows in sorted(by_city_horizon.items())
+        },
     }
+    gate = classify_path_viability(summary)
+    summary["gate_decision"] = gate["decision"]
+    summary["gate_reason"] = gate["decision_reason"]
+    return summary
 
 
 @dataclass

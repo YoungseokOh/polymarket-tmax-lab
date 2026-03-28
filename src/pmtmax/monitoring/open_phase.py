@@ -14,6 +14,7 @@ from statistics import median
 from typing import Any
 
 from pmtmax.config.settings import RepoConfig
+from pmtmax.execution.revenue_gate import classify_path_viability
 from pmtmax.logging_utils import get_logger
 from pmtmax.storage.schemas import MarketSnapshot, OpenPhaseObservation
 from pmtmax.utils import dump_json
@@ -150,7 +151,8 @@ def summarize_open_phase_history(history_path: Path) -> dict[str, Any]:
         edge_values = [item.after_cost_edge for item in items if item.after_cost_edge is not None]
         spread_values = [item.spread for item in items if item.spread is not None]
         age_values = [item.open_phase_age_hours for item in items if item.open_phase_age_hours is not None]
-        return {
+        summary = {
+            "cycles": len({item.observed_at.isoformat() for item in items}),
             "markets_evaluated": len(items),
             "tradable_count": reason_counts.get("tradable", 0),
             "reason_counts": dict(reason_counts),
@@ -163,17 +165,37 @@ def summarize_open_phase_history(history_path: Path) -> dict[str, Any]:
             "min_open_phase_age_hours": min(age_values) if age_values else None,
             "max_open_phase_age_hours": max(age_values) if age_values else None,
         }
+        gate = classify_path_viability(summary)
+        summary["gate_decision"] = gate["decision"]
+        summary["gate_reason"] = gate["decision_reason"]
+        return summary
 
     by_city: dict[str, list[OpenPhaseObservation]] = {}
+    by_horizon: dict[str, list[OpenPhaseObservation]] = {}
+    by_city_horizon: dict[str, list[OpenPhaseObservation]] = {}
     for row in rows:
         by_city.setdefault(row.city, []).append(row)
+        by_horizon.setdefault(row.decision_horizon, []).append(row)
+        by_city_horizon.setdefault(f"{row.city}:{row.decision_horizon}", []).append(row)
 
-    return {
+    summary = {
         "generated_at": datetime.now(tz=UTC),
         "cycles": len({row.observed_at.isoformat() for row in rows}),
         **_summary(rows),
         "by_city": {city: _summary(city_rows) for city, city_rows in sorted(by_city.items())},
+        "by_horizon": {
+            horizon: _summary(horizon_rows)
+            for horizon, horizon_rows in sorted(by_horizon.items())
+        },
+        "by_city_horizon": {
+            key: _summary(group_rows)
+            for key, group_rows in sorted(by_city_horizon.items())
+        },
     }
+    gate = classify_path_viability(summary)
+    summary["gate_decision"] = gate["decision"]
+    summary["gate_reason"] = gate["decision_reason"]
+    return summary
 
 
 @dataclass

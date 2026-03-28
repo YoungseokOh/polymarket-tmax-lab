@@ -111,6 +111,9 @@ def test_opportunity_shadow_runner_writes_latest_history_summary_and_state(tmp_p
     assert payload["tradable_count"] == 1
     assert payload["reason_counts"]["no_positive_edge"] == 1
     assert payload["by_city"]["Seoul"]["tradable_count"] == 1
+    assert payload["by_horizon"]["morning_of"]["markets_evaluated"] == 2
+    assert payload["by_city_horizon"]["Seoul:morning_of"]["tradable_count"] == 1
+    assert payload["gate_decision"] == "INCONCLUSIVE"
 
 
 def test_summarize_opportunity_history_counts_positive_raw_and_edge(tmp_path: Path) -> None:
@@ -151,3 +154,5 @@ def test_summarize_opportunity_history_counts_positive_raw_and_edge(tmp_path: Pa
     assert summary["raw_gap_positive_count"] == 2
     assert summary["after_cost_edge_positive_count"] == 1
     assert summary["tradable_count"] == 1
+    assert summary["by_horizon"]["morning_of"]["gate_decision"] == "INCONCLUSIVE"
+    assert summary["gate_decision"] == "INCONCLUSIVE"

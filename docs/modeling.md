@@ -35,5 +35,7 @@ The model target is not generic “city temperature.” It is the official sourc
 
 ## Champion Selection
 - `benchmark-models` writes leaderboard artifacts under `artifacts/benchmarks/v2/`
-- the active champion alias is published to `artifacts/models/v2/champion.pkl`
-- champion scoring combines CRPS, Brier, calibration gap, forecast error, and trading-like PnL
+- the active research champion alias is published to `artifacts/models/v2/champion.pkl`
+- the active trading alias is published to `artifacts/models/v2/trading_champion.pkl`
+- research champion scoring still blends forecast skill and trading-like PnL
+- trading champion scoring is stricter on `quote_proxy` / `real_history` profitability and only considers sample-adequate candidates when available

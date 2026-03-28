@@ -71,6 +71,7 @@ uv run pmtmax train-baseline --model-name gaussian_emos
 ```bash
 uv run pmtmax benchmark-models
 uv run pmtmax backtest --model-name champion
+uv run pmtmax backtest --model-name trading_champion
 ```
 
 To evaluate against official historical Polymarket prices instead of the synthetic
@@ -92,18 +93,19 @@ uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.
 6. Emit paper-trading signals:
 
 ```bash
-uv run pmtmax paper-trader
+uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
 ```
 
 `paper-trader` defaults to `--horizon policy`, which applies the checked-in
 city-specific horizon policy from `configs/recent-core-horizon-policy.yaml`.
 Markets outside the recommended horizon set are reported explicitly as
-`policy_filtered`.
+`policy_filtered`. Add `--core-recent-only` when you want the revenue workflow
+to stay on `Seoul / NYC / London`.
 
 7. Audit active markets for executable opportunities with explicit book status:
 
 ```bash
-uv run pmtmax opportunity-report
+uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion
 ```
 
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
@@ -120,6 +122,13 @@ uv run pmtmax open-phase-shadow --max-cycles 1
 (falling back to `createdAt` / `deployingTimestamp`) and scores only markets that
 opened recently. It defaults to `--horizon market_open` rather than the near-term
 policy horizon.
+
+To combine recent-core benchmark results and live-path shadow validation into one
+promotion decision, run:
+
+```bash
+uv run pmtmax revenue-gate-report
+```
 
 The canonical engine is now v2-only:
 
@@ -200,7 +209,7 @@ uv run pmtmax paper-trader
 Canonical research paths are now v2-only.
 Public model support is intentionally reduced to `gaussian_emos`, `tuned_ensemble`, and `det2prob_nn`.
 `tuned_ensemble` is now the contextual mixture-of-experts candidate, while `det2prob_nn` is a standalone mixture-density neural network.
-`benchmark-models` writes the leaderboard under `artifacts/benchmarks/v2/` and publishes the active `champion` alias under `artifacts/models/v2/`.
+`benchmark-models` writes the leaderboard under `artifacts/benchmarks/v2/` and publishes both the research `champion` alias and the trading-focused `trading_champion` alias under `artifacts/models/v2/`.
 `benchmark-ablations` is internal research tooling for variant-level grouped-holdout diagnostics and writes family-specific leaderboards under `artifacts/benchmarks/v2/`.
 
 ## Real Historical Collection
@@ -400,12 +409,13 @@ To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into
 uv run python scripts/run_recent_core_benchmark.py
 ```
 
-The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. It also applies `configs/recent-core-horizon-policy.yaml`, records policy-filtered metrics for the currently recommended horizons, and adds top-level aggregate profitability fields: `aggregate_real_history_metrics`, `aggregate_quote_proxy_metrics`, `aggregate_policy_real_history_metrics`, `aggregate_policy_quote_proxy_metrics`, `aggregate_panel_coverage`, `decision`, `decision_reason`, and `sample_adequacy`. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
+The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. It also applies `configs/recent-core-horizon-policy.yaml`, records policy-filtered metrics for the currently recommended horizons, and adds both top-level aggregate profitability fields and nested `cities.<city>.horizons.<horizon>` summaries. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
 
 ## Paper Trading Workflow
 ```bash
 uv run pmtmax benchmark-models
-uv run pmtmax paper-trader
+uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
+uv run pmtmax revenue-gate-report
 ```
 
 Paper trading uses active discovered markets when available. If no active max-temperature markets are currently listed on Polymarket, the command exits cleanly with no fills.
@@ -414,11 +424,11 @@ Paper trading uses active discovered markets when available. If no active max-te
 also default to the checked-in recent horizon policy. The current recommended
 set is `Seoul=market_open+previous_evening+morning_of`,
 `NYC=market_open+previous_evening`, and `London=previous_evening`.
-Paper/live/opportunity paths use the v2 forecast contract, write outputs under `artifacts/signals/v2/`, and reject uncalibrated forecasts as `missing_calibrator`.
+Paper/live/opportunity paths use the v2 forecast contract, write outputs under `artifacts/signals/v2/`, and reject uncalibrated forecasts as `missing_calibrator`. For revenue-first operation, the preferred loop is `benchmark-models -> paper/opportunity/open-phase shadow -> revenue-gate-report`.
 
 ## Opportunity Workflow
 ```bash
-uv run pmtmax opportunity-report
+uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion
 ```
 
 This writes `artifacts/signals/v2/opportunity_report.json` and separates `tradable`,
@@ -434,6 +444,8 @@ tradable over time before wiring alerts, run the shadow watcher:
 
 ```bash
 uv run pmtmax opportunity-shadow \
+  --core-recent-only \
+  --model-name trading_champion \
   --interval 60
 ```
 
@@ -455,6 +467,8 @@ use the open-phase watcher instead:
 
 ```bash
 uv run pmtmax open-phase-shadow \
+  --core-recent-only \
+  --model-name trading_champion \
   --open-window-hours 24 \
   --interval 60
 ```
@@ -468,11 +482,14 @@ look different immediately after listing.
 ## Dry-Run Live Workflow
 ```bash
 uv run pmtmax live-trader \
+  --core-recent-only \
+  --model-name trading_champion \
   --dry-run
 ```
 
 This performs preflight checks and signed-order previews when a private key is configured. Actual posting remains gated.
 Dry-run live paths and market-making previews fail closed on missing CLOB books.
+For the conservative small-cap pilot preset, point `PMTMAX_CONFIG` at `configs/revenue-pilot-core.yaml` and keep the explicit live env flags enabled separately.
 
 ## Live Trading Is Gated
 Live trading exists for future use but is off by default.

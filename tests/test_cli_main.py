@@ -24,6 +24,7 @@ from pmtmax.cli.main import (
     open_phase_shadow,
     opportunity_report,
     opportunity_shadow,
+    revenue_gate_report,
     summarize_dataset_readiness,
     summarize_price_history_coverage,
     summarize_truth_coverage,
@@ -1171,6 +1172,56 @@ def test_open_phase_shadow_command_writes_outputs(
     assert summary["tradable_count"] == 1
     assert state["tradable_count"] == 1
     assert len(history_lines) == 1
+
+
+def test_revenue_gate_report_writes_combined_summary(tmp_path: Path) -> None:
+    benchmark_path = tmp_path / "benchmark.json"
+    benchmark_path.write_text(
+        json.dumps(
+            {
+                "decision": "GO",
+                "decision_reason": "positive_policy_pnl_in_real_and_proxy",
+                "aggregate_policy_real_history_metrics": {"num_trades": 20.0, "pnl": 24.0},
+                "aggregate_policy_quote_proxy_metrics": {"num_trades": 20.0, "pnl": 12.0},
+                "aggregate_panel_coverage": {"rows": 55, "coverage": {"ok": 40, "missing": 15}},
+            }
+        )
+    )
+    opportunity_path = tmp_path / "opportunity.json"
+    opportunity_path.write_text(
+        json.dumps(
+            {
+                "cycles": 3,
+                "markets_evaluated": 6,
+                "raw_gap_positive_count": 2,
+                "after_cost_edge_positive_count": 2,
+            }
+        )
+    )
+    open_phase_path = tmp_path / "open_phase.json"
+    open_phase_path.write_text(
+        json.dumps(
+            {
+                "cycles": 2,
+                "markets_evaluated": 4,
+                "raw_gap_positive_count": 1,
+                "after_cost_edge_positive_count": 0,
+            }
+        )
+    )
+
+    output = tmp_path / "revenue_gate.json"
+    revenue_gate_report(
+        benchmark_summary_path=benchmark_path,
+        opportunity_summary_path=opportunity_path,
+        open_phase_summary_path=open_phase_path,
+        output=output,
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["decision"] == "GO"
+    assert payload["required_model_alias"] == "trading_champion"
+    assert payload["opportunity_shadow_gate"]["decision"] == "GO"
 
 
 def test_live_mm_uses_inventory_mapping_for_quoter(

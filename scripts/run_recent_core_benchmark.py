@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from pmtmax.backtest.metrics import summarize_trade_log
-from pmtmax.backtest.recent_core_benchmark import summarize_recent_core_profitability
+from pmtmax.backtest.recent_core_benchmark import classify_profitability, summarize_recent_core_profitability
 from pmtmax.utils import dump_json, load_json, load_yaml_with_extends
 
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")
@@ -86,6 +86,33 @@ def _trade_summary(trades_path: Path) -> dict[str, dict[str, float]]:
             "avg_price": float(pd.to_numeric(group["price"], errors="coerce").mean()),
         }
     return summary
+
+
+def _panel_summary_for_horizon(panel_summary: dict[str, object], horizon: str) -> dict[str, object]:
+    """Extract one horizon's coverage summary from the panel-level summary."""
+
+    coverage_counts: dict[str, int] = {}
+    for key, count in dict(panel_summary.get("coverage_by_horizon", {})).items():
+        key_str = str(key)
+        if not key_str.startswith(f"{horizon}:"):
+            continue
+        _, status = key_str.split(":", 1)
+        coverage_counts[status] = int(count)
+    return {
+        "rows": int(sum(coverage_counts.values())),
+        "coverage": dict(sorted(coverage_counts.items())),
+    }
+
+
+def _trade_metrics_from_horizon_row(row: dict[str, object]) -> dict[str, float]:
+    """Normalize one horizon trade summary into benchmark-style trade metrics."""
+
+    return {
+        "num_trades": float(row.get("trade_count", 0.0)),
+        "pnl": float(row.get("pnl", 0.0)),
+        "hit_rate": float(row.get("hit_rate", 0.0)),
+        "avg_price": float(row.get("avg_price", 0.0)),
+    }
 
 
 def _load_horizon_policy(path: Path | None) -> dict[str, list[str]]:
@@ -288,10 +315,16 @@ def main() -> None:
         real_horizon = _trade_summary(real_trades_path)
         proxy_horizon = _trade_summary(proxy_trades_path)
         allowed_horizons = horizon_policy.get(city, [])
+        panel_summary = _panel_summary(panel_path)
         horizon_delta: dict[str, dict[str, float]] = {}
+        horizons: dict[str, dict[str, object]] = {}
         for horizon in sorted(set(real_horizon) | set(proxy_horizon)):
             real_row = real_horizon.get(horizon, {})
             proxy_row = proxy_horizon.get(horizon, {})
+            real_trade_metrics = _trade_metrics_from_horizon_row(real_row)
+            proxy_trade_metrics = _trade_metrics_from_horizon_row(proxy_row)
+            horizon_panel_summary = _panel_summary_for_horizon(panel_summary, horizon)
+            policy_allowed = not allowed_horizons or horizon in allowed_horizons
             horizon_delta[horizon] = {
                 "real_trade_count": float(real_row.get("trade_count", 0.0)),
                 "proxy_trade_count": float(proxy_row.get("trade_count", 0.0)),
@@ -301,6 +334,24 @@ def main() -> None:
                 "real_hit_rate": float(real_row.get("hit_rate", 0.0)),
                 "proxy_hit_rate": float(proxy_row.get("hit_rate", 0.0)),
             }
+            horizon_profitability = classify_profitability(
+                aggregate_real_history_metrics={
+                    "priced_decision_rows": float(horizon_panel_summary["rows"]),
+                },
+                aggregate_policy_real_history_metrics=real_trade_metrics if policy_allowed else {"num_trades": 0.0, "pnl": 0.0},
+                aggregate_policy_quote_proxy_metrics=(
+                    proxy_trade_metrics if policy_allowed else {"num_trades": 0.0, "pnl": 0.0}
+                ),
+            )
+            horizons[horizon] = {
+                "policy_allowed": policy_allowed,
+                "panel_summary": horizon_panel_summary,
+                "real_history_metrics": real_trade_metrics,
+                "quote_proxy_metrics": proxy_trade_metrics,
+                "decision": horizon_profitability["decision"],
+                "decision_reason": horizon_profitability["decision_reason"],
+                "sample_adequacy": horizon_profitability["sample_adequacy"],
+            }
         policy_real_metrics = _policy_trade_metrics(real_trades_path, allowed_horizons)
         policy_proxy_metrics = _policy_trade_metrics(proxy_trades_path, allowed_horizons)
         summary["cities"][city] = {
@@ -309,12 +360,13 @@ def main() -> None:
             "dataset_rows": dataset_rows,
             "dataset_path": str(dataset_path),
             "panel_path": str(panel_path),
-            "panel_summary": _panel_summary(panel_path),
+            "panel_summary": panel_summary,
             "allowed_horizons": allowed_horizons,
             "real_history_metrics": real_metrics,
             "quote_proxy_metrics": proxy_metrics,
             "policy_real_history_metrics": policy_real_metrics,
             "policy_quote_proxy_metrics": policy_proxy_metrics,
+            "horizons": horizons,
             "real_history_by_horizon": real_horizon,
             "quote_proxy_by_horizon": proxy_horizon,
             "horizon_delta_quote_proxy": horizon_delta,

@@ -28,6 +28,7 @@ from pmtmax.execution.guardrails import exposure_ok, forecast_fresh, spread_ok
 from pmtmax.execution.live_broker import LiveBroker
 from pmtmax.execution.opportunity_shadow import OpportunityShadowRunner, select_shadow_horizon
 from pmtmax.execution.paper_broker import PaperBroker
+from pmtmax.execution.revenue_gate import DEFAULT_PILOT_CONSTRAINTS, build_revenue_gate_report
 from pmtmax.execution.sizing import capped_kelly
 from pmtmax.execution.slippage import estimate_book_slippage
 from pmtmax.http import CachedHttpClient
@@ -51,7 +52,7 @@ from pmtmax.markets.repository import (
     load_market_snapshots,
     save_market_snapshots,
 )
-from pmtmax.modeling.champion import score_leaderboard, select_champion
+from pmtmax.modeling.champion import score_leaderboard, score_trading_leaderboard, select_champion, select_trading_champion
 from pmtmax.modeling.evaluation import brier_score, calibration_gap, crps_from_samples, gaussian_nll, mae, rmse
 from pmtmax.modeling.design_matrix import group_id_series
 from pmtmax.modeling.predict import predict_market
@@ -92,6 +93,9 @@ app = typer.Typer(help="Polymarket maximum temperature research and trading lab.
 console = Console()
 DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
 DEFAULT_MODEL_NAME = "champion"
+TRADING_MODEL_ALIAS = "trading_champion"
+PUBLIC_MODEL_ALIASES = {DEFAULT_MODEL_NAME, TRADING_MODEL_ALIAS}
+RECENT_CORE_CITIES = ("Seoul", "NYC", "London")
 
 
 def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
@@ -122,6 +126,14 @@ def _default_champion_metadata_path() -> Path:
     """Return the canonical champion metadata path."""
 
     return _default_artifacts_dir() / "champion.json"
+
+
+def _default_alias_metadata_path(alias_name: str) -> Path:
+    """Return the canonical metadata path for one public model alias."""
+
+    if alias_name == DEFAULT_MODEL_NAME:
+        return _default_champion_metadata_path()
+    return _default_artifacts_dir() / f"{alias_name}.json"
 
 
 def _default_model_path(model_name: str) -> Path:
@@ -156,13 +168,13 @@ def _effective_split_policy(
     return split_policy
 
 
-def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
-    """Load champion metadata or fail closed when unpublished."""
+def _load_alias_metadata(alias_name: str = DEFAULT_MODEL_NAME, path: Path | None = None) -> dict[str, object]:
+    """Load public alias metadata or fail closed when unpublished."""
 
-    metadata_path = path or _default_champion_metadata_path()
+    metadata_path = path or _default_alias_metadata_path(alias_name)
     if not metadata_path.exists():
         msg = (
-            f"Champion metadata does not exist: {metadata_path}. "
+            f"Model alias metadata does not exist: {metadata_path}. "
             "Run `uv run pmtmax benchmark-models` first."
         )
         raise typer.BadParameter(msg)
@@ -173,21 +185,27 @@ def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
     return payload
 
 
+def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
+    """Load the default champion metadata."""
+
+    return _load_alias_metadata(DEFAULT_MODEL_NAME, path)
+
+
 def _resolve_model_name_alias(model_name: str) -> str:
     """Resolve the public `champion` alias into a concrete trainable model name."""
 
-    if model_name != DEFAULT_MODEL_NAME:
+    if model_name not in PUBLIC_MODEL_ALIASES:
         return require_supported_model_name(model_name)
-    champion = _load_champion_metadata()
+    champion = _load_alias_metadata(model_name)
     return require_supported_model_name(str(champion["model_name"]))
 
 
 def _resolve_model_path(model_path: Path, model_name: str) -> tuple[Path, str]:
     """Resolve a CLI model path and public alias into a concrete artifact path/name."""
 
-    if model_name == DEFAULT_MODEL_NAME:
-        champion = _load_champion_metadata()
-        return Path(str(champion.get("alias_path", _default_model_path(DEFAULT_MODEL_NAME)))), str(champion["model_name"])
+    if model_name in PUBLIC_MODEL_ALIASES:
+        champion = _load_alias_metadata(model_name)
+        return Path(str(champion.get("alias_path", _default_model_path(model_name)))), str(champion["model_name"])
     resolved_name = require_supported_model_name(model_name)
     if model_path == _default_model_path(DEFAULT_MODEL_NAME):
         return _default_model_path(resolved_name), resolved_name
@@ -221,6 +239,20 @@ def _load_recent_horizon_policy(path: Path = DEFAULT_RECENT_HORIZON_POLICY_PATH)
         allowed_horizons = city_payload.get("allowed_horizons", [])
         result[str(city)] = [str(horizon) for horizon in allowed_horizons]
     return result
+
+
+def _resolve_recent_core_cities(
+    cities: list[str] | None,
+    *,
+    core_recent_only: bool,
+) -> list[str] | None:
+    """Apply the recent-core operating preset when requested."""
+
+    if not core_recent_only:
+        return cities
+    if cities is None:
+        return list(RECENT_CORE_CITIES)
+    return [city for city in cities if city in RECENT_CORE_CITIES]
 
 
 def _select_policy_candidate_horizon(spec: MarketSpec, *, now_utc: datetime) -> str | None:
@@ -2957,39 +2989,41 @@ def _write_leaderboard_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def _publish_champion_alias(
+def _publish_model_alias(
     *,
-    champion_name: str,
+    alias_name: str,
+    selected_model_name: str,
     frame: pd.DataFrame,
     artifacts_dir: Path,
     split_policy: Literal["market_day", "target_day"],
     seed: int,
     leaderboard_path: Path,
 ) -> dict[str, object]:
-    """Train and publish the active champion alias artifacts."""
+    """Train and publish one public model alias."""
 
     artifact = train_model(
-        champion_name,
+        selected_model_name,
         frame,
         artifacts_dir,
         split_policy=split_policy,
         seed=seed,
     )
     source_model_path = Path(artifact.path)
-    champion_path = _default_model_path(DEFAULT_MODEL_NAME)
-    champion_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_model_path, champion_path)
+    alias_path = _default_model_path(alias_name)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_model_path, alias_path)
 
     if artifact.calibration_path is None:
-        msg = f"Champion {champion_name} has no calibrator artifact and cannot be published."
+        msg = f"Alias {alias_name} for {selected_model_name} has no calibrator artifact and cannot be published."
         raise typer.BadParameter(msg)
-    champion_calibrator_path = champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")
-    shutil.copyfile(Path(artifact.calibration_path), champion_calibrator_path)
+    alias_calibrator_path = alias_path.with_name(f"{alias_path.stem}.calibrator.pkl")
+    shutil.copyfile(Path(artifact.calibration_path), alias_calibrator_path)
 
     metadata = {
-        "model_name": champion_name,
-        "alias_path": str(champion_path),
-        "alias_calibration_path": str(champion_calibrator_path),
+        "alias_name": alias_name,
+        "model_name": selected_model_name,
+        "alias_path": str(alias_path),
+        "alias_calibration_path": str(alias_calibrator_path),
         "source_model_path": str(source_model_path),
         "source_calibration_path": artifact.calibration_path,
         "split_policy": split_policy,
@@ -2998,7 +3032,7 @@ def _publish_champion_alias(
         "leaderboard_path": str(leaderboard_path),
         "published_at": datetime.now(tz=UTC).isoformat(),
     }
-    dump_json(_default_champion_metadata_path(), metadata)
+    dump_json(_default_alias_metadata_path(alias_name), metadata)
     return metadata
 
 
@@ -3128,6 +3162,7 @@ def benchmark_models(
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     publish_champion: bool = True,
+    publish_trading_champion: bool = True,
     leaderboard_output: Path = Path("artifacts/benchmarks/v2/leaderboard.json"),
     leaderboard_csv_output: Path = Path("artifacts/benchmarks/v2/leaderboard.csv"),
     summary_output: Path = Path("artifacts/benchmarks/v2/benchmark_summary.json"),
@@ -3187,16 +3222,32 @@ def benchmark_models(
             )
         )
 
-    leaderboard_frame = score_leaderboard(pd.DataFrame(rows))
-    champion_name = select_champion(leaderboard_frame)
+    results_frame = pd.DataFrame(rows)
+    leaderboard_frame = score_leaderboard(results_frame)
+    trading_scores = score_trading_leaderboard(results_frame)[["model_name", "trading_champion_score"]]
+    leaderboard_frame = leaderboard_frame.merge(trading_scores, on="model_name", how="left")
+    champion_name = select_champion(results_frame)
+    trading_champion_name = select_trading_champion(results_frame)
     leaderboard_rows = leaderboard_frame.to_dict(orient="records")
     dump_json(leaderboard_output, leaderboard_rows)
     _write_leaderboard_csv(leaderboard_csv_output, leaderboard_rows)
 
     champion_metadata: dict[str, object] | None = None
     if publish_champion:
-        champion_metadata = _publish_champion_alias(
-            champion_name=champion_name,
+        champion_metadata = _publish_model_alias(
+            alias_name=DEFAULT_MODEL_NAME,
+            selected_model_name=champion_name,
+            frame=frame,
+            artifacts_dir=artifacts_dir,
+            split_policy=split_policy,
+            seed=benchmark_seeds[0],
+            leaderboard_path=leaderboard_output,
+        )
+    trading_champion_metadata: dict[str, object] | None = None
+    if publish_trading_champion:
+        trading_champion_metadata = _publish_model_alias(
+            alias_name=TRADING_MODEL_ALIAS,
+            selected_model_name=trading_champion_name,
             frame=frame,
             artifacts_dir=artifacts_dir,
             split_policy=split_policy,
@@ -3215,10 +3266,78 @@ def benchmark_models(
         "champion_model_name": champion_name,
         "champion_published": publish_champion,
         "champion_metadata": champion_metadata,
+        "trading_champion_model_name": trading_champion_name,
+        "trading_champion_published": publish_trading_champion,
+        "trading_champion_metadata": trading_champion_metadata,
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     dump_json(summary_output, summary)
     console.print_json(data=summary)
+
+
+def _load_optional_json(path: Path) -> dict[str, object] | None:
+    """Load a JSON object when present, otherwise return None."""
+
+    if not path.exists():
+        return None
+    payload = load_json(path)
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+@app.command("revenue-gate-report")
+def revenue_gate_report(
+    benchmark_summary_path: Path = typer.Option(
+        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        help="Recent-core benchmark summary JSON",
+    ),
+    opportunity_summary_path: Path = typer.Option(
+        Path("artifacts/signals/v2/shadow_summary.json"),
+        help="Opportunity shadow summary JSON",
+    ),
+    open_phase_summary_path: Path = typer.Option(
+        Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
+        help="Open-phase shadow summary JSON",
+    ),
+    output: Path = typer.Option(
+        Path("artifacts/signals/v2/revenue_gate_summary.json"),
+        help="Combined revenue gate JSON output",
+    ),
+    trading_alias_name: str = typer.Option(
+        TRADING_MODEL_ALIAS,
+        help="Required model alias for live pilot promotion",
+    ),
+) -> None:
+    """Combine recent-core benchmark and shadow validations into one revenue gate report."""
+
+    benchmark_summary_path = _resolve_option_value(
+        benchmark_summary_path,
+        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+    )
+    opportunity_summary_path = _resolve_option_value(
+        opportunity_summary_path,
+        Path("artifacts/signals/v2/shadow_summary.json"),
+    )
+    open_phase_summary_path = _resolve_option_value(
+        open_phase_summary_path,
+        Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
+    )
+    output = _resolve_option_value(output, Path("artifacts/signals/v2/revenue_gate_summary.json"))
+    trading_alias_name = _resolve_option_value(trading_alias_name, TRADING_MODEL_ALIAS)
+    benchmark_summary = _load_optional_json(benchmark_summary_path)
+    opportunity_summary = _load_optional_json(opportunity_summary_path)
+    open_phase_summary = _load_optional_json(open_phase_summary_path)
+    report = build_revenue_gate_report(
+        benchmark_summary=benchmark_summary,
+        opportunity_summary=opportunity_summary,
+        open_phase_summary=open_phase_summary,
+        trading_alias_name=trading_alias_name,
+        pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    dump_json(output, report)
+    console.print_json(data=report)
 
 
 @app.command("paper-trader")
@@ -3227,12 +3346,21 @@ def paper_trader(
     model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     horizon: str = "policy",
     bankroll: float = 10_000.0,
     min_edge: float | None = None,
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
 
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
+    markets_path = _resolve_option_value(markets_path)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    horizon = _resolve_option_value(horizon, "policy")
+    bankroll = float(_resolve_option_value(bankroll, 10_000.0))
+    min_edge = _resolve_option_value(min_edge)
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     broker = PaperBroker(bankroll=bankroll)
@@ -3246,6 +3374,7 @@ def paper_trader(
         fixture_dir=None,
         models=config.weather.models or None,
     )
+    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
     horizon_policy = _load_recent_horizon_policy()
@@ -3360,12 +3489,21 @@ def live_trader(
     model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     horizon: str = "policy",
     dry_run: bool = True,
     post_orders: bool = False,
 ) -> None:
     """Run live preflight and signed-order previews, with optional posting."""
 
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
+    markets_path = _resolve_option_value(markets_path)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    horizon = _resolve_option_value(horizon, "policy")
+    dry_run = bool(_resolve_option_value(dry_run, True))
+    post_orders = bool(_resolve_option_value(post_orders, False))
     config, env, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     broker = LiveBroker(env)
@@ -3381,6 +3519,7 @@ def live_trader(
         fixture_dir=None,
         models=config.weather.models or None,
     )
+    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     horizon_policy = _load_recent_horizon_policy()
 
@@ -3894,6 +4033,7 @@ def opportunity_report(
     model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
@@ -3904,6 +4044,7 @@ def opportunity_report(
     model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     markets_path = _resolve_option_value(markets_path)
     horizon = _resolve_option_value(horizon, "policy")
     min_edge = _resolve_option_value(min_edge)
@@ -3921,6 +4062,7 @@ def opportunity_report(
         fixture_dir=None,
         models=config.weather.models or None,
     )
+    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
     horizon_policy = _load_recent_horizon_policy()
@@ -3993,6 +4135,7 @@ def opportunity_shadow(
     model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between shadow cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
@@ -4006,6 +4149,7 @@ def opportunity_shadow(
     model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
@@ -4036,6 +4180,7 @@ def opportunity_shadow(
     effective_state_path = state_path or _default_signal_output(shadow_config.state_path.name)
     horizon_policy = _load_recent_horizon_policy()
     edge_threshold = config.backtest.default_edge_threshold
+    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
 
     def _snapshot_fetcher() -> list[MarketSnapshot]:
         return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
@@ -4106,6 +4251,7 @@ def open_phase_shadow(
     model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between scan cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
@@ -4122,6 +4268,7 @@ def open_phase_shadow(
     model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
@@ -4148,6 +4295,7 @@ def open_phase_shadow(
     effective_interval = interval or config.opportunity_shadow.interval_seconds
     effective_max_cycles = config.opportunity_shadow.max_cycles if max_cycles is None else max_cycles
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
 
     def _snapshot_fetcher() -> list[MarketSnapshot]:
         return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)

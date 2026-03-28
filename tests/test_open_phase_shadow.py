@@ -139,6 +139,9 @@ def test_open_phase_shadow_runner_writes_latest_history_summary_and_state(tmp_pa
     assert payload["tradable_count"] == 1
     assert payload["reason_counts"]["raw_gap_non_positive"] == 1
     assert payload["median_open_phase_age_hours"] == 1.5
+    assert payload["by_horizon"]["market_open"]["markets_evaluated"] == 2
+    assert payload["by_city_horizon"]["Seoul:market_open"]["tradable_count"] == 1
+    assert payload["gate_decision"] == "INCONCLUSIVE"
 
 
 def test_summarize_open_phase_history_counts_positive_raw_and_edge(tmp_path: Path) -> None:
@@ -182,3 +185,5 @@ def test_summarize_open_phase_history_counts_positive_raw_and_edge(tmp_path: Pat
     assert summary["after_cost_edge_positive_count"] == 1
     assert summary["tradable_count"] == 1
     assert summary["median_open_phase_age_hours"] == 1.5
+    assert summary["by_horizon"]["market_open"]["gate_decision"] == "INCONCLUSIVE"
+    assert summary["gate_decision"] == "INCONCLUSIVE"
