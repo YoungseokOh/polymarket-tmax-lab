@@ -60,6 +60,7 @@ def build_revenue_gate_report(
     open_phase_summary: Mapping[str, Any] | None,
     trading_alias_name: str = "trading_champion",
     pilot_constraints: Mapping[str, Any] | None = None,
+    market_scope: str = "recent_core",
 ) -> dict[str, object]:
     """Build the combined revenue gate report used before live pilot promotion."""
 
@@ -103,6 +104,7 @@ def build_revenue_gate_report(
         constraints.update(dict(pilot_constraints))
 
     return {
+        "market_scope": market_scope,
         "decision": decision,
         "decision_reason": decision_reason,
         "benchmark_gate": {

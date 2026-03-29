@@ -123,6 +123,25 @@ uv run pmtmax open-phase-shadow --max-cycles 1
 opened recently. It defaults to `--horizon market_open` rather than the near-term
 policy horizon.
 
+If you want to search for hope outside the recent-core trio and rank fresh
+Wunderground-family listings by open-phase age, target-day distance, volume, and
+after-cost edge, run:
+
+```bash
+uv run pmtmax hope-hunt-report --model-name trading_champion
+uv run pmtmax hope-hunt-daemon --model-name trading_champion --max-cycles 1
+```
+
+`hope-hunt-report` and `hope-hunt-daemon` default to
+`--market-scope supported_wu_open_phase`, which keeps only supported
+Wunderground-family `research_public` cities and writes ranked outputs to
+`artifacts/signals/v2/hope_hunt_latest.json`,
+`artifacts/signals/v2/hope_hunt_history.jsonl`, and
+`artifacts/signals/v2/hope_hunt_summary.json`. `opportunity-report`,
+`opportunity-shadow`, and `open-phase-shadow` also accept
+`--market-scope supported_wu_open_phase` when you want the same filtered market
+universe without the ranking wrapper.
+
 To combine recent-core benchmark results and live-path shadow validation into one
 promotion decision, run:
 
@@ -425,6 +444,9 @@ also default to the checked-in recent horizon policy. The current recommended
 set is `Seoul=market_open+previous_evening+morning_of`,
 `NYC=market_open+previous_evening`, and `London=previous_evening`.
 Paper/live/opportunity paths use the v2 forecast contract, write outputs under `artifacts/signals/v2/`, and reject uncalibrated forecasts as `missing_calibrator`. For revenue-first operation, the preferred loop is `benchmark-models -> paper/opportunity/open-phase shadow -> revenue-gate-report`.
+If recent-core remains `NO_GO`, the exploratory follow-up loop is
+`hope-hunt-report -> hope-hunt-daemon` on `supported_wu_open_phase` rather than
+loosening the live gate.
 
 ## Opportunity Workflow
 ```bash
@@ -467,7 +489,7 @@ use the open-phase watcher instead:
 
 ```bash
 uv run pmtmax open-phase-shadow \
-  --core-recent-only \
+  --market-scope supported_wu_open_phase \
   --model-name trading_champion \
   --open-window-hours 24 \
   --interval 60
@@ -478,6 +500,17 @@ and `artifacts/signals/v2/open_phase_shadow_summary.json`. The watcher keys off
 `componentMarkets[*].acceptingOrdersTimestamp` when available and falls back to
 market creation/deploy timestamps, so it can test whether spreads or raw gaps
 look different immediately after listing.
+
+For a ranked, no-order search loop over the same market family, use:
+
+```bash
+uv run pmtmax hope-hunt-report --model-name trading_champion
+uv run pmtmax hope-hunt-daemon --model-name trading_champion --interval 300
+```
+
+This keeps a scope-limited candidate board for supported WU-family active
+markets and marks alerts only when `after_cost_edge > 0` or a fresh listing is
+blocked solely by spread width.
 
 ## Dry-Run Live Workflow
 ```bash

@@ -12,6 +12,7 @@ from pmtmax.cli.main import (
     _bootstrap_snapshots,
     _collection_preflight_report,
     _evaluate_market_signal,
+    _load_alias_metadata,
     _load_snapshots,
     _quote_proxy_prices,
     _resolve_opportunity_shadow_horizon,
@@ -73,6 +74,44 @@ def test_bootstrap_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> 
 
     with pytest.raises(FileNotFoundError, match="Market snapshot file does not exist"):
         _bootstrap_snapshots(markets_path=missing, cities=None)
+
+
+def test_load_alias_metadata_repairs_missing_alias_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / "det2prob_nn.pkl").write_bytes(b"model")
+    (models_dir / "det2prob_nn.calibrator.pkl").write_bytes(b"calibrator")
+    metadata_path = models_dir / "trading_champion.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "alias_name": "trading_champion",
+                "model_name": "det2prob_nn",
+                "alias_path": "/tmp/broken/trading_champion.pkl",
+                "alias_calibration_path": "/tmp/broken/trading_champion.calibrator.pkl",
+                "source_model_path": "/tmp/broken/det2prob_nn.pkl",
+                "source_calibration_path": "/tmp/broken/det2prob_nn.calibrator.pkl",
+                "contract_version": "v2",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_model_path",
+        lambda model_name: models_dir / f"{model_name}.pkl",
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_alias_metadata_path",
+        lambda alias_name: models_dir / f"{alias_name}.json",
+    )
+
+    payload = _load_alias_metadata("trading_champion")
+
+    assert payload["alias_path"] == str(models_dir / "trading_champion.pkl")
+    assert payload["alias_calibration_path"] == str(models_dir / "trading_champion.calibrator.pkl")
+    assert payload["source_model_path"] == str(models_dir / "det2prob_nn.pkl")
+    assert payload["source_calibration_path"] == str(models_dir / "det2prob_nn.calibrator.pkl")
+    assert Path(payload["alias_path"]).exists()
+    assert Path(payload["alias_calibration_path"]).exists()
 
 
 def test_collection_preflight_defaults_to_public_archive_for_wu_markets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,7 +358,7 @@ def test_backtest_real_history_writes_separate_artifacts(
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_real_history_backtest",
-        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, split_policy, seed: (
+        lambda frame, panel, *, model_name, variant=None, artifacts_dir, flat_stake, default_fee_bps, split_policy, seed, min_train_size=None: (
             {"mae": 1.0, "rmse": 1.0, "nll": 1.0, "avg_brier": 0.1, "avg_crps": 0.2, "num_trades": 1.0, "pnl": 0.5, "hit_rate": 1.0, "avg_edge": 0.1},
             [{"market_id": "101025", "pricing_source": "real_history"}],
         ),
@@ -391,7 +430,7 @@ def test_backtest_quote_proxy_writes_separate_artifacts(
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_quote_proxy_backtest",
-        lambda frame, panel, *, model_name, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread, split_policy, seed: (
+        lambda frame, panel, *, model_name, variant=None, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread, split_policy, seed, min_train_size=None: (
             {
                 "mae": 1.0,
                 "rmse": 1.0,

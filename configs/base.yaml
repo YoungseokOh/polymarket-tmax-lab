@@ -110,6 +110,14 @@ opportunity_shadow:
   history_output_path: artifacts/opportunity_shadow.jsonl
   summary_output_path: artifacts/opportunity_shadow_summary.json
 
+hope_hunt:
+  interval_seconds: 300
+  max_cycles: 0
+  state_path: artifacts/signals/v2/hope_hunt_state.json
+  latest_output_path: artifacts/signals/v2/hope_hunt_latest.json
+  history_output_path: artifacts/signals/v2/hope_hunt_history.jsonl
+  summary_output_path: artifacts/signals/v2/hope_hunt_summary.json
+
 firebase:
   enabled: false
   bucket_name: ""

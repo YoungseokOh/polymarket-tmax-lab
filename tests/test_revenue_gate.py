@@ -61,5 +61,6 @@ def test_build_revenue_gate_report_requires_benchmark_and_one_live_path() -> Non
     assert report["decision"] == "GO"
     assert report["decision_reason"] == "benchmark_go_with_live_path_confirmation"
     assert report["eligible_for_live_pilot"] is True
+    assert report["market_scope"] == "recent_core"
     assert report["required_model_alias"] == "trading_champion"
     assert report["pilot_constraints"]["bankroll"] == 500.0

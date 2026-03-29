@@ -52,9 +52,23 @@ from pmtmax.markets.repository import (
     load_market_snapshots,
     save_market_snapshots,
 )
-from pmtmax.modeling.champion import score_leaderboard, score_trading_leaderboard, select_champion, select_trading_champion
-from pmtmax.modeling.evaluation import brier_score, calibration_gap, crps_from_samples, gaussian_nll, mae, rmse
+from pmtmax.markets.station_registry import lookup_station
+from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
+from pmtmax.modeling.champion import (
+    score_leaderboard,
+    score_trading_leaderboard,
+    select_champion,
+    select_trading_champion,
+)
 from pmtmax.modeling.design_matrix import group_id_series
+from pmtmax.modeling.evaluation import (
+    brier_score,
+    calibration_gap,
+    crps_from_samples,
+    gaussian_nll,
+    mae,
+    rmse,
+)
 from pmtmax.modeling.predict import predict_market
 from pmtmax.modeling.train import (
     require_supported_model_name,
@@ -63,7 +77,13 @@ from pmtmax.modeling.train import (
     supported_model_names,
     train_model,
 )
-from pmtmax.monitoring.open_phase import OpenPhaseShadowRunner, select_open_phase_candidates
+from pmtmax.monitoring.hope_hunt import HopeHuntRunner
+from pmtmax.monitoring.open_phase import (
+    OpenPhaseShadowRunner,
+    extract_open_phase_metadata,
+    open_phase_age_bucket,
+    select_open_phase_candidates,
+)
 from pmtmax.storage.duckdb_store import DuckDBStore
 from pmtmax.storage.firebase_mirror import FirebaseMirror
 from pmtmax.storage.lab_bootstrap import (
@@ -77,6 +97,7 @@ from pmtmax.storage.lab_bootstrap import (
 from pmtmax.storage.parquet_store import ParquetStore
 from pmtmax.storage.schemas import (
     BookSnapshot,
+    HopeHuntObservation,
     LegacyRunInventory,
     MarketSnapshot,
     OpenPhaseObservation,
@@ -96,6 +117,7 @@ DEFAULT_MODEL_NAME = "champion"
 TRADING_MODEL_ALIAS = "trading_champion"
 PUBLIC_MODEL_ALIASES = {DEFAULT_MODEL_NAME, TRADING_MODEL_ALIAS}
 RECENT_CORE_CITIES = ("Seoul", "NYC", "London")
+MARKET_SCOPE_CHOICES = ("default", "recent_core", "supported_wu_open_phase")
 
 
 def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
@@ -182,7 +204,71 @@ def _load_alias_metadata(alias_name: str = DEFAULT_MODEL_NAME, path: Path | None
     if not isinstance(payload, dict) or "model_name" not in payload:
         msg = f"Champion metadata is malformed: {metadata_path}"
         raise typer.BadParameter(msg)
-    return payload
+    return _repair_alias_metadata(alias_name, payload, metadata_path=metadata_path)
+
+
+def _repair_alias_metadata(
+    alias_name: str,
+    metadata: dict[str, object],
+    *,
+    metadata_path: Path | None = None,
+) -> dict[str, object]:
+    """Repair broken alias metadata when local canonical artifacts already exist."""
+
+    alias_path = _default_model_path(alias_name)
+    alias_calibration_path = alias_path.with_name(f"{alias_path.stem}.calibrator.pkl")
+    model_name = require_supported_model_name(str(metadata["model_name"]))
+
+    def _candidate_path(*keys: str, fallback: Path | None = None) -> Path | None:
+        for key in keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                path = Path(value)
+                if path.exists():
+                    return path
+        if fallback is not None and fallback.exists():
+            return fallback
+        return None
+
+    source_model_path = _candidate_path("alias_path", "source_model_path", fallback=_default_model_path(model_name))
+    source_calibrator_path = _candidate_path(
+        "alias_calibration_path",
+        "source_calibration_path",
+        fallback=_default_model_path(model_name).with_name(f"{model_name}.calibrator.pkl"),
+    )
+    repaired = dict(metadata)
+    repaired_any = False
+
+    if not alias_path.exists() and source_model_path is not None:
+        alias_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_model_path.resolve() != alias_path.resolve():
+            shutil.copyfile(source_model_path, alias_path)
+        repaired_any = True
+    if not alias_calibration_path.exists() and source_calibrator_path is not None:
+        alias_calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_calibrator_path.resolve() != alias_calibration_path.resolve():
+            shutil.copyfile(source_calibrator_path, alias_calibration_path)
+        repaired_any = True
+
+    if alias_path.exists():
+        if repaired.get("alias_path") != str(alias_path):
+            repaired["alias_path"] = str(alias_path)
+            repaired_any = True
+    if alias_calibration_path.exists():
+        if repaired.get("alias_calibration_path") != str(alias_calibration_path):
+            repaired["alias_calibration_path"] = str(alias_calibration_path)
+            repaired_any = True
+    if source_model_path is not None and repaired.get("source_model_path") != str(source_model_path):
+        repaired["source_model_path"] = str(source_model_path)
+        repaired_any = True
+    if source_calibrator_path is not None and repaired.get("source_calibration_path") != str(source_calibrator_path):
+        repaired["source_calibration_path"] = str(source_calibrator_path)
+        repaired_any = True
+
+    final_metadata_path = metadata_path or _default_alias_metadata_path(alias_name)
+    if repaired_any:
+        dump_json(final_metadata_path, repaired)
+    return repaired
 
 
 def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
@@ -253,6 +339,120 @@ def _resolve_recent_core_cities(
     if cities is None:
         return list(RECENT_CORE_CITIES)
     return [city for city in cities if city in RECENT_CORE_CITIES]
+
+
+def _supported_wu_open_phase_cities() -> list[str]:
+    """Return supported Wunderground-family cities eligible for hope-hunt scans."""
+
+    cities: list[str] = []
+    for city in catalog_supported_cities():
+        definition = lookup_station(city)
+        if definition is None:
+            continue
+        if "wunderground" not in definition.official_source_name.lower():
+            continue
+        if definition.truth_track != "research_public":
+            continue
+        cities.append(definition.city)
+    return sorted(set(cities))
+
+
+def _resolve_market_scope(
+    market_scope: str | None,
+    *,
+    core_recent_only: bool,
+) -> str:
+    """Normalize supported market-scope presets."""
+
+    if core_recent_only:
+        return "recent_core"
+    scope = "default" if market_scope in (None, "") else str(market_scope)
+    if scope not in MARKET_SCOPE_CHOICES:
+        msg = f"Unsupported market scope: {scope}. Choose from {', '.join(MARKET_SCOPE_CHOICES)}."
+        raise typer.BadParameter(msg)
+    return scope
+
+
+def _resolve_scoped_cities(
+    cities: list[str] | None,
+    *,
+    market_scope: str,
+) -> list[str] | None:
+    """Apply one market-scope preset to a city list."""
+
+    if market_scope == "recent_core":
+        return _resolve_recent_core_cities(cities, core_recent_only=True)
+    if market_scope == "supported_wu_open_phase":
+        supported = _supported_wu_open_phase_cities()
+        if cities is None:
+            return supported
+        wanted = {city.lower() for city in cities}
+        return [city for city in supported if city.lower() in wanted]
+    return cities
+
+
+def _snapshot_matches_market_scope(snapshot: MarketSnapshot, *, market_scope: str) -> bool:
+    """Return whether one parsed market matches the requested operating scope."""
+
+    if market_scope == "default":
+        return True
+    spec = snapshot.spec
+    if spec is None:
+        return False
+    if market_scope == "recent_core":
+        return spec.city in RECENT_CORE_CITIES
+    if market_scope == "supported_wu_open_phase":
+        definition = lookup_station(spec.city)
+        if definition is None:
+            return False
+        return (
+            spec.adapter_key() == "wunderground"
+            and spec.truth_track == "research_public"
+            and "wunderground" in definition.official_source_name.lower()
+            and definition.truth_track == "research_public"
+        )
+    msg = f"Unsupported market scope: {market_scope}"
+    raise ValueError(msg)
+
+
+def _safe_float(value: object) -> float | None:
+    """Parse a best-effort float from raw market payload values."""
+
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _market_volume_from_snapshot(snapshot: MarketSnapshot) -> float | None:
+    """Return one aggregate volume estimate for ranking hope-hunt candidates."""
+
+    market = snapshot.market
+    if (top_level_volume := _safe_float(market.get("volumeNum"))) is not None:
+        return top_level_volume
+    if (top_level_volume := _safe_float(market.get("volume"))) is not None:
+        return top_level_volume
+    component_volumes = [
+        value
+        for component in market.get("componentMarkets", [])
+        if isinstance(component, dict)
+        for value in (_safe_float(component.get("volumeNum")) or _safe_float(component.get("volume")),)
+        if value is not None
+    ]
+    if component_volumes:
+        return float(sum(component_volumes))
+    return None
+
+
+def _target_day_distance(spec: MarketSpec, *, observed_at: datetime) -> int:
+    """Return the local-day distance between observation time and target date."""
+
+    local_today = observed_at.astimezone(ZoneInfo(spec.timezone)).date()
+    return (spec.target_local_date - local_today).days
 
 
 def _select_policy_candidate_horizon(spec: MarketSpec, *, now_utc: datetime) -> str | None:
@@ -396,6 +596,28 @@ def _load_snapshots(
         return bundled_market_snapshots(cities)
     finally:
         http.close()
+
+
+def _load_scoped_snapshots(
+    *,
+    markets_path: Path | None,
+    cities: list[str] | None = None,
+    market_scope: str = "default",
+    active: bool | None = None,
+    closed: bool | None = None,
+) -> list[MarketSnapshot]:
+    """Load snapshots and apply one market-scope preset after parsing."""
+
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_snapshots(
+        markets_path=markets_path,
+        cities=scoped_cities,
+        active=active,
+        closed=closed,
+    )
+    if market_scope == "default":
+        return snapshots
+    return [snapshot for snapshot in snapshots if _snapshot_matches_market_scope(snapshot, market_scope=market_scope)]
 
 
 def _bootstrap_snapshots(*, markets_path: Path | None, cities: list[str] | None) -> list[MarketSnapshot]:
@@ -988,6 +1210,277 @@ def _serialize_open_phase_observation(observation: OpenPhaseObservation) -> dict
     if observation.open_phase_age_hours is not None:
         row["open_phase_age_hours"] = round(observation.open_phase_age_hours, 4)
     return row
+
+
+def _hope_hunt_priority_bucket(
+    *,
+    spec: MarketSpec,
+    open_phase_age_hours: float | None,
+    reason: str,
+) -> str:
+    """Bucket a hope-hunt observation for reporting and ranking."""
+
+    if open_phase_age_hours is None:
+        return "unknown_open_time"
+    if open_phase_age_hours <= 24:
+        if reason == "after_cost_positive_but_spread_too_wide":
+            return "fresh_listing_spread_blocked"
+        return "fresh_listing"
+    return "mature_core" if spec.research_priority == "core" else "mature_expansion"
+
+
+def _hope_hunt_priority_score(
+    *,
+    open_phase_age_hours: float | None,
+    target_day_distance: int,
+    market_volume: float | None,
+    reason: str,
+    raw_gap: float | None,
+    after_cost_edge: float | None,
+) -> float:
+    """Score one hope-hunt candidate using open-phase-first heuristics."""
+
+    score = 0.0
+    if open_phase_age_hours is None:
+        score -= 8.0
+    elif open_phase_age_hours <= 6:
+        score += 40.0
+    elif open_phase_age_hours <= 24:
+        score += 32.0
+    elif open_phase_age_hours <= 48:
+        score += 20.0
+    else:
+        score += 8.0
+
+    if target_day_distance >= 2:
+        score += 20.0
+    elif target_day_distance == 1:
+        score += 10.0
+    elif target_day_distance == 0:
+        score += 4.0
+
+    if market_volume is None:
+        score += 2.0
+    elif market_volume <= 500:
+        score += 12.0
+    elif market_volume <= 2_000:
+        score += 9.0
+    elif market_volume <= 10_000:
+        score += 4.0
+    else:
+        score -= 2.0
+
+    if reason == "tradable":
+        score += 18.0
+    elif reason == "after_cost_positive_but_spread_too_wide":
+        score += 14.0
+    elif reason != "raw_gap_non_positive":
+        score += 6.0
+
+    if raw_gap is not None:
+        score += max(min(raw_gap * 200.0, 10.0), -10.0)
+    if after_cost_edge is not None:
+        score += max(min(after_cost_edge * 400.0, 20.0), -20.0)
+    return round(score, 6)
+
+
+def _hope_hunt_candidate_alert(
+    *,
+    reason: str,
+    open_phase_age_hours: float | None,
+    after_cost_edge: float | None,
+) -> bool:
+    """Return whether one observation deserves an explicit hope alert."""
+
+    if after_cost_edge is not None and after_cost_edge > 0:
+        return True
+    return (
+        reason == "after_cost_positive_but_spread_too_wide"
+        and open_phase_age_hours is not None
+        and open_phase_age_hours <= 24.0
+    )
+
+
+def _hope_hunt_observation_from_opportunity(
+    snapshot: MarketSnapshot,
+    observation: OpportunityObservation,
+    *,
+    market_created_at: datetime | None,
+    market_deploying_at: datetime | None,
+    market_accepting_orders_at: datetime | None,
+    market_opened_at: datetime | None,
+    open_phase_age_hours: float | None,
+    observed_at: datetime,
+) -> HopeHuntObservation:
+    """Attach open-phase metadata and ranking features to an opportunity observation."""
+
+    spec = snapshot.spec
+    if spec is None:
+        msg = "Snapshot is missing spec"
+        raise ValueError(msg)
+    target_day_distance = _target_day_distance(spec, observed_at=observed_at)
+    market_volume = _market_volume_from_snapshot(snapshot)
+    priority_bucket = _hope_hunt_priority_bucket(
+        spec=spec,
+        open_phase_age_hours=open_phase_age_hours,
+        reason=observation.reason,
+    )
+    priority_score = _hope_hunt_priority_score(
+        open_phase_age_hours=open_phase_age_hours,
+        target_day_distance=target_day_distance,
+        market_volume=market_volume,
+        reason=observation.reason,
+        raw_gap=observation.raw_gap,
+        after_cost_edge=observation.after_cost_edge,
+    )
+    payload = observation.model_dump(mode="python")
+    payload.update(
+        {
+            "market_created_at": market_created_at,
+            "market_deploying_at": market_deploying_at,
+            "market_accepting_orders_at": market_accepting_orders_at,
+            "market_opened_at": market_opened_at,
+            "open_phase_age_hours": open_phase_age_hours,
+            "open_phase_age_bucket": open_phase_age_bucket(open_phase_age_hours),
+            "target_day_distance": target_day_distance,
+            "market_volume": market_volume,
+            "priority_bucket": priority_bucket,
+            "priority_score": priority_score,
+            "candidate_alert": _hope_hunt_candidate_alert(
+                reason=observation.reason,
+                open_phase_age_hours=open_phase_age_hours,
+                after_cost_edge=observation.after_cost_edge,
+            ),
+        }
+    )
+    return HopeHuntObservation.model_validate(payload)
+
+
+def _serialize_hope_hunt_observation(observation: HopeHuntObservation) -> dict[str, object]:
+    """Normalize one hope-hunt observation for CLI JSON outputs."""
+
+    row = observation.model_dump(mode="json")
+    row["target_local_date"] = observation.target_local_date.isoformat()
+    if observation.after_cost_edge is not None:
+        row["edge"] = round(observation.after_cost_edge, 6)
+    if observation.visible_liquidity is not None:
+        row["liquidity"] = round(observation.visible_liquidity, 6)
+    if observation.best_ask is not None:
+        row["executable_price"] = round(observation.best_ask, 6)
+    if observation.open_phase_age_hours is not None:
+        row["open_phase_age_hours"] = round(observation.open_phase_age_hours, 4)
+    if observation.market_volume is not None:
+        row["market_volume"] = round(observation.market_volume, 4)
+    if observation.priority_score is not None:
+        row["priority_score"] = round(observation.priority_score, 6)
+    return row
+
+
+def _build_hope_hunt_runner(
+    *,
+    model_path: Path,
+    model_name: str,
+    cities: list[str] | None,
+    market_scope: str,
+    markets_path: Path | None,
+    interval_seconds: int,
+    max_cycles: int,
+    output: Path,
+    latest_output: Path,
+    summary_output: Path,
+    state_path: Path,
+    horizon: str,
+    edge_threshold: float | None,
+) -> tuple[HopeHuntRunner, CachedHttpClient]:
+    """Construct a configured hope-hunt runner plus its shared HTTP client."""
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    effective_edge_threshold = edge_threshold if edge_threshold is not None else config.backtest.default_edge_threshold
+
+    def _snapshot_fetcher() -> list[MarketSnapshot]:
+        return _load_scoped_snapshots(
+            markets_path=markets_path,
+            cities=scoped_cities,
+            market_scope=market_scope,
+            active=True,
+            closed=False,
+        )
+
+    def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[HopeHuntObservation]:
+        observations: list[HopeHuntObservation] = []
+        for snapshot in snapshots:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            if _target_day_distance(spec, observed_at=observed_at) < 0:
+                continue
+            metadata = extract_open_phase_metadata(snapshot, observed_at=observed_at)
+            observation = _evaluate_opportunity_snapshot(
+                snapshot,
+                builder=builder,
+                clob=clob,
+                model_path=model_path,
+                model_name=model_name,
+                config=config,
+                observed_at=observed_at,
+                decision_horizon=horizon,
+                edge_threshold=effective_edge_threshold,
+            )
+            if observation is None:
+                continue
+            observations.append(
+                _hope_hunt_observation_from_opportunity(
+                    snapshot,
+                    observation,
+                    market_created_at=(
+                        metadata["market_created_at"] if isinstance(metadata["market_created_at"], datetime) else None
+                    ),
+                    market_deploying_at=(
+                        metadata["market_deploying_at"]
+                        if isinstance(metadata["market_deploying_at"], datetime)
+                        else None
+                    ),
+                    market_accepting_orders_at=(
+                        metadata["market_accepting_orders_at"]
+                        if isinstance(metadata["market_accepting_orders_at"], datetime)
+                        else None
+                    ),
+                    market_opened_at=(
+                        metadata["market_opened_at"] if isinstance(metadata["market_opened_at"], datetime) else None
+                    ),
+                    open_phase_age_hours=(
+                        float(metadata["open_phase_age_hours"])
+                        if isinstance(metadata["open_phase_age_hours"], (int, float))
+                        else None
+                    ),
+                    observed_at=observed_at,
+                )
+            )
+        return observations
+
+    runner = HopeHuntRunner(
+        config=config,
+        interval_seconds=interval_seconds,
+        max_cycles=max_cycles,
+        state_path=state_path,
+        latest_output_path=latest_output,
+        history_output_path=output,
+        summary_output_path=summary_output,
+        snapshot_fetcher=_snapshot_fetcher,
+        evaluator=_evaluator,
+    )
+    return runner, http
 
 
 def _summarize_backtest_metrics(
@@ -3308,6 +3801,10 @@ def revenue_gate_report(
         TRADING_MODEL_ALIAS,
         help="Required model alias for live pilot promotion",
     ),
+    market_scope: str = typer.Option(
+        "recent_core",
+        help="Market scope: recent_core or supported_wu_open_phase",
+    ),
 ) -> None:
     """Combine recent-core benchmark and shadow validations into one revenue gate report."""
 
@@ -3325,6 +3822,11 @@ def revenue_gate_report(
     )
     output = _resolve_option_value(output, Path("artifacts/signals/v2/revenue_gate_summary.json"))
     trading_alias_name = _resolve_option_value(trading_alias_name, TRADING_MODEL_ALIAS)
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "recent_core"), core_recent_only=False)
+    if market_scope == "supported_wu_open_phase" and open_phase_summary_path == Path(
+        "artifacts/signals/v2/open_phase_shadow_summary.json"
+    ):
+        open_phase_summary_path = _default_signal_output("hope_hunt_summary.json")
     benchmark_summary = _load_optional_json(benchmark_summary_path)
     opportunity_summary = _load_optional_json(opportunity_summary_path)
     open_phase_summary = _load_optional_json(open_phase_summary_path)
@@ -3334,6 +3836,7 @@ def revenue_gate_report(
         open_phase_summary=open_phase_summary,
         trading_alias_name=trading_alias_name,
         pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
+        market_scope=market_scope,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     dump_json(output, report)
@@ -4034,6 +4537,7 @@ def opportunity_report(
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
@@ -4045,6 +4549,7 @@ def opportunity_report(
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     markets_path = _resolve_option_value(markets_path)
     horizon = _resolve_option_value(horizon, "policy")
     min_edge = _resolve_option_value(min_edge)
@@ -4062,8 +4567,14 @@ def opportunity_report(
         fixture_dir=None,
         models=config.weather.models or None,
     )
-    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
-    snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_scoped_snapshots(
+        markets_path=markets_path,
+        cities=cities,
+        market_scope=market_scope,
+        active=True,
+        closed=False,
+    )
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
     horizon_policy = _load_recent_horizon_policy()
 
@@ -4136,6 +4647,7 @@ def opportunity_shadow(
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between shadow cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
@@ -4150,6 +4662,7 @@ def opportunity_shadow(
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
@@ -4180,10 +4693,16 @@ def opportunity_shadow(
     effective_state_path = state_path or _default_signal_output(shadow_config.state_path.name)
     horizon_policy = _load_recent_horizon_policy()
     edge_threshold = config.backtest.default_edge_threshold
-    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
+    cities = _resolve_scoped_cities(cities, market_scope=market_scope)
 
     def _snapshot_fetcher() -> list[MarketSnapshot]:
-        return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+        return _load_scoped_snapshots(
+            markets_path=markets_path,
+            cities=cities,
+            market_scope=market_scope,
+            active=True,
+            closed=False,
+        )
 
     def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[OpportunityObservation]:
         observations: list[OpportunityObservation] = []
@@ -4252,6 +4771,7 @@ def open_phase_shadow(
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     interval: int | None = typer.Option(None, help="Seconds between scan cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
@@ -4269,6 +4789,7 @@ def open_phase_shadow(
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     markets_path = _resolve_option_value(markets_path)
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
@@ -4295,10 +4816,16 @@ def open_phase_shadow(
     effective_interval = interval or config.opportunity_shadow.interval_seconds
     effective_max_cycles = config.opportunity_shadow.max_cycles if max_cycles is None else max_cycles
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
-    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
+    cities = _resolve_scoped_cities(cities, market_scope=market_scope)
 
     def _snapshot_fetcher() -> list[MarketSnapshot]:
-        return _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+        return _load_scoped_snapshots(
+            markets_path=markets_path,
+            cities=cities,
+            market_scope=market_scope,
+            active=True,
+            closed=False,
+        )
 
     def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[OpenPhaseObservation]:
         observations: list[OpenPhaseObservation] = []
@@ -4374,6 +4901,168 @@ def open_phase_shadow(
     console.print(f"Wrote latest {latest_output}")
     console.print(f"Wrote history {output}")
     console.print(f"Wrote summary {summary_output}")
+
+
+@app.command("hope-hunt-report")
+def hope_hunt_report(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    market_scope: str = typer.Option("supported_wu_open_phase", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("market_open", help="Forecast horizon for hope-hunt evaluation"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
+    history_output: Path | None = typer.Option(None, help="Append-only JSONL history output"),
+    summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
+) -> None:
+    """Generate one ranked hope-hunt snapshot across supported WU-family active markets."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    cities = _resolve_option_value(cities)
+    market_scope = _resolve_market_scope(
+        _resolve_option_value(market_scope, "supported_wu_open_phase"),
+        core_recent_only=False,
+    )
+    markets_path = _resolve_option_value(markets_path)
+    horizon = _resolve_option_value(horizon, "market_open")
+    min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output)
+    history_output = _resolve_option_value(history_output)
+    summary_output = _resolve_option_value(summary_output)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+
+    config, _env = load_settings()
+    hope_config = config.hope_hunt
+    latest_output = output or _default_signal_output(hope_config.latest_output_path.name)
+    history_output_path = history_output or _default_signal_output(hope_config.history_output_path.name)
+    summary_output_path = summary_output or _default_signal_output(hope_config.summary_output_path.name)
+    state_path = _default_signal_output(hope_config.state_path.name)
+
+    runner, http = _build_hope_hunt_runner(
+        model_path=model_path,
+        model_name=resolved_model_name,
+        cities=cities,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval_seconds=hope_config.interval_seconds,
+        max_cycles=1,
+        output=history_output_path,
+        latest_output=latest_output,
+        summary_output=summary_output_path,
+        state_path=state_path,
+        horizon=horizon,
+        edge_threshold=min_edge,
+    )
+    try:
+        summary = runner.run_once()
+    finally:
+        http.close()
+
+    rows = json.loads(latest_output.read_text()) if latest_output.exists() else []
+    table = Table(title="Hope Hunt")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Age(h)")
+    table.add_column("Day+")
+    table.add_column("Volume")
+    table.add_column("Score")
+    table.add_column("Reason")
+    for row in rows[:20]:
+        table.add_row(
+            str(row.get("city", "")),
+            str(row.get("target_local_date", "")),
+            f"{float(row['open_phase_age_hours']):.2f}" if row.get("open_phase_age_hours") is not None else "—",
+            str(row.get("target_day_distance", "—")),
+            f"{float(row['market_volume']):.1f}" if row.get("market_volume") is not None else "—",
+            f"{float(row['priority_score']):.1f}" if row.get("priority_score") is not None else "—",
+            str(row.get("reason", "")),
+        )
+    console.print(table)
+    console.print(
+        "Hope hunt: "
+        f"markets_evaluated={summary['markets_evaluated']}, "
+        f"candidate_count={summary['candidate_count']}"
+    )
+    console.print(f"Wrote latest {latest_output}")
+    console.print(f"Wrote history {history_output_path}")
+    console.print(f"Wrote summary {summary_output_path}")
+
+
+@app.command("hope-hunt-daemon")
+def hope_hunt_daemon(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    market_scope: str = typer.Option("supported_wu_open_phase", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    interval: int | None = typer.Option(None, help="Seconds between hope-hunt cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    horizon: str = typer.Option("market_open", help="Forecast horizon for hope-hunt evaluation"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path | None = typer.Option(None, help="Append-only JSONL output"),
+    latest_output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
+    summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
+    state_path: Path | None = typer.Option(None, help="State JSON path"),
+) -> None:
+    """Continuously score open-phase hope candidates without placing orders."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    cities = _resolve_option_value(cities)
+    market_scope = _resolve_market_scope(
+        _resolve_option_value(market_scope, "supported_wu_open_phase"),
+        core_recent_only=False,
+    )
+    markets_path = _resolve_option_value(markets_path)
+    interval = _resolve_option_value(interval)
+    max_cycles = _resolve_option_value(max_cycles)
+    horizon = _resolve_option_value(horizon, "market_open")
+    min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output)
+    latest_output = _resolve_option_value(latest_output)
+    summary_output = _resolve_option_value(summary_output)
+    state_path = _resolve_option_value(state_path)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+
+    config, _env = load_settings()
+    hope_config = config.hope_hunt
+    effective_interval = hope_config.interval_seconds if interval is None else int(interval)
+    effective_max_cycles = hope_config.max_cycles if max_cycles is None else int(max_cycles)
+    history_output = output or _default_signal_output(hope_config.history_output_path.name)
+    latest_output_path = latest_output or _default_signal_output(hope_config.latest_output_path.name)
+    summary_output_path = summary_output or _default_signal_output(hope_config.summary_output_path.name)
+    effective_state_path = state_path or _default_signal_output(hope_config.state_path.name)
+
+    runner, http = _build_hope_hunt_runner(
+        model_path=model_path,
+        model_name=resolved_model_name,
+        cities=cities,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval_seconds=effective_interval,
+        max_cycles=effective_max_cycles or 0,
+        output=history_output,
+        latest_output=latest_output_path,
+        summary_output=summary_output_path,
+        state_path=effective_state_path,
+        horizon=horizon,
+        edge_threshold=min_edge,
+    )
+    try:
+        console.print(
+            "Hope hunt daemon: "
+            f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
+            f"scope={market_scope}, horizon={horizon}"
+        )
+        runner.run_loop()
+    finally:
+        http.close()
+
+    console.print(f"Wrote latest {latest_output_path}")
+    console.print(f"Wrote history {history_output}")
+    console.print(f"Wrote summary {summary_output_path}")
 
 
 @app.command("forecast-daemon")

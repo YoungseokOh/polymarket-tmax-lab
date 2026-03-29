@@ -93,6 +93,15 @@ class OpportunityShadowConfig(BaseModel):
     summary_output_path: Path = Path("artifacts/opportunity_shadow_summary.json")
 
 
+class HopeHuntConfig(BaseModel):
+    interval_seconds: int = 300
+    max_cycles: int = 0
+    state_path: Path = Path("artifacts/signals/v2/hope_hunt_state.json")
+    latest_output_path: Path = Path("artifacts/signals/v2/hope_hunt_latest.json")
+    history_output_path: Path = Path("artifacts/signals/v2/hope_hunt_history.jsonl")
+    summary_output_path: Path = Path("artifacts/signals/v2/hope_hunt_summary.json")
+
+
 class FirebaseConfig(BaseModel):
     enabled: bool = False
     bucket_name: str = ""
@@ -133,6 +142,7 @@ class RepoConfig(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     opportunity_shadow: OpportunityShadowConfig = Field(default_factory=OpportunityShadowConfig)
+    hope_hunt: HopeHuntConfig = Field(default_factory=HopeHuntConfig)
     firebase: FirebaseConfig = Field(default_factory=FirebaseConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

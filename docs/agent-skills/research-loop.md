@@ -8,6 +8,8 @@
 - `opportunity-report`
 - `opportunity-shadow`
 - `open-phase-shadow`
+- `hope-hunt-report`
+- `hope-hunt-daemon`
 
 ## Default Workflow
 ```bash
@@ -23,6 +25,7 @@ uv run pmtmax opportunity-report --core-recent-only --model-name trading_champio
 uv run pmtmax opportunity-shadow --core-recent-only --model-name trading_champion --max-cycles 1
 uv run pmtmax open-phase-shadow --core-recent-only --model-name trading_champion --max-cycles 1
 uv run pmtmax revenue-gate-report
+uv run pmtmax hope-hunt-report --model-name trading_champion
 ```
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
@@ -38,6 +41,8 @@ scripts/run_opportunity_shadow_watch.sh --max-cycles 1
 `configs/recent-core-horizon-policy.yaml` and filtered rows are emitted as
 `reason=policy_filtered`.
 수익화 전용 루프에서는 `--core-recent-only`와 `--model-name trading_champion` 조합을 기본으로 쓴다.
+recent-core 바깥의 fresh listing 탐색은 `--market-scope supported_wu_open_phase`
+또는 전용 wrapper인 `hope-hunt-report` / `hope-hunt-daemon`을 쓴다.
 
 ## Real Historical Workflow
 ```bash
@@ -75,6 +80,7 @@ uv run python scripts/build_active_weather_watchlist.py
 - opportunity outputs: `artifacts/signals/v2/opportunity_report.json`
 - shadow validation outputs: `artifacts/signals/v2/opportunity_shadow.jsonl`, `artifacts/signals/v2/opportunity_shadow_latest.json`, `artifacts/signals/v2/opportunity_shadow_summary.json`
 - open-phase validation outputs: `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`, `artifacts/signals/v2/open_phase_shadow_summary.json`
+- hope-hunt outputs: `artifacts/signals/v2/hope_hunt_history.jsonl`, `artifacts/signals/v2/hope_hunt_latest.json`, `artifacts/signals/v2/hope_hunt_summary.json`
 - revenue gate output: `artifacts/signals/v2/revenue_gate_summary.json`
 - closed-event manifests: `data/manifests/historical_event_candidates.json`, `data/manifests/historical_event_page_fetches.json`, `data/manifests/historical_collection_status.json`
 - active watchlist: `artifacts/active_weather_watchlist.json`
@@ -90,7 +96,9 @@ uv run python scripts/build_active_weather_watchlist.py
 - live/paper/opportunity 경로는 calibrated probability가 없으면 `missing_calibrator`로 fail closed 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다
 - `open-phase-shadow`는 `componentMarkets[*].acceptingOrdersTimestamp` 기준 최근 상장 시장만 골라 `market_open` horizon으로 평가하는 실험 경로다
+- `hope-hunt-report`와 `hope-hunt-daemon`은 `supported_wu_open_phase` 범위에서 fresh listing을 우선순위화하는 no-order candidate loop다
 - shadow/open-phase summary에는 `by_city`, `by_horizon`, `by_city_horizon`, `gate_decision`, `gate_reason`이 함께 기록된다
+- hope-hunt summary에는 `by_open_phase_age_bucket`, `by_priority_bucket`, `top_candidates`, `gate_decision`, `gate_reason`이 함께 기록된다
 - `revenue-gate-report`는 recent-core benchmark와 두 shadow summary를 합쳐 소액 live pilot 전환 가능 여부를 `GO / INCONCLUSIVE / NO_GO`로 출력한다
 - active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다
 - 현재 기본 horizon policy는 `Seoul=market_open+previous_evening+morning_of`, `NYC=market_open+previous_evening`, `London=previous_evening`이다

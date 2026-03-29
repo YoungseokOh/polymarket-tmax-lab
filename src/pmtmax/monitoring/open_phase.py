@@ -29,6 +29,20 @@ _TIMESTAMP_KEYS = (
 )
 
 
+def open_phase_age_bucket(age_hours: float | None) -> str:
+    """Bucket one market by open-phase age."""
+
+    if age_hours is None:
+        return "unknown"
+    if age_hours <= 6:
+        return "0-6h"
+    if age_hours <= 24:
+        return "6-24h"
+    if age_hours <= 48:
+        return "24-48h"
+    return "48h+"
+
+
 def _parse_market_timestamp(value: object) -> datetime | None:
     """Parse a Polymarket timestamp field when present."""
 
@@ -173,10 +187,12 @@ def summarize_open_phase_history(history_path: Path) -> dict[str, Any]:
     by_city: dict[str, list[OpenPhaseObservation]] = {}
     by_horizon: dict[str, list[OpenPhaseObservation]] = {}
     by_city_horizon: dict[str, list[OpenPhaseObservation]] = {}
+    by_open_phase_age_bucket: dict[str, list[OpenPhaseObservation]] = {}
     for row in rows:
         by_city.setdefault(row.city, []).append(row)
         by_horizon.setdefault(row.decision_horizon, []).append(row)
         by_city_horizon.setdefault(f"{row.city}:{row.decision_horizon}", []).append(row)
+        by_open_phase_age_bucket.setdefault(open_phase_age_bucket(row.open_phase_age_hours), []).append(row)
 
     summary = {
         "generated_at": datetime.now(tz=UTC),
@@ -190,6 +206,10 @@ def summarize_open_phase_history(history_path: Path) -> dict[str, Any]:
         "by_city_horizon": {
             key: _summary(group_rows)
             for key, group_rows in sorted(by_city_horizon.items())
+        },
+        "by_open_phase_age_bucket": {
+            bucket: _summary(bucket_rows)
+            for bucket, bucket_rows in sorted(by_open_phase_age_bucket.items())
         },
     }
     gate = classify_path_viability(summary)
