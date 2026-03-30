@@ -26,6 +26,7 @@ class LgbmEMOSVariantConfig:
     min_child_samples: int
     use_recency_weights: bool
     recency_half_life_days: float
+    use_oof_scale: bool = True  # False → faster (in-sample scale), True → honest OOF scale
 
 
 LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
@@ -38,6 +39,18 @@ LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
         min_child_samples=8,
         use_recency_weights=False,
         recency_half_life_days=90.0,
+        use_oof_scale=True,
+    ),
+    "fast": LgbmEMOSVariantConfig(
+        name="fast",
+        n_estimators=300,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        min_child_samples=8,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
     ),
     "high_capacity": LgbmEMOSVariantConfig(
         name="high_capacity",
@@ -48,6 +61,7 @@ LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
         min_child_samples=5,
         use_recency_weights=False,
         recency_half_life_days=90.0,
+        use_oof_scale=True,
     ),
     "recency": LgbmEMOSVariantConfig(
         name="recency",
@@ -180,8 +194,13 @@ class LgbmEMOSModel:
         self._mean_model = _new_lgbm(cfg)
         self._mean_model.fit(x, y, sample_weight=sw)
 
-        # Compute OOF residuals for a less biased scale target
-        oof_residuals = self._oof_residuals(ordered, x, y, sw)
+        # Compute scale targets: OOF residuals (honest but slow) or in-sample (fast)
+        if cfg.use_oof_scale:
+            oof_residuals = self._oof_residuals(ordered, x, y, sw)
+        else:
+            assert self._mean_model is not None
+            preds = np.asarray(self._mean_model.predict(x), dtype=float)
+            oof_residuals = np.clip(np.abs(y - preds), 0.25, 12.0)
 
         # Fit scale model on |OOF residuals|
         self._scale_model = _new_lgbm(cfg)
