@@ -89,6 +89,34 @@ def resolve_lgbm_emos_variant(variant: str | None = None) -> LgbmEMOSVariantConf
     return LGBM_EMOS_VARIANTS[key]
 
 
+_NWP_MAX_COLS = (
+    "ecmwf_ifs025_model_daily_max",
+    "ecmwf_aifs025_single_model_daily_max",
+    "kma_gdps_model_daily_max",
+    "gfs_seamless_model_daily_max",
+)
+
+
+def _nwp_spread_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Compute cross-model NWP spread features that capture forecast uncertainty."""
+
+    available = [c for c in _NWP_MAX_COLS if c in frame.columns]
+    result: dict[str, pd.Series] = {}
+    if len(available) >= 2:
+        vals = frame[available]
+        result["nwp_spread"] = vals.max(axis=1) - vals.min(axis=1)
+        result["nwp_std"] = vals.std(axis=1, ddof=0).fillna(0.0)
+        result["nwp_ens_mean"] = vals.mean(axis=1)
+    ifs = "ecmwf_ifs025_model_daily_max"
+    gfs = "gfs_seamless_model_daily_max"
+    aifs = "ecmwf_aifs025_single_model_daily_max"
+    if ifs in frame.columns and gfs in frame.columns:
+        result["ecmwf_gfs_diff"] = frame[ifs] - frame[gfs]
+    if ifs in frame.columns and aifs in frame.columns:
+        result["ecmwf_aifs_diff"] = frame[ifs] - frame[aifs]
+    return pd.DataFrame(result, index=frame.index).fillna(0.0)
+
+
 def _new_lgbm(cfg: LgbmEMOSVariantConfig) -> LGBMRegressor:
     return LGBMRegressor(
         n_estimators=cfg.n_estimators,
@@ -141,7 +169,9 @@ class LgbmEMOSModel:
             return
 
         self.builder.fit(ordered)
-        x = self.builder.transform(ordered)
+        x_base = self.builder.transform(ordered)
+        x_extra = _nwp_spread_features(ordered)
+        x = pd.concat([x_base, x_extra], axis=1)
 
         cfg = self._variant_config
         sw = recency_weights(ordered, half_life_days=cfg.recency_half_life_days) if cfg.use_recency_weights else None
@@ -202,7 +232,10 @@ class LgbmEMOSModel:
             size = len(frame)
             return np.full(size, self._constant_mean, dtype=float), np.full(size, self._constant_std, dtype=float)
 
-        x = self.builder.transform(frame)
+        frame_reset = frame.reset_index(drop=True)
+        x_base = self.builder.transform(frame_reset)
+        x_extra = _nwp_spread_features(frame_reset)
+        x = pd.concat([x_base, x_extra], axis=1)
         mean = np.asarray(self._mean_model.predict(x), dtype=float)
         scale = np.clip(np.asarray(self._scale_model.predict(x), dtype=float), 0.5, None)
         return mean, scale
