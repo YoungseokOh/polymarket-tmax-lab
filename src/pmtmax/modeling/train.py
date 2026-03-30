@@ -21,6 +21,11 @@ from pmtmax.modeling.advanced.tuned_ensemble import (
     resolve_tuned_ensemble_variant,
     supported_tuned_ensemble_variants,
 )
+from pmtmax.modeling.advanced.lgbm_emos import (
+    LgbmEMOSModel,
+    resolve_lgbm_emos_variant,
+    supported_lgbm_emos_variants,
+)
 from pmtmax.modeling.baselines.gaussian_emos import (
     GaussianEMOSModel,
     resolve_gaussian_emos_variant,
@@ -30,7 +35,7 @@ from pmtmax.modeling.calibration import OutcomeCalibrator
 from pmtmax.storage.schemas import ModelArtifact
 from pmtmax.utils import set_global_seed, stable_hash
 
-SUPPORTED_MODEL_NAMES = ("gaussian_emos", "tuned_ensemble", "det2prob_nn")
+SUPPORTED_MODEL_NAMES = ("gaussian_emos", "tuned_ensemble", "det2prob_nn", "lgbm_emos")
 
 
 def supported_model_names() -> tuple[str, ...]:
@@ -59,6 +64,8 @@ def supported_ablation_variants(model_name: str) -> tuple[str, ...]:
         return supported_det2prob_variants()
     if model_name == "gaussian_emos":
         return supported_gaussian_emos_variants()
+    if model_name == "lgbm_emos":
+        return supported_lgbm_emos_variants()
     return ()
 
 
@@ -238,6 +245,10 @@ def train_model(
     elif model_name == "tuned_ensemble":
         resolved_variant = resolve_tuned_ensemble_variant(variant)
         model = TunedEnsembleModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        model.fit(fit_frame)
+    elif model_name == "lgbm_emos":
+        resolved_variant = resolve_lgbm_emos_variant(variant)
+        model = LgbmEMOSModel(features, split_policy=split_policy, variant=resolved_variant.name)
         model.fit(fit_frame)
     else:
         msg = f"Unsupported trainable model: {model_name}"

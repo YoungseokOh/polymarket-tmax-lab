@@ -94,6 +94,7 @@ models:
     - gaussian_emos
     - tuned_ensemble
     - det2prob_nn
+    - lgbm_emos
 
 scanner:
   interval_seconds: 60
