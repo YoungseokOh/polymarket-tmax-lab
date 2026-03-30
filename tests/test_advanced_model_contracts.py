@@ -94,19 +94,31 @@ def test_tuned_ensemble_and_det2prob_return_mixture_forecasts(tmp_path: Path) ->
     frame = _training_frame()
     spec = example_market_specs(["Seoul"])[0]
 
-    for model_name in ("tuned_ensemble", "det2prob_nn"):
-        artifact = train_model(model_name, frame, tmp_path / model_name, split_policy="market_day", seed=42)
-        model = load_model(Path(artifact.path))
-        weights, means, scales = model.predict(frame.iloc[:3].copy())
-        forecast = predict_market(Path(artifact.path), model_name, spec, frame.iloc[[0]])
+    # tuned_ensemble default is MDN (mixture)
+    artifact = train_model("tuned_ensemble", frame, tmp_path / "tuned_ensemble", split_policy="market_day", seed=42)
+    model = load_model(Path(artifact.path))
+    weights, means, scales = model.predict(frame.iloc[:3].copy())
+    forecast = predict_market(Path(artifact.path), "tuned_ensemble", spec, frame.iloc[[0]])
 
-        assert weights.shape[0] == 3
-        assert means.shape == weights.shape
-        assert scales.shape == weights.shape
-        assert np.allclose(weights.sum(axis=1), 1.0, atol=1e-6)
-        assert np.all(scales > 0.0)
-        assert forecast.distribution_family == "gaussian_mixture"
-        assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
+    assert weights.shape[0] == 3
+    assert means.shape == weights.shape
+    assert scales.shape == weights.shape
+    assert np.allclose(weights.sum(axis=1), 1.0, atol=1e-6)
+    assert np.all(scales > 0.0)
+    assert forecast.distribution_family == "gaussian_mixture"
+    assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
+
+    # det2prob_nn default is champion_v1 (single Gaussian head)
+    artifact = train_model("det2prob_nn", frame, tmp_path / "det2prob_nn", split_policy="market_day", seed=42)
+    model = load_model(Path(artifact.path))
+    means_arr, scales_arr = model.predict(frame.iloc[:3].copy())
+    forecast = predict_market(Path(artifact.path), "det2prob_nn", spec, frame.iloc[[0]])
+
+    assert means_arr.shape[0] == 3
+    assert scales_arr.shape == means_arr.shape
+    assert np.all(scales_arr > 0.0)
+    assert forecast.distribution_family == "gaussian"
+    assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
 
 
 def test_ablation_variants_support_gaussian_and_mixture_contracts(tmp_path: Path) -> None:

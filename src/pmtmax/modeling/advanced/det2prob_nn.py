@@ -562,7 +562,7 @@ def supported_det2prob_variants() -> tuple[str, ...]:
 def resolve_det2prob_variant(variant: str | None = None) -> Det2ProbVariantConfig:
     """Return the requested det2prob ablation variant or the production default."""
 
-    name = variant or "current_full_mdn"
+    name = variant or "champion_v1"
     if name not in DET2PROB_VARIANTS:
         supported = ", ".join(supported_det2prob_variants())
         msg = f"Unsupported det2prob_nn variant: {name}. Supported variants: {supported}."
