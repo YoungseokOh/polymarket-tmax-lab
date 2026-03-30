@@ -86,11 +86,12 @@ def test_make_truth_source_routes_london_markets_to_wunderground_public_archive(
     assert isinstance(source, WundergroundTruthSource)
 
 
-def test_make_truth_source_routes_toronto_markets_to_noaa_public_archive() -> None:
+def test_make_truth_source_routes_toronto_markets_to_wunderground() -> None:
+    # Toronto was migrated from NOAA Global Hourly to Wunderground Public Historical API
     spec = _toronto_spec()
     source = make_truth_source(spec, _FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
 
-    assert isinstance(source, NoaaGlobalHourlyTruthSource)
+    assert isinstance(source, WundergroundTruthSource)
 
 
 def test_noaa_truth_source_uses_local_station_snapshot_when_available() -> None:

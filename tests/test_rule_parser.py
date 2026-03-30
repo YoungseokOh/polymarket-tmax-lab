@@ -102,9 +102,9 @@ def test_parse_toronto_rules_from_inline_market_description() -> None:
     assert spec.station_id == "CYYZ"
     assert spec.timezone == "America/Toronto"
     assert spec.truth_track == "research_public"
-    assert spec.public_truth_source_name == "NOAA Global Hourly"
-    assert spec.public_truth_station_id == "71624099999"
-    assert spec.truth_source_key() == "noaa_global_hourly"
+    assert spec.public_truth_source_name == "Wunderground Public Historical API"
+    assert spec.public_truth_station_id == "CYYZ"
+    assert spec.truth_source_key() == "wunderground"
 
 
 def test_parse_noaa_timeseries_rules_from_inline_market_description() -> None:
@@ -131,4 +131,4 @@ def test_parse_noaa_timeseries_rules_from_inline_market_description() -> None:
     assert spec.station_id == "LLBG"
     assert spec.timezone == "Asia/Jerusalem"
     assert spec.truth_track == "exact_public"
-    assert spec.public_truth_station_id == "40180099999"
+    assert spec.public_truth_station_id == "LLBG"
