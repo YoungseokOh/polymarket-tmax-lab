@@ -49,4 +49,8 @@ print(f'Appended {len(signals)} signals to history.')
 "
 fi
 
+# 5. Track outcomes for forward paper trades
+echo "${LOG_PREFIX} tracking paper trade outcomes..."
+uv run python scripts/track_paper_trade_outcomes.py
+
 echo "${LOG_PREFIX} done. Signals: ${SCAN_EDGE_OUTPUT}"
