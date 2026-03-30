@@ -21,7 +21,11 @@ from pmtmax.modeling.advanced.tuned_ensemble import (
     resolve_tuned_ensemble_variant,
     supported_tuned_ensemble_variants,
 )
-from pmtmax.modeling.baselines.gaussian_emos import GaussianEMOSModel
+from pmtmax.modeling.baselines.gaussian_emos import (
+    GaussianEMOSModel,
+    resolve_gaussian_emos_variant,
+    supported_gaussian_emos_variants,
+)
 from pmtmax.modeling.calibration import OutcomeCalibrator
 from pmtmax.storage.schemas import ModelArtifact
 from pmtmax.utils import set_global_seed, stable_hash
@@ -53,6 +57,8 @@ def supported_ablation_variants(model_name: str) -> tuple[str, ...]:
         return supported_tuned_ensemble_variants()
     if model_name == "det2prob_nn":
         return supported_det2prob_variants()
+    if model_name == "gaussian_emos":
+        return supported_gaussian_emos_variants()
     return ()
 
 
@@ -222,7 +228,8 @@ def train_model(
     features = default_feature_names(clean_frame)
     model: Any
     if model_name == "gaussian_emos":
-        model = GaussianEMOSModel(features)
+        resolved_variant = resolve_gaussian_emos_variant(variant)
+        model = GaussianEMOSModel(features, variant=resolved_variant.name)
         model.fit(fit_frame)
     elif model_name == "det2prob_nn":
         resolved_variant = resolve_det2prob_variant(variant)
