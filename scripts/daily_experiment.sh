@@ -24,6 +24,14 @@ echo "${LOG_PREFIX} starting"
 echo "${LOG_PREFIX} scan-markets..."
 uv run pmtmax scan-markets
 
+# 1b. Backfill truth for all active cities (uses updated station_catalog → Wunderground)
+echo "${LOG_PREFIX} backfill-truth (all cities)..."
+uv run pmtmax backfill-truth --markets-path artifacts/discovered_markets.json
+
+# 1c. Backfill forecasts for all active cities
+echo "${LOG_PREFIX} backfill-forecasts (all cities)..."
+uv run pmtmax backfill-forecasts --markets-path artifacts/discovered_markets.json
+
 # 2. Log Gamma prices to timeseries
 echo "${LOG_PREFIX} logging gamma prices..."
 uv run python scripts/log_gamma_prices.py
