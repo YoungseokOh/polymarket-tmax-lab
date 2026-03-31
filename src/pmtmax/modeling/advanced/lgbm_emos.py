@@ -110,12 +110,30 @@ _NWP_MAX_COLS = (
     "gfs_seamless_model_daily_max",
 )
 
+# Variable suffixes for cross-model disagreement features (uncertainty signals)
+_NWP_PREFIXES = (
+    "ecmwf_ifs025",
+    "ecmwf_aifs025_single",
+    "kma_gdps",
+    "gfs_seamless",
+)
+_CROSS_MODEL_VARS = (
+    "wind_speed_mean",
+    "dew_point_mean",
+    "diurnal_amplitude",
+    "midday_temp",
+    "model_daily_min",
+    "model_daily_mean",
+)
+
 
 def _nwp_spread_features(frame: pd.DataFrame) -> pd.DataFrame:
     """Compute cross-model NWP spread features that capture forecast uncertainty."""
 
-    available = [c for c in _NWP_MAX_COLS if c in frame.columns]
     result: dict[str, pd.Series] = {}
+
+    # Max-temperature ensemble statistics
+    available = [c for c in _NWP_MAX_COLS if c in frame.columns]
     if len(available) >= 2:
         vals = frame[available]
         result["nwp_spread"] = vals.max(axis=1) - vals.min(axis=1)
@@ -128,6 +146,15 @@ def _nwp_spread_features(frame: pd.DataFrame) -> pd.DataFrame:
         result["ecmwf_gfs_diff"] = frame[ifs] - frame[gfs]
     if ifs in frame.columns and aifs in frame.columns:
         result["ecmwf_aifs_diff"] = frame[ifs] - frame[aifs]
+
+    # Cross-model disagreement for other weather variables (uncertainty signals)
+    for var in _CROSS_MODEL_VARS:
+        cols = [f"{pfx}_{var}" for pfx in _NWP_PREFIXES if f"{pfx}_{var}" in frame.columns]
+        if len(cols) >= 2:
+            vals = frame[cols]
+            result[f"xmod_spread__{var}"] = vals.max(axis=1) - vals.min(axis=1)
+            result[f"xmod_std__{var}"] = vals.std(axis=1, ddof=0).fillna(0.0)
+
     out = pd.DataFrame(result, index=frame.index)
     # Ensure float dtype — columns may be object when inputs contain all-NaN
     out = out.apply(pd.to_numeric, errors="coerce").fillna(0.0)
