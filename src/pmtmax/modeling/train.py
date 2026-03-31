@@ -181,20 +181,34 @@ def _fit_and_persist_calibrator(
     if calibration_frame.empty or "winning_outcome" not in calibration_frame.columns or "market_spec_json" not in calibration_frame.columns:
         return None
 
-    from pmtmax.modeling.predict import predict_market
+    from pmtmax.modeling.bin_mapper import map_normal_to_outcomes, map_samples_to_outcomes
+    from pmtmax.modeling.sampling import sample_gaussian_mixture
 
+    model = load_model(model_path)
+    clean = sanitize_model_frame(calibration_frame).reset_index(drop=True)
+    # Ensure all model feature columns are present (add NaN for missing)
+    for col in getattr(model, "feature_names", []):
+        if col not in clean.columns:
+            clean[col] = np.nan
+
+    prediction = model.predict(clean)
     probability_rows: list[dict[str, float]] = []
     winners: list[str] = []
-    for _, row in calibration_frame.iterrows():
+
+    for i, (_, row) in enumerate(calibration_frame.iterrows()):
         spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
-        forecast = predict_market(
-            model_path,
-            model_name,
-            spec,
-            row.to_frame().T,
-            calibrate=False,
-        )
-        raw_probs = forecast.outcome_probabilities_raw or forecast.outcome_probabilities
+        if len(prediction) == 2:
+            mean_arr, std_arr = prediction
+            mean = float(np.asarray(mean_arr).reshape(-1)[i])
+            std = float(np.asarray(std_arr).reshape(-1)[i])
+            raw_probs = map_normal_to_outcomes(spec, mean, std)
+        else:
+            weights_arr, means_arr, scales_arr = prediction
+            w = np.asarray(weights_arr)[i]
+            m = np.asarray(means_arr)[i]
+            s = np.asarray(scales_arr)[i]
+            samples = sample_gaussian_mixture(w, m, s, num_samples=500)
+            raw_probs = map_samples_to_outcomes(spec, samples)
         probability_rows.append({label: float(value) for label, value in raw_probs.items()})
         winners.append(str(row["winning_outcome"]))
 
