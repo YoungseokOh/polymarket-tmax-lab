@@ -121,6 +121,36 @@ def test_tuned_ensemble_and_det2prob_return_mixture_forecasts(tmp_path: Path) ->
     assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
 
 
+def test_lgbm_emos_returns_gaussian_mean_and_std(tmp_path: Path) -> None:
+    frame = _training_frame()
+    spec = example_market_specs(["Seoul"])[0]
+
+    # Default variant (OOF scale)
+    artifact = train_model("lgbm_emos", frame, tmp_path / "lgbm_default", split_policy="market_day", seed=42)
+    model = load_model(Path(artifact.path))
+    mean, std = model.predict(frame.iloc[:3].copy())
+
+    assert mean.shape == (3,)
+    assert std.shape == (3,)
+    assert np.all(std > 0.0)
+    assert artifact.variant is None  # None means "default" (not explicitly specified)
+
+    forecast = predict_market(Path(artifact.path), "lgbm_emos", spec, frame.iloc[[0]])
+    assert forecast.distribution_family == "gaussian"
+    assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
+
+    # Fast variant (in-sample scale, skips OOF) — variant stored as explicit name
+    fast_artifact = train_model(
+        "lgbm_emos", frame, tmp_path / "lgbm_fast", split_policy="market_day", seed=42, variant="fast"
+    )
+    fast_model = load_model(Path(fast_artifact.path))
+    fast_mean, fast_std = fast_model.predict(frame.iloc[:3].copy())
+
+    assert fast_mean.shape == (3,)
+    assert np.all(fast_std > 0.0)
+    assert fast_artifact.variant == "fast"
+
+
 def test_ablation_variants_support_gaussian_and_mixture_contracts(tmp_path: Path) -> None:
     frame = _training_frame()
 

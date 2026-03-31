@@ -128,7 +128,10 @@ def _nwp_spread_features(frame: pd.DataFrame) -> pd.DataFrame:
         result["ecmwf_gfs_diff"] = frame[ifs] - frame[gfs]
     if ifs in frame.columns and aifs in frame.columns:
         result["ecmwf_aifs_diff"] = frame[ifs] - frame[aifs]
-    return pd.DataFrame(result, index=frame.index).fillna(0.0)
+    out = pd.DataFrame(result, index=frame.index)
+    # Ensure float dtype — columns may be object when inputs contain all-NaN
+    out = out.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return out
 
 
 def _new_lgbm(cfg: LgbmEMOSVariantConfig) -> LGBMRegressor:
