@@ -1,30 +1,57 @@
 #!/usr/bin/env bash
-# AutoResearch loop for det2prob_nn architecture search.
-# Usage: bash scripts/autoresearch.sh [--variant VARIANT_NAME]
+# AutoResearch loop — fast-eval hypothesis testing for any model family.
+# Usage:
+#   bash scripts/autoresearch.sh --model lgbm_emos --baseline fast --variant recency_fast
+#   bash scripts/autoresearch.sh --model det2prob_nn --baseline legacy_gaussian --variant champion_v1
+#   bash scripts/autoresearch.sh --variant legacy_gaussian   # legacy: det2prob_nn default
 #
-# Inspired by karpathy/autoresearch: modify the target file, run a fast eval,
-# keep if the metric improves, revert otherwise. Results go to results.tsv.
+# Inspired by karpathy/autoresearch: run a fast eval, keep if metric improves.
+# Results go to results.tsv.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-VARIANT="${1:-legacy_gaussian}"
+# Defaults (legacy behaviour: det2prob_nn with legacy_gaussian baseline)
+MODEL="det2prob_nn"
+BASELINE="legacy_gaussian"
+VARIANT=""
 LAST_N=100
 RESULTS_FILE="results.tsv"
 PRICING="real_history"
 
-# Ensure results file has header
-if [[ ! -f "${RESULTS_FILE}" ]]; then
-    printf 'commit\tvariant\tavg_crps\tmae\tpnl\thit_rate\tstatus\tdescription\n' > "${RESULTS_FILE}"
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model)    MODEL="$2";    shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        --variant)  VARIANT="$2";  shift 2 ;;
+        --last-n)   LAST_N="$2";   shift 2 ;;
+        --pricing)  PRICING="$2";  shift 2 ;;
+        *)
+            # Legacy positional: first arg is variant
+            if [[ -z "${VARIANT}" ]]; then VARIANT="$1"; fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "${VARIANT}" ]]; then
+    echo "Error: --variant is required" >&2
+    exit 1
 fi
 
-# ---- run eval for a given variant, return avg_crps ----
+# Ensure results file has header
+if [[ ! -f "${RESULTS_FILE}" ]]; then
+    printf 'commit\tmodel\tvariant\tavg_crps\tmae\tpnl\thit_rate\tstatus\tdescription\n' > "${RESULTS_FILE}"
+fi
+
+# ---- run eval for a given variant ----
 run_eval() {
     local variant="$1"
     uv run pmtmax backtest \
-        --model-name det2prob_nn \
+        --model-name "${MODEL}" \
         --pricing-source "${PRICING}" \
         --variant "${variant}" \
         --last-n "${LAST_N}" \
@@ -43,22 +70,22 @@ log_result() {
     mae=$(parse_metric "${json}" mae)
     pnl=$(parse_metric "${json}" pnl)
     hit=$(parse_metric "${json}" hit_rate)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "${commit}" "${variant}" "${crps}" "${mae}" "${pnl}" "${hit}" "${status}" "${desc}" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${commit}" "${MODEL}" "${variant}" "${crps}" "${mae}" "${pnl}" "${hit}" "${status}" "${desc}" \
         >> "${RESULTS_FILE}"
     echo "  crps=${crps}  mae=${mae}  pnl=${pnl}  hit=${hit}  [${status}]"
 }
 
 echo "=== autoresearch: fast-eval on last ${LAST_N} groups ==="
-echo "=== target variant: ${VARIANT} ==="
+echo "=== model=${MODEL}  baseline=${BASELINE}  variant=${VARIANT} ==="
 echo ""
 
 # Run baseline
-echo ">> Running baseline (legacy_gaussian)..."
-baseline_json=$(run_eval "legacy_gaussian")
+echo ">> Running baseline (${BASELINE})..."
+baseline_json=$(run_eval "${BASELINE}")
 baseline_crps=$(parse_metric "${baseline_json}" avg_crps)
 commit=$(git rev-parse --short HEAD)
-log_result "${commit}" "legacy_gaussian" "${baseline_json}" "baseline" "baseline"
+log_result "${commit}" "${BASELINE}" "${baseline_json}" "baseline" "baseline"
 echo "Baseline CRPS: ${baseline_crps}"
 echo ""
 
@@ -78,8 +105,7 @@ delta=$(python3 -c "print(f'{float(\"${baseline_crps}\") - float(\"${new_crps}\"
 if [[ "${improved}" == "yes" ]]; then
     echo "✓ IMPROVED by ${delta} CRPS  (${baseline_crps} → ${new_crps})"
     echo "  Keeping current state."
-    # Update result status
-    sed -i "s/${VARIANT}\t[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\tevaluated/${VARIANT}\t$(parse_metric "${new_json}" avg_crps)\t$(parse_metric "${new_json}" mae)\t$(parse_metric "${new_json}" pnl)\t$(parse_metric "${new_json}" hit_rate)\tkept/" "${RESULTS_FILE}" 2>/dev/null || true
+    sed -i "s/\t${VARIANT}\t[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\tevaluated/\t${VARIANT}\t$(parse_metric "${new_json}" avg_crps)\t$(parse_metric "${new_json}" mae)\t$(parse_metric "${new_json}" pnl)\t$(parse_metric "${new_json}" hit_rate)\tkept/" "${RESULTS_FILE}" 2>/dev/null || true
 else
     echo "✗ No improvement (delta=${delta}). Baseline: ${baseline_crps}, This: ${new_crps}"
 fi

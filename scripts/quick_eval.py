@@ -111,6 +111,10 @@ def main() -> None:
         ("det2prob_nn", MODELS_DIR / "det2prob_nn.pkl"),
         ("lgbm_emos", MODELS_DIR / "lgbm_emos.pkl"),
         ("lgbm_emos__fast", MODELS_DIR / "lgbm_emos__fast.pkl"),
+        ("lgbm_emos__recency_fast", MODELS_DIR / "lgbm_emos__recency_fast.pkl"),
+        ("lgbm_emos__high_capacity_fast", MODELS_DIR / "lgbm_emos__high_capacity_fast.pkl"),
+        ("lgbm_emos__recency_short", MODELS_DIR / "lgbm_emos__recency_short.pkl"),
+        ("lgbm_emos__recency_long", MODELS_DIR / "lgbm_emos__recency_long.pkl"),
     ]
 
     results = []

@@ -20,3 +20,5 @@ artifacts/
 .env
 .DS_Store
 .ipynb_checkpoints/
+logs/
+results.tsv
