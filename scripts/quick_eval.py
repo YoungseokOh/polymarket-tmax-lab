@@ -106,15 +106,13 @@ def main() -> None:
     print(f"Cutoff date: {cutoff}\n")
 
     models_to_eval = [
-        ("gaussian_emos", MODELS_DIR / "gaussian_emos.pkl"),
-        ("tuned_ensemble", MODELS_DIR / "tuned_ensemble.pkl"),
-        ("det2prob_nn", MODELS_DIR / "det2prob_nn.pkl"),
-        ("lgbm_emos", MODELS_DIR / "lgbm_emos.pkl"),
-        ("lgbm_emos__fast", MODELS_DIR / "lgbm_emos__fast.pkl"),
-        ("lgbm_emos__recency_fast", MODELS_DIR / "lgbm_emos__recency_fast.pkl"),
-        ("lgbm_emos__high_capacity_fast", MODELS_DIR / "lgbm_emos__high_capacity_fast.pkl"),
-        ("lgbm_emos__recency_short", MODELS_DIR / "lgbm_emos__recency_short.pkl"),
-        ("lgbm_emos__recency_long", MODELS_DIR / "lgbm_emos__recency_long.pkl"),
+        # Baseline: current champion (in-sample scale, clip=2.0 floor applied)
+        ("lgbm_emos__ultra_high_neighbor_fast", MODELS_DIR / "lgbm_emos__ultra_high_neighbor_fast.pkl"),
+        # OOF scale variants: honest sigma via 4-fold expanding-window OOF residuals
+        ("lgbm_emos__recency_neighbor_oof", MODELS_DIR / "lgbm_emos__recency_neighbor_oof.pkl"),       # existing: num_leaves=63
+        ("lgbm_emos__high_neighbor_oof", MODELS_DIR / "lgbm_emos__high_neighbor_oof.pkl"),             # new: num_leaves=95
+        ("lgbm_emos__ultra_high_neighbor_oof", MODELS_DIR / "lgbm_emos__ultra_high_neighbor_oof.pkl"), # new: num_leaves=127
+        ("lgbm_emos__mega_neighbor_oof", MODELS_DIR / "lgbm_emos__mega_neighbor_oof.pkl"),             # new: num_leaves=150
     ]
 
     results = []

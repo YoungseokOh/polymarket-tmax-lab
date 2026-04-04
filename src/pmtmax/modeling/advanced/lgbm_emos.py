@@ -27,6 +27,10 @@ class LgbmEMOSVariantConfig:
     use_recency_weights: bool
     recency_half_life_days: float
     use_oof_scale: bool = True  # False → faster (in-sample scale), True → honest OOF scale
+    subsample_freq: int = 0  # 0 = disabled (default); 1 = enable row subsampling every tree
+    use_quantile_loss: bool = False  # True → fit q10/q50/q90 quantile models; scale = (q90-q10)/2.56
+    use_neighbor_delta: bool = False  # True → add nwp_vs_neighbor_delta/spread_ratio to feature matrix
+    fixed_std: float | None = None  # If set, skip scale model entirely and use this constant std
 
 
 LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
@@ -58,7 +62,7 @@ LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
         num_leaves=63,
         max_depth=8,
         learning_rate=0.03,
-        min_child_samples=5,
+        min_child_samples=20,
         use_recency_weights=False,
         recency_half_life_days=90.0,
         use_oof_scale=True,
@@ -79,7 +83,7 @@ LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
         num_leaves=63,
         max_depth=8,
         learning_rate=0.03,
-        min_child_samples=5,
+        min_child_samples=20,
         use_recency_weights=True,
         recency_half_life_days=90.0,
     ),
@@ -127,6 +131,288 @@ LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
         recency_half_life_days=180.0,
         use_oof_scale=False,
     ),
+    "neighbor_capacity_fast": LgbmEMOSVariantConfig(
+        name="neighbor_capacity_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=20,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+    ),
+    # --- autoresearch round 2: quantile + neighbor-delta features ---
+    "quantile_fast": LgbmEMOSVariantConfig(
+        name="quantile_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_quantile_loss=True,
+    ),
+    "neighbor_delta_fast": LgbmEMOSVariantConfig(
+        name="neighbor_delta_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "quantile_neighbor_fast": LgbmEMOSVariantConfig(
+        name="quantile_neighbor_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_quantile_loss=True,
+        use_neighbor_delta=True,
+    ),
+    # --- autoresearch round 3: neighbor_delta combos ---
+    "recency_neighbor_fast": LgbmEMOSVariantConfig(
+        name="recency_neighbor_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=30.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "ultra_neighbor_fast": LgbmEMOSVariantConfig(
+        name="ultra_neighbor_fast",
+        n_estimators=800,
+        num_leaves=127,
+        max_depth=10,
+        learning_rate=0.02,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "slow_neighbor_fast": LgbmEMOSVariantConfig(
+        name="slow_neighbor_fast",
+        n_estimators=1000,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.01,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    # --- autoresearch A/B/C candidates ---
+    "ultra_capacity_fast": LgbmEMOSVariantConfig(
+        name="ultra_capacity_fast",
+        n_estimators=800,
+        num_leaves=127,
+        max_depth=10,
+        learning_rate=0.02,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+    ),
+    "sampled_fast": LgbmEMOSVariantConfig(
+        name="sampled_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        subsample_freq=1,
+    ),
+    "slow_deep_fast": LgbmEMOSVariantConfig(
+        name="slow_deep_fast",
+        n_estimators=1000,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.01,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+    ),
+    # Autoresearch round 5: recover CRPS to 0.47 on restored 5388-row dataset
+    "ultra_high_neighbor_fast": LgbmEMOSVariantConfig(
+        name="ultra_high_neighbor_fast",
+        n_estimators=800,
+        num_leaves=127,
+        max_depth=10,
+        learning_rate=0.02,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "recency_high_45d_fast": LgbmEMOSVariantConfig(
+        name="recency_high_45d_fast",
+        n_estimators=600,
+        num_leaves=95,
+        max_depth=9,
+        learning_rate=0.025,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=45.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "recency_high_90d_fast": LgbmEMOSVariantConfig(
+        name="recency_high_90d_fast",
+        n_estimators=600,
+        num_leaves=95,
+        max_depth=9,
+        learning_rate=0.025,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "mega_neighbor_fast": LgbmEMOSVariantConfig(
+        name="mega_neighbor_fast",
+        n_estimators=1000,
+        num_leaves=150,
+        max_depth=10,
+        learning_rate=0.015,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    # Autoresearch round 6: OOF scale — structural fix for sigma collapse
+    "high_neighbor_oof": LgbmEMOSVariantConfig(
+        name="high_neighbor_oof",
+        n_estimators=600,
+        num_leaves=95,
+        max_depth=9,
+        learning_rate=0.025,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=True,
+        use_neighbor_delta=True,
+    ),
+    "ultra_high_neighbor_oof": LgbmEMOSVariantConfig(
+        name="ultra_high_neighbor_oof",
+        n_estimators=800,
+        num_leaves=127,
+        max_depth=10,
+        learning_rate=0.02,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=True,
+        use_neighbor_delta=True,
+    ),
+    "mega_neighbor_oof": LgbmEMOSVariantConfig(
+        name="mega_neighbor_oof",
+        n_estimators=1000,
+        num_leaves=150,
+        max_depth=10,
+        learning_rate=0.015,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=True,
+        use_neighbor_delta=True,
+    ),
+    # Autoresearch round 4: push CRPS below 0.45
+    "recency_tight_fast": LgbmEMOSVariantConfig(
+        name="recency_tight_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=15.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "recency_mid_fast": LgbmEMOSVariantConfig(
+        name="recency_mid_fast",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=20.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "high_neighbor_fast": LgbmEMOSVariantConfig(
+        name="high_neighbor_fast",
+        n_estimators=600,
+        num_leaves=95,
+        max_depth=9,
+        learning_rate=0.025,
+        min_child_samples=5,
+        use_recency_weights=False,
+        recency_half_life_days=90.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    "recency_high_fast": LgbmEMOSVariantConfig(
+        name="recency_high_fast",
+        n_estimators=600,
+        num_leaves=95,
+        max_depth=9,
+        learning_rate=0.025,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=30.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+    ),
+    # Scale fix variants: address the 0.5 constant-std collapse in recency_neighbor_fast
+    "recency_neighbor_oof": LgbmEMOSVariantConfig(
+        name="recency_neighbor_oof",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=30.0,
+        use_oof_scale=True,
+        use_neighbor_delta=True,
+    ),
+    "recency_neighbor_std3": LgbmEMOSVariantConfig(
+        name="recency_neighbor_std3",
+        n_estimators=500,
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.03,
+        min_child_samples=5,
+        use_recency_weights=True,
+        recency_half_life_days=30.0,
+        use_oof_scale=False,
+        use_neighbor_delta=True,
+        fixed_std=3.0,
+    ),
 }
 
 
@@ -168,6 +454,7 @@ _CROSS_MODEL_VARS = (
     "midday_temp",
     "model_daily_min",
     "model_daily_mean",
+    "cloud_cover_mean",
 )
 
 
@@ -205,7 +492,11 @@ def _nwp_spread_features(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _new_lgbm(cfg: LgbmEMOSVariantConfig) -> LGBMRegressor:
+def _new_lgbm(cfg: LgbmEMOSVariantConfig, alpha: float | None = None) -> LGBMRegressor:
+    kwargs: dict[str, object] = {}
+    if alpha is not None:
+        kwargs["objective"] = "quantile"
+        kwargs["alpha"] = alpha
     return LGBMRegressor(
         n_estimators=cfg.n_estimators,
         learning_rate=cfg.learning_rate,
@@ -213,11 +504,13 @@ def _new_lgbm(cfg: LgbmEMOSVariantConfig) -> LGBMRegressor:
         max_depth=cfg.max_depth,
         min_child_samples=cfg.min_child_samples,
         subsample=0.9,
+        subsample_freq=cfg.subsample_freq,
         colsample_bytree=0.9,
         reg_alpha=0.1,
         reg_lambda=1.0,
         random_state=42,
         verbose=-1,
+        **kwargs,
     )
 
 
@@ -242,6 +535,8 @@ class LgbmEMOSModel:
         self.builder = ContextualFeatureBuilder(self.feature_names)
         self._mean_model: LGBMRegressor | None = None
         self._scale_model: LGBMRegressor | None = None
+        self._q10_model: LGBMRegressor | None = None
+        self._q90_model: LGBMRegressor | None = None
         self._constant_mean: float = 0.0
         self._constant_std: float = 1.0
         self.diagnostics_: dict[str, float] = {}
@@ -262,30 +557,49 @@ class LgbmEMOSModel:
         x = pd.concat([x_base, x_extra], axis=1)
 
         cfg = self._variant_config
+        if cfg.use_neighbor_delta:
+            x = self._add_neighbor_delta(x, ordered)
         sw = recency_weights(ordered, half_life_days=cfg.recency_half_life_days) if cfg.use_recency_weights else None
 
-        # Fit mean model on full training set
-        self._mean_model = _new_lgbm(cfg)
-        self._mean_model.fit(x, y, sample_weight=sw)
-
-        # Compute scale targets: OOF residuals (honest but slow) or in-sample (fast)
-        if cfg.use_oof_scale:
-            oof_residuals = self._oof_residuals(ordered, x, y, sw)
+        if cfg.use_quantile_loss:
+            # Quantile regression mode: fit q10/q50/q90 models directly
+            self._mean_model = _new_lgbm(cfg, alpha=0.5)
+            self._mean_model.fit(x, y, sample_weight=sw)
+            self._q10_model = _new_lgbm(cfg, alpha=0.1)
+            self._q10_model.fit(x, y, sample_weight=sw)
+            self._q90_model = _new_lgbm(cfg, alpha=0.9)
+            self._q90_model.fit(x, y, sample_weight=sw)
+            self._scale_model = None
+        elif cfg.fixed_std is not None:
+            # Fixed-std mode: mean model only, scale = constant (skips scale model entirely)
+            self._mean_model = _new_lgbm(cfg)
+            self._mean_model.fit(x, y, sample_weight=sw)
+            self._constant_std = cfg.fixed_std
+            self._scale_model = None
         else:
-            assert self._mean_model is not None
-            preds = np.asarray(self._mean_model.predict(x), dtype=float)
-            oof_residuals = np.clip(np.abs(y - preds), 0.25, 12.0)
+            # Standard mode: fit mean model + scale model on residuals
+            self._mean_model = _new_lgbm(cfg)
+            self._mean_model.fit(x, y, sample_weight=sw)
 
-        # Fit scale model on |OOF residuals|
-        self._scale_model = _new_lgbm(cfg)
-        self._scale_model.fit(x, oof_residuals, sample_weight=sw)
+            # Compute scale targets: OOF residuals (honest but slow) or in-sample (fast)
+            if cfg.use_oof_scale:
+                oof_residuals = self._oof_residuals(ordered, x, y, sw)
+            else:
+                assert self._mean_model is not None
+                preds = np.asarray(self._mean_model.predict(x), dtype=float)
+                oof_residuals = np.clip(np.abs(y - preds), 0.25, 12.0)
+
+            # Fit scale model on |OOF residuals|
+            self._scale_model = _new_lgbm(cfg)
+            self._scale_model.fit(x, oof_residuals, sample_weight=sw)
 
         self.diagnostics_ = {
             "train_rows": float(len(ordered)),
             "feature_count": float(len(x.columns)),
-            "oof_mae": float(np.mean(oof_residuals)),
-            "oof_residual_p90": float(np.percentile(oof_residuals, 90)),
         }
+        if not cfg.use_quantile_loss and cfg.fixed_std is None:
+            self.diagnostics_["oof_mae"] = float(np.mean(oof_residuals))
+            self.diagnostics_["oof_residual_p90"] = float(np.percentile(oof_residuals, 90))
 
     def _oof_residuals(
         self,
@@ -320,8 +634,22 @@ class LgbmEMOSModel:
 
         return np.clip(np.abs(y - oof_preds), 0.25, 12.0)
 
+    @staticmethod
+    def _add_neighbor_delta(x: pd.DataFrame, frame: pd.DataFrame) -> pd.DataFrame:
+        """Append NWP-vs-neighbor delta features to the feature matrix."""
+        extra: dict[str, pd.Series] = {}
+        if "nwp_ens_mean" in x.columns and "neighbor_mean_temp" in frame.columns:
+            neighbor = pd.to_numeric(frame["neighbor_mean_temp"], errors="coerce").fillna(0.0)
+            extra["nwp_vs_neighbor_delta"] = x["nwp_ens_mean"].values - neighbor.values
+        if "nwp_std" in x.columns and "neighbor_spread" in frame.columns:
+            nb_spread = pd.to_numeric(frame["neighbor_spread"], errors="coerce").fillna(0.0)
+            extra["nwp_vs_neighbor_spread_ratio"] = x["nwp_std"].values - nb_spread.values
+        if extra:
+            return pd.concat([x, pd.DataFrame(extra, index=x.index)], axis=1)
+        return x
+
     def predict(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        if self._mean_model is None or self._scale_model is None:
+        if self._mean_model is None:
             size = len(frame)
             return np.full(size, self._constant_mean, dtype=float), np.full(size, self._constant_std, dtype=float)
 
@@ -329,6 +657,19 @@ class LgbmEMOSModel:
         x_base = self.builder.transform(frame_reset)
         x_extra = _nwp_spread_features(frame_reset)
         x = pd.concat([x_base, x_extra], axis=1)
+        if self._variant_config.use_neighbor_delta:
+            x = self._add_neighbor_delta(x, frame_reset)
         mean = np.asarray(self._mean_model.predict(x), dtype=float)
-        scale = np.clip(np.asarray(self._scale_model.predict(x), dtype=float), 0.5, None)
+
+        if self._variant_config.use_quantile_loss and self._q10_model is not None and self._q90_model is not None:
+            q10 = np.asarray(self._q10_model.predict(x), dtype=float)
+            q90 = np.asarray(self._q90_model.predict(x), dtype=float)
+            # σ = (q90 - q10) / 2.56  (for a standard normal, q90-q10 = 2.56σ)
+            scale = np.clip((q90 - q10) / 2.56, 0.5, None)
+        else:
+            if self._scale_model is None:
+                scale = np.full(len(frame), self._constant_std, dtype=float)
+            else:
+                scale = np.clip(np.asarray(self._scale_model.predict(x), dtype=float), 2.0, None)
+
         return mean, scale
