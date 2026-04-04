@@ -10,8 +10,14 @@
 # Schedule: run once per day (e.g., 09:00 KST = 00:00 UTC)
 set -euo pipefail
 
+# Ensure uv and python are on PATH (cron doesn't load ~/.bashrc)
+export PATH="/home/seok436/.local/bin:$PATH"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
+
+# Ensure log directory exists (cron will abort if missing)
+mkdir -p logs artifacts/signals/v2
 
 MODEL="trading_champion"
 SCAN_EDGE_OUTPUT="artifacts/signals/v2/scan_edge_latest.json"
@@ -40,8 +46,14 @@ uv run python scripts/log_gamma_prices.py
 echo "${LOG_PREFIX} scan-edge (model=${MODEL})..."
 uv run pmtmax scan-edge \
     --model-name "${MODEL}" \
-    --min-edge 0.05 \
+    --min-edge 0.15 \
+    --min-model-prob 0.05 \
+    --max-model-prob 0.95 \
     --output "${SCAN_EDGE_OUTPUT}"
+
+# 3b. Record new signals as forward paper trades
+echo "${LOG_PREFIX} recording paper trades..."
+uv run python scripts/record_paper_trades.py
 
 # 4. Append snapshot to history
 if [[ -f "${SCAN_EDGE_OUTPUT}" ]]; then
