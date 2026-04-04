@@ -15,6 +15,7 @@ def _warehouse(tmp_path: Path, name: str) -> DataWarehouse:
         raw_root=tmp_path / "raw",
         manifest_root=tmp_path / "manifests",
         archive_root=tmp_path / "archive",
+        recovery_root=tmp_path / "recovery",
     )
 
 
@@ -124,3 +125,48 @@ def test_warehouse_normalizes_missing_legacy_key_columns(tmp_path: Path) -> None
     assert frame.iloc[0]["request_kind"] == "full"
     assert "decision_horizon" in frame.columns
     canonical.close()
+
+
+def test_warehouse_blocks_canonical_gold_overwrite_without_unlock(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "guarded")
+    frame = pd.DataFrame([{"market_id": "m1", "decision_horizon": "morning_of", "realized_daily_max": 8.0}])
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        frame,
+        relative_path="gold/v2/historical_training_set.parquet",
+        allow_canonical_overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="Protected canonical output already exists"):
+        warehouse.write_gold_table(
+            "gold_training_examples_tabular",
+            frame,
+            relative_path="gold/v2/historical_training_set.parquet",
+        )
+    warehouse.close()
+
+
+def test_warehouse_unlocks_canonical_overwrite_and_creates_recovery_backup(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "recovery")
+    first = pd.DataFrame([{"market_id": "m1", "decision_horizon": "morning_of", "realized_daily_max": 8.0}])
+    second = pd.DataFrame([{"market_id": "m2", "decision_horizon": "morning_of", "realized_daily_max": 9.0}])
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        first,
+        relative_path="gold/v2/historical_training_set.parquet",
+        allow_canonical_overwrite=True,
+    )
+    warehouse.write_manifest()
+
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        second,
+        relative_path="gold/v2/historical_training_set.parquet",
+        allow_canonical_overwrite=True,
+    )
+
+    backups = list((tmp_path / "recovery").rglob("historical_training_set.parquet"))
+    manifests = list((tmp_path / "recovery").rglob("warehouse_manifest.json"))
+    assert backups
+    assert manifests
+    warehouse.close()

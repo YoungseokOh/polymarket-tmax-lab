@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Market Rules"
+  short_description: "Work on discovery, rule parsing, and settlement fidelity."
+  default_prompt: "Use $pmtmax-market-rules to inspect or change discovery, rule parsing, station mapping, and official truth-source handling."
+
+policy:
+  allow_implicit_invocation: true

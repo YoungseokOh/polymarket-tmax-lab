@@ -11,21 +11,69 @@
 - `hope-hunt-report`
 - `hope-hunt-daemon`
 
+## Current Champion (as of 2026-04-03)
+- Model: `lgbm_emos`, variant: `recency_neighbor_fast`, CRPS: 0.4769
+- pkl: `artifacts/models/v2/lgbm_emos__recency_neighbor_fast.pkl`
+- champion.json: `artifacts/models/v2/champion.json`
+
+## Daily Data Collection (cron 00:00 UTC = 09:00 KST)
+```bash
+bash scripts/daily_experiment.sh
+```
+Runs: scan-markets → backfill-truth → backfill-forecasts → log_gamma_prices → scan-edge → track_paper_trade_outcomes
+
+## scan-edge (signal generation)
+```bash
+uv run pmtmax scan-edge \
+    --model-name trading_champion \
+    --min-edge 0.15 \
+    --min-model-prob 0.05 \
+    --max-model-prob 0.95 \
+    --output artifacts/signals/v2/scan_edge_latest.json
+```
+`--min-model-prob 0.05 --max-model-prob 0.95` is required — filters out overconfident 0%/100% predictions.
+
+## Model Training
+```bash
+# Train a specific lgbm_emos variant
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_fast
+
+# Publish as champion
+uv run pmtmax publish-champion --model-name lgbm_emos --variant recency_neighbor_fast
+
+# Quick comparison (top variants only, fast)
+uv run python scripts/quick_eval.py
+```
+
+## Dataset Build — SAFETY RULE
+```bash
+# ALWAYS pass --markets-path. Never run without it.
+uv run pmtmax build-dataset \
+    --markets-path configs/market_inventory/full_training_set_snapshots.json \
+    --allow-canonical-overwrite
+```
+⚠️ Running without `--markets-path` will rebuild with only example data (12 rows).
+The CLI now defaults to `full_training_set_snapshots.json` with a yellow warning,
+but explicit is safer. A shrinkage guard (50% threshold) will block silent overwrites.
+Canonical `historical_training_set*` / `historical_backtest_panel` outputs are immutable
+unless you pass `--allow-canonical-overwrite`, and the writer now snapshots the existing
+parquet + manifest under `artifacts/recovery/` first.
+
+## Benchmark (slow — use retrain_stride)
+```bash
+uv run pmtmax benchmark-models --retrain-stride 30
+```
+
 ## Default Workflow
 ```bash
 uv run pmtmax bootstrap-lab
-uv run pmtmax build-dataset
-uv run pmtmax materialize-backtest-panel
-uv run pmtmax train-baseline --model-name gaussian_emos
-uv run pmtmax benchmark-models
-uv run pmtmax benchmark-ablations --model-name tuned_ensemble
-uv run pmtmax backtest --model-name champion
-uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
-uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion
-uv run pmtmax opportunity-shadow --core-recent-only --model-name trading_champion --max-cycles 1
-uv run pmtmax open-phase-shadow --core-recent-only --model-name trading_champion --max-cycles 1
-uv run pmtmax revenue-gate-report
-uv run pmtmax hope-hunt-report --model-name trading_champion
+uv run pmtmax build-dataset \
+    --markets-path configs/market_inventory/full_training_set_snapshots.json \
+    --allow-canonical-overwrite
+uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_fast
+uv run python scripts/quick_eval.py
+uv run pmtmax benchmark-models --retrain-stride 30
 ```
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
@@ -59,9 +107,9 @@ refresh manifest는 partial progress를 남기므로 source lag나 transient req
 
 ```bash
 uv run python scripts/refresh_historical_event_urls.py
-uv run python scripts/build_historical_market_inventory.py
-uv run python scripts/validate_historical_market_inventory.py
-uv run pmtmax build-dataset --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run python scripts/build_historical_market_inventory.py --truth-per-source-limit 1
+uv run python scripts/validate_historical_market_inventory.py --truth-per-source-limit 1
+uv run pmtmax build-dataset --markets-path configs/market_inventory/historical_temperature_snapshots.json --allow-canonical-overwrite
 uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax backtest --model-name gaussian_emos
 uv run python scripts/build_active_weather_watchlist.py

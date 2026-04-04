@@ -20,9 +20,11 @@ from pmtmax.markets.inventory import (
     HistoricalEventPageFetchReport,
     build_fetches_from_report,
     build_historical_collection_status,
+    collection_status_matches_filter,
     discover_temperature_event_refs_from_gamma,
     fetch_historical_event_page_report,
     filter_historical_event_candidates,
+    is_retryable_collection_entry,
     merge_historical_collection_status_reports,
     merge_historical_event_candidates,
     probe_truth_readiness,
@@ -35,7 +37,7 @@ DEFAULT_FETCH_REPORT = Path("data/manifests/historical_event_page_fetches.json")
 DEFAULT_REPORT = Path("data/manifests/historical_collection_status.json")
 DEFAULT_FETCH_WORKERS = 8
 DEFAULT_TRUTH_WORKERS = 4
-DEFAULT_TRUTH_PER_SOURCE_LIMIT = 2
+DEFAULT_TRUTH_PER_SOURCE_LIMIT = 1
 DEFAULT_CHECKPOINT_EVERY = 25
 STAGE_CHOICES = ("discover", "fetch-pages", "classify", "publish", "all")
 
@@ -61,20 +63,24 @@ def _selected_fetch_report(
     resume: bool,
     status_filters: set[HistoricalCollectionStatus],
     max_events: int | None,
+    already_selected_urls: set[str] | None = None,
 ) -> HistoricalEventPageFetchReport:
     supported = {city.lower() for city in supported_cities}
     existing_by_url = {entry.url: entry for entry in (status_report.entries if status_report is not None else [])}
+    processed_urls = already_selected_urls or set()
     selected_entries = []
     for entry in fetch_report.entries:
         if entry.fetch_status != "fetched":
             continue
         if entry.city.lower() not in supported:
             continue
+        if entry.url in processed_urls:
+            continue
         existing = existing_by_url.get(entry.url)
         if status_filters:
-            if existing is None or existing.status not in status_filters:
+            if existing is None or not collection_status_matches_filter(existing, status_filters):
                 continue
-        elif resume and existing is not None and existing.status in TERMINAL_COLLECTION_STATUSES:
+        elif resume and existing is not None and not is_retryable_collection_entry(existing):
             continue
         selected_entries.append(entry)
 
@@ -187,10 +193,13 @@ def _run_classify_stage(
     report_path: Path,
     truth_workers: int,
     truth_per_source_limit: int,
+    truth_snapshot_dir: Path | None,
+    use_truth_cache: bool,
 ) -> HistoricalCollectionStatusReport:
     remaining = max_events
     total_processed = 0
     current_report = status_report
+    processed_urls: set[str] = set()
     while True:
         batch_limit = checkpoint_every if remaining is None else min(checkpoint_every, remaining)
         if batch_limit <= 0:
@@ -202,17 +211,24 @@ def _run_classify_stage(
             resume=resume,
             status_filters=status_filters,
             max_events=batch_limit,
+            already_selected_urls=processed_urls,
         )
         if selected_fetch_report.processed_this_run == 0:
             break
         selected_urls = {entry.url for entry in selected_fetch_report.entries}
+        processed_urls.update(selected_urls)
         existing_status_by_url = {entry.url: entry for entry in (current_report.entries if current_report is not None else [])}
         attempted_at = datetime.now(tz=UTC)
         partial_fetches = build_fetches_from_report(http, selected_fetch_report, supported_cities=supported_cities)
         _, partial_status_report = build_historical_collection_status(
             partial_fetches,
             supported_cities=supported_cities,
-            truth_probe=lambda snapshot: probe_truth_readiness(snapshot, http),
+            truth_probe=lambda snapshot: probe_truth_readiness(
+                snapshot,
+                http,
+                snapshot_dir=truth_snapshot_dir,
+                use_cache=use_truth_cache,
+            ),
             source_manifest=str(output_path),
             existing_market_ids=_existing_collected_market_ids(current_report, selected_urls=selected_urls),
             attempt_counts={
@@ -328,7 +344,7 @@ def main() -> None:
     parser.add_argument(
         "--status-filter",
         action="append",
-        choices=sorted(NON_TERMINAL_COLLECTION_STATUSES),
+        choices=sorted(NON_TERMINAL_COLLECTION_STATUSES | TERMINAL_COLLECTION_STATUSES),
         default=None,
         help="When classifying, only reprocess URLs whose existing status matches one of these values.",
     )
@@ -340,7 +356,12 @@ def main() -> None:
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Disable cache reads while fetching new candidate pages and truth payloads.",
+        help="Disable cache reads while fetching new candidate pages.",
+    )
+    parser.add_argument(
+        "--truth-no-cache",
+        action="store_true",
+        help="Disable cache reads while probing official truth readiness.",
     )
     parser.add_argument(
         "--skip-discover",
@@ -430,11 +451,14 @@ def main() -> None:
                 report_path=args.report,
                 truth_workers=max(1, args.truth_workers),
                 truth_per_source_limit=max(1, args.truth_per_source_limit),
+                truth_snapshot_dir=config.app.raw_dir / "bronze",
+                use_truth_cache=not args.truth_no_cache,
             )
             print(
                 f"[classify] processed {status_report.processed_this_run} fetched events -> "
                 f"{status_report.status_counts.get('collected', 0)} collected total, "
                 f"{status_report.status_counts.get('truth_source_lag', 0)} source-lag, "
+                f"{status_report.status_counts.get('truth_parse_failed', 0)} parse-failed, "
                 f"{status_report.status_counts.get('truth_request_failed', 0)} request-failed"
             )
 

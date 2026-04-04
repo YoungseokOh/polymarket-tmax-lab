@@ -26,7 +26,7 @@ DEFAULT_REPORT = Path("data/manifests/historical_inventory_build_report.json")
 DEFAULT_CANDIDATE_REPORT = Path("data/manifests/historical_event_candidates.json")
 DEFAULT_STATUS_REPORT = Path("data/manifests/historical_collection_status.json")
 DEFAULT_TRUTH_WORKERS = 4
-DEFAULT_TRUTH_PER_SOURCE_LIMIT = 2
+DEFAULT_TRUTH_PER_SOURCE_LIMIT = 1
 
 
 def main() -> None:
@@ -73,6 +73,11 @@ def main() -> None:
         default=DEFAULT_TRUTH_PER_SOURCE_LIMIT,
         help="Maximum concurrent truth probes per official source family.",
     )
+    parser.add_argument(
+        "--truth-no-cache",
+        action="store_true",
+        help="Disable cache reads while probing official truth readiness.",
+    )
     args = parser.parse_args()
 
     config, _ = load_settings()
@@ -91,7 +96,12 @@ def main() -> None:
             pages,
             supported_cities=config.app.supported_cities,
             source_manifest=str(args.input),
-            truth_probe=lambda snapshot: probe_truth_readiness(snapshot, http),
+            truth_probe=lambda snapshot: probe_truth_readiness(
+                snapshot,
+                http,
+                snapshot_dir=config.app.raw_dir / "bronze",
+                use_cache=not args.truth_no_cache,
+            ),
             truth_workers=args.truth_workers,
             truth_per_source_limit=args.truth_per_source_limit,
         )

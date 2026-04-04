@@ -11,7 +11,7 @@ from dateutil import parser as date_parser
 
 from pmtmax.markets.market_spec import FinalizationPolicy, MarketSpec, PrecisionRule
 from pmtmax.markets.normalization import extract_clob_token_ids, extract_outcome_labels
-from pmtmax.markets.outcome_schema import infer_unit_from_label, parse_outcome_schema
+from pmtmax.markets.outcome_schema import infer_unit_from_labels, parse_outcome_schema
 from pmtmax.markets.station_registry import (
     canonical_city,
     lookup_station,
@@ -185,7 +185,7 @@ def parse_market_spec(
         msg = "Could not determine market outcomes"
         raise ValueError(msg)
 
-    unit = infer_unit_from_label(outcome_labels[0])
+    unit = infer_unit_from_labels(outcome_labels)
     precision_text = "exact_source"
     if match := WHOLE_DEGREE_RE.search(raw_text):
         precision_text = match.group(0)

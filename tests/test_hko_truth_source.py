@@ -22,6 +22,19 @@ class _FakeHttp:
         }
 
 
+class _ArchiveHttp(_FakeHttp):
+    def get_json(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> dict | list[list[str]]:
+        self.calls.append({"url": url, "params": params, "use_cache": use_cache})
+        if "web.archive.org/cdx/search/cdx" in url:
+            return [
+                ["timestamp", "original", "statuscode", "mimetype"],
+                ["20260320010101", "ignored", "200", "application/json"],
+            ]
+        if "web.archive.org/web/" in url:
+            return {"data": [["2026", "3", "17", "22.4", "C"]]}
+        return {"data": []}
+
+
 def test_hko_truth_source_falls_back_to_full_station_payload_when_month_is_empty() -> None:
     spec = example_market_specs(["Hong Kong"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
     http = _FakeHttp()
@@ -45,3 +58,15 @@ def test_hko_truth_source_falls_back_to_full_station_payload_when_month_is_empty
         "rformat": "json",
         "lang": "en",
     }
+
+
+def test_hko_truth_source_restores_exact_month_payload_from_official_archive() -> None:
+    spec = example_market_specs(["Hong Kong"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
+    http = _ArchiveHttp()
+    source = HkoTruthSource(http)  # type: ignore[arg-type]
+
+    bundle = source.fetch_observation_bundle(spec, date(2026, 3, 17))
+
+    assert bundle.observation.daily_max == 22.4
+    assert bundle.source_provenance == "official_archive"
+    assert bundle.archive_source_url is not None

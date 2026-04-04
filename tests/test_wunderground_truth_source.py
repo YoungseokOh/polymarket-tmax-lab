@@ -39,6 +39,18 @@ class _PublicApiKeyHttp(_FakeHttp):
         return '<html><script>var url="https://api.weather.com/v3/wx/observations/current?apiKey=abcdef0123456789abcdef0123456789";</script></html>'
 
 
+class _NoDataHistoricalHttp(_PublicApiKeyHttp):
+    def get_json(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> dict:  # noqa: ARG002
+        self.calls.append({"url": url, "params": params, "use_cache": use_cache})
+        return {"observations": []}
+
+    def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
+        return (
+            '<html><script>var url="https://api.weather.com/v3/wx/observations/current?apiKey='
+            'abcdef0123456789abcdef0123456789";</script>Daily Observations: No Data Recorded</html>'
+        )
+
+
 def test_wunderground_truth_source_uses_cached_html_snapshot_when_available() -> None:
     spec = example_market_specs(["NYC"])[0]
     source = WundergroundTruthSource(_FakeHttp(), snapshot_dir=Path("tests/fixtures/truth"))  # type: ignore[arg-type]
@@ -84,6 +96,30 @@ def test_wunderground_truth_source_discovers_public_frontend_api_key() -> None:
         "startDate": "20260317",
         "endDate": "20260317",
     }
+
+
+def test_wunderground_truth_source_prefers_historical_api_over_no_data_html() -> None:
+    spec = example_market_specs(["NYC"])[0].model_copy(update={"target_local_date": date(2026, 3, 17)})
+    source = WundergroundTruthSource(_NoDataHistoricalHttp())  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="No Wunderground historical observations found"):
+        source.fetch_observation_bundle(spec, date(2026, 3, 17))
+
+
+def test_wunderground_truth_source_supports_weather_station_urls() -> None:
+    spec = example_market_specs(["NYC"])[0].model_copy(
+        update={
+            "target_local_date": date(2026, 3, 17),
+            "official_source_url": "https://www.wunderground.com/weather/KLGA",
+        }
+    )
+    http = _PublicApiKeyHttp()
+    source = WundergroundTruthSource(http)  # type: ignore[arg-type]
+
+    bundle = source.fetch_observation_bundle(spec, date(2026, 3, 17))
+
+    assert bundle.observation.daily_max == 12
+    assert http.calls[0]["url"] == "https://api.weather.com/v1/location/KLGA:9:US/observations/historical.json"
 
 
 def test_wunderground_truth_source_surfaces_api_key_guidance_when_html_fallback_fails(

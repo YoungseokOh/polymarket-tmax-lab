@@ -141,6 +141,7 @@ run_step "Materialize training dataset" \
   uv run pmtmax materialize-training-set \
     --markets-path "$MARKETS_PATH" \
     "${CITY_ARGS[@]}" \
+    --allow-canonical-overwrite \
     --decision-horizon market_open \
     --decision-horizon previous_evening \
     --decision-horizon morning_of

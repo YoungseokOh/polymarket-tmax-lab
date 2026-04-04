@@ -20,11 +20,17 @@ class TruthSourceLagError(ValueError):
         self.latest_available_date = latest_available_date
 
 
+class TruthSourceParseError(ValueError):
+    """Raised when a truth source responds but its payload cannot be parsed safely."""
+
+
 class TruthFetchBundle(BaseModel):
     observation: ObservationRecord
     raw_payload: dict[str, Any] | list[dict[str, Any]] | str
     media_type: str
     source_url: str
+    archive_source_url: str | None = None
+    source_provenance: str = "live"
 
 
 class TruthSource(ABC):

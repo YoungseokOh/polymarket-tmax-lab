@@ -12,7 +12,12 @@ from pmtmax.config.settings import EnvSettings
 from pmtmax.http import CachedHttpClient
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.storage.schemas import ObservationRecord
-from pmtmax.weather.truth_sources.base import TruthFetchBundle, TruthSource
+from pmtmax.weather.truth_sources.base import (
+    TruthFetchBundle,
+    TruthSource,
+    TruthSourceLagError,
+    TruthSourceParseError,
+)
 
 TEMP_MAX_PATTERNS = [
     re.compile(r'"temperatureMax"\s*:\s*\{"value"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)', re.I),
@@ -24,6 +29,31 @@ PUBLIC_API_KEY_PATTERNS = [
 ]
 WU_HISTORICAL_URL = "https://api.weather.com/v1/location/{location_id}/observations/historical.json"
 WU_API_KEY_ENV = "PMTMAX_WU_API_KEY"
+NO_DATA_RECORDED_MARKERS = ("No Data Recorded",)
+COUNTRY_CODE_BY_NAME = {
+    "argentina": "AR",
+    "brazil": "BR",
+    "canada": "CA",
+    "china": "CN",
+    "france": "FR",
+    "germany": "DE",
+    "hong kong": "HK",
+    "india": "IN",
+    "israel": "IL",
+    "italy": "IT",
+    "japan": "JP",
+    "new zealand": "NZ",
+    "poland": "PL",
+    "singapore": "SG",
+    "south korea": "KR",
+    "spain": "ES",
+    "taiwan": "TW",
+    "turkey": "TR",
+    "uk": "GB",
+    "united kingdom": "GB",
+    "usa": "US",
+    "united states": "US",
+}
 
 
 class WundergroundTruthSource(TruthSource):
@@ -34,12 +64,14 @@ class WundergroundTruthSource(TruthSource):
         http: CachedHttpClient,
         snapshot_dir: Path | None = None,
         api_key: str | None = None,
+        use_cache: bool = True,
     ) -> None:
         self.http = http
         self.snapshot_dir = snapshot_dir
         resolved_api_key = EnvSettings().wu_api_key if api_key is None else api_key
         self.api_key = resolved_api_key or None
         self._public_api_key_cache: dict[str, str] = {}
+        self.use_cache = use_cache
 
     def fetch_observation_bundle(self, spec: MarketSpec, target_date: date) -> TruthFetchBundle:
         url = f"{spec.official_source_url.rstrip('/')}/date/{target_date.isoformat()}"
@@ -66,7 +98,7 @@ class WundergroundTruthSource(TruthSource):
         if not runtime_api_key:
             runtime_api_key = self._public_api_key_cache.get(spec.station_id)
             if not runtime_api_key:
-                html = self.http.get_text(url, use_cache=True)
+                html = self.http.get_text(url, use_cache=self.use_cache)
                 runtime_api_key = self._extract_public_api_key(html)
                 if runtime_api_key is not None:
                     self._public_api_key_cache[spec.station_id] = runtime_api_key
@@ -78,7 +110,7 @@ class WundergroundTruthSource(TruthSource):
         except Exception as exc:
             historical_error = exc
             if html is None:
-                html = self.http.get_text(url, use_cache=True)
+                html = self.http.get_text(url, use_cache=self.use_cache)
             try:
                 value = self._parse_daily_max(html)
             except ValueError as parse_exc:
@@ -88,6 +120,8 @@ class WundergroundTruthSource(TruthSource):
                         "or provide a same-source local snapshot."
                     )
                     raise RuntimeError(msg) from parse_exc
+                if historical_error is not None:
+                    raise historical_error from parse_exc
                 raise
             raw_payload = html
             media_type = "text/html"
@@ -135,7 +169,7 @@ class WundergroundTruthSource(TruthSource):
             "startDate": target_date.strftime("%Y%m%d"),
             "endDate": target_date.strftime("%Y%m%d"),
         }
-        payload = cast(dict[str, object], self.http.get_json(base_url, params=params, use_cache=True))
+        payload = cast(dict[str, object], self.http.get_json(base_url, params=params, use_cache=self.use_cache))
         source_url = f"{base_url}?{urlencode(params)}"
         return payload, source_url
 
@@ -149,6 +183,15 @@ class WundergroundTruthSource(TruthSource):
     @staticmethod
     def _location_id(spec: MarketSpec) -> str:
         parts = [part for part in urlparse(spec.official_source_url).path.split("/") if part]
+        if len(parts) >= 4 and parts[0] == "history" and parts[1] == "daily":
+            country_code = parts[2].upper()
+            return f"{spec.station_id}:9:{country_code}"
+        if len(parts) >= 2 and parts[0] == "weather":
+            country_code = COUNTRY_CODE_BY_NAME.get((spec.country or "").strip().lower())
+            if not country_code:
+                msg = f"Unsupported Wunderground source URL: {spec.official_source_url}"
+                raise ValueError(msg)
+            return f"{spec.station_id}:9:{country_code}"
         if len(parts) < 4 or parts[0] != "history" or parts[1] != "daily":
             msg = f"Unsupported Wunderground source URL: {spec.official_source_url}"
             raise ValueError(msg)
@@ -157,19 +200,22 @@ class WundergroundTruthSource(TruthSource):
 
     @staticmethod
     def _parse_daily_max(html: str) -> float:
+        if any(marker in html for marker in NO_DATA_RECORDED_MARKERS):
+            msg = "Could not parse Wunderground daily max"
+            raise TruthSourceParseError(msg)
         for pattern in TEMP_MAX_PATTERNS:
             match = pattern.search(html)
             if match:
                 return float(match.group("value"))
         msg = "Could not parse Wunderground daily max"
-        raise ValueError(msg)
+        raise TruthSourceParseError(msg)
 
     @staticmethod
     def _parse_historical_max(payload: dict[str, object]) -> float:
         observations = payload.get("observations")
         if not isinstance(observations, list) or not observations:
             msg = "No Wunderground historical observations found"
-            raise ValueError(msg)
+            raise TruthSourceLagError(msg)
 
         values: list[float] = []
         for row in observations:
@@ -186,5 +232,5 @@ class WundergroundTruthSource(TruthSource):
 
         if not values:
             msg = "No Wunderground historical temperature values found"
-            raise ValueError(msg)
+            raise TruthSourceLagError(msg)
         return max(values)

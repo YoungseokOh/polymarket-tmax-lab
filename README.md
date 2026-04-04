@@ -79,7 +79,7 @@ book, first backfill price history and materialize the decision-time panel, then
 
 ```bash
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
-uv run pmtmax materialize-backtest-panel
+uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
 uv run pmtmax backtest --pricing-source real_history --model-name champion
 ```
 
@@ -216,8 +216,8 @@ Useful shared skills:
 ## Training Workflow
 ```bash
 uv run pmtmax bootstrap-lab
-uv run pmtmax build-dataset
-uv run pmtmax materialize-backtest-panel
+uv run pmtmax build-dataset --allow-canonical-overwrite
+uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
 uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax train-advanced --model-name det2prob_nn
 uv run pmtmax benchmark-models
@@ -255,13 +255,14 @@ Closed-event refresh만 장기 배치로 따로 돌리고 싶으면 staged wrapp
 ```bash
 scripts/run_historical_refresh_pipeline.sh
 scripts/run_historical_refresh_pipeline.sh --city London --max-pages 10 --max-events 50
-scripts/run_historical_refresh_pipeline.sh --stage classify --status-filter truth_source_lag
+scripts/run_historical_refresh_pipeline.sh --stage classify --status-filter truth_source_lag --truth-no-cache --truth-per-source-limit 1
 scripts/run_historical_refresh_pipeline.sh --fill-gaps-only --checkpoint-every 1
 ```
 
 이 wrapper는 `discover -> fetch-pages -> classify -> publish`를 분리해서 실행할 수 있고, 기본은 `--resume`라서 기존 manifest를 이어받아 partial progress를 보존한다.
 `fetch-pages`는 bounded concurrency를 사용하고, `classify`는 exact-source truth probe를 source family별 제한과 함께 병렬화한다.
-`--checkpoint-every`를 주면 fetch/classify manifest를 배치 단위로 계속 저장하고, `--fill-gaps-only`는 기존 candidate manifest를 재사용해서 이미 수집된 항목은 건너뛰고 pending gap만 이어서 채운다.
+`--checkpoint-every`를 주면 fetch/classify manifest를 배치 단위로 계속 저장하고, `--fill-gaps-only`는 기존 candidate manifest를 재사용해서 retryable gap만 다시 classify한다.
+현재 retryable 상태는 `not_closed`, `not_historical`, `truth_source_lag`, `truth_parse_failed`, `truth_request_failed`다. 각 URL은 한 번의 refresh invocation에서 한 번만 재시도한다.
 
 1. Refresh the closed-event source URL manifest from grouped Polymarket weather events:
 
@@ -282,6 +283,7 @@ uv run pmtmax collection-preflight --markets-path configs/market_inventory/histo
 
 `collection-preflight` now separates exact-public and research-public truth tracks. Wunderground-family markets default to the same-airport public research path. Seoul / RKSI uses AMO `AIR_CALP`, London / EGLC and NYC / KLGA use the Wunderground public historical API for the same station, and other expansion-city mappings may use NOAA Global Hourly when `station_catalog.json` documents that same-airport public path. `PMTMAX_WU_API_KEY` is optional and only used when you want to force an explicit same-source audit key instead of the documented public research path.
 When you run `build_historical_market_inventory.py` against the canonical checked-in manifests, it also syncs `data/manifests/historical_collection_status.json` so the `collected` count matches the current curated snapshot inventory.
+Wunderground-family truth probes are sensitive to source-family concurrency. Keep the default `--truth-per-source-limit 1`, and add `--truth-no-cache` when repairing lagged or malformed truth payloads.
 If `backfill-truth` reports `lag` rows or `materialize-training-set` fails with a public archive lag message, run `uv run pmtmax summarize-truth-coverage` to inspect the latest archive date NOAA advertised for each lagged station.
 The default research CLI no longer reads `tests/fixtures/truth`; fixture truth remains test/demo-only unless you wire it explicitly in code.
 `build_historical_market_inventory.py` now filters the canonical snapshot output down to truth-ready markets only. Lagged or blocked URLs stay out of `historical_temperature_snapshots.json` and are recorded in `historical_inventory_build_report.json` issue counts instead. Validation results are written separately to `historical_inventory_validate_report.json`.
@@ -307,22 +309,26 @@ uv run pmtmax backfill-forecasts \
   --single-run-horizon market_open \
   --single-run-horizon previous_evening \
   --single-run-horizon morning_of
-uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json
+uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json --truth-no-cache
 uv run pmtmax summarize-truth-coverage
 uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-training-set \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --decision-horizon market_open \
   --decision-horizon previous_evening \
-  --decision-horizon morning_of
+  --decision-horizon morning_of \
+  --allow-canonical-overwrite
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel \
-  --dataset-path data/parquet/gold/historical_training_set.parquet \
-  --markets-path configs/market_inventory/historical_temperature_snapshots.json
+  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --allow-canonical-overwrite
 uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
 ```
+
+Price-history note: the public CLOB `/prices-history` endpoint is retention-limited in practice. Once older official-history payloads have been captured into `data/raw/bronze`, `bronze_price_history_requests`, and `silver_price_timeseries`, prefer re-materializing `gold_backtest_panel` and `artifacts/price_history_coverage.json` from the archived warehouse. A late uncached refetch can return an empty history for markets that previously had archived points, which reduces request-level coverage without improving research fidelity.
 
 The checked-in starter source URLs live in `configs/market_inventory/historical_temperature_event_urls.json`, and the generated curated `MarketSnapshot[]` inventory lives in `configs/market_inventory/historical_temperature_snapshots.json`.
 The staged closed-event manifests live in:
@@ -344,8 +350,15 @@ and materialization steps in one command. Research mode defaults to strict Open-
 archive usage, and `build-dataset` will request exact `single_run` archives for the
 selected decision horizons when available. Bundled fixture fallback is demo-only and
 must be explicitly enabled via `--no-strict-archive --allow-demo-fixture-fallback`.
+If the canonical gold already exists, `build-dataset` also requires
+`--allow-canonical-overwrite`; otherwise use a variant `--output-name`.
 The canonical warehouse defaults to `data/duckdb/warehouse.duckdb`, and warehouse
 parquet mirrors live under `data/parquet/{bronze,silver,gold}`.
+Canonical `gold/v2/historical_training_set*` and `gold/v2/historical_backtest_panel`
+are immutable by default. Use variant `--output-name` values for experiments, and only
+pass `--allow-canonical-overwrite` when intentionally promoting a rebuilt canonical
+dataset. The writer now snapshots the previous parquet + manifest under
+`artifacts/recovery/` first.
 
 If you prefer step-by-step control instead of the one-shot bootstrap, the lower-level
 commands remain available: `init-warehouse`, `backfill-*`, `materialize-training-set`,
@@ -392,7 +405,8 @@ dataset against official Polymarket prices, build the panel first:
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel \
   --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
-  --markets-path configs/market_inventory/historical_temperature_snapshots.json
+  --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --allow-canonical-overwrite
 uv run pmtmax backtest \
   --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
   --panel-path data/parquet/gold/v2/historical_backtest_panel.parquet \

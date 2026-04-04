@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 from threading import Semaphore
 from typing import Any, Literal
 
@@ -24,6 +25,7 @@ from pmtmax.markets.station_registry import canonical_city
 from pmtmax.storage.schemas import MarketSnapshot
 from pmtmax.utils import stable_hash_bytes
 from pmtmax.weather.truth_sources import make_truth_source
+from pmtmax.weather.truth_sources.base import TruthSourceLagError, TruthSourceParseError
 
 NEXT_DATA_TAG = '<script id="__NEXT_DATA__" type="application/json" crossorigin="anonymous">'
 YES_OUTCOME_INDEX = 0
@@ -32,18 +34,24 @@ EVENT_TITLE_RE = re.compile(r"highest temperature in (?P<city>.+?) on (?P<date>.
 EVENT_URL_PREFIX = "https://polymarket.com/event/"
 HistoricalCollectionStatus = Literal[
     "collected",
+    "not_closed",
+    "not_historical",
     "parse_failed",
     "truth_blocked",
     "truth_source_lag",
+    "truth_parse_failed",
     "truth_request_failed",
     "unsupported_rule",
     "duplicate",
 ]
 WatchlistStatus = Literal["ready", "parse_failed", "unsupported_rule", "duplicate"]
 HistoricalFetchStatus = Literal["pending", "fetched", "fetch_failed"]
-TruthProbeStatus = Literal["ready", "truth_blocked", "truth_source_lag", "truth_request_failed"]
+TruthProbeStatus = Literal["ready", "truth_blocked", "truth_source_lag", "truth_parse_failed", "truth_request_failed"]
+LEGACY_RETRYABLE_COLLECTION_DETAILS = frozenset({"not_closed", "not_historical"})
 TERMINAL_COLLECTION_STATUSES = frozenset({"collected", "parse_failed", "truth_blocked", "unsupported_rule", "duplicate"})
-NON_TERMINAL_COLLECTION_STATUSES = frozenset({"truth_source_lag", "truth_request_failed"})
+NON_TERMINAL_COLLECTION_STATUSES = frozenset(
+    {"not_closed", "not_historical", "truth_source_lag", "truth_parse_failed", "truth_request_failed"}
+)
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,7 @@ class HistoricalCollectionStatusEntry(BaseModel):
     title: str
     url: str
     city: str | None = None
+    station_id: str | None = None
     target_local_date: date | None = None
     official_source_family: str | None = None
     official_source_name: str | None = None
@@ -583,19 +592,29 @@ def snapshots_from_temperature_event_fetches(fetches: list[HistoricalEventFetch]
     return snapshots
 
 
-def probe_truth_readiness(snapshot: MarketSnapshot, http: CachedHttpClient) -> TruthProbeResult:
+def probe_truth_readiness(
+    snapshot: MarketSnapshot,
+    http: CachedHttpClient,
+    *,
+    snapshot_dir: Path | None = None,
+    use_cache: bool = True,
+) -> TruthProbeResult:
     """Return a structured truth-readiness result for one snapshot."""
 
     spec = snapshot.spec
     if spec is None:
         return TruthProbeResult(status="truth_blocked", detail="missing_spec")
     try:
-        truth_source = make_truth_source(spec, http, snapshot_dir=None)
+        truth_source = make_truth_source(spec, http, snapshot_dir=snapshot_dir, use_cache=use_cache)
         truth_source.fetch_observation_bundle(spec, spec.target_local_date)
     except httpx.HTTPError as exc:
         return TruthProbeResult(status="truth_request_failed", detail=str(exc))
     except RuntimeError as exc:
         return TruthProbeResult(status="truth_request_failed", detail=str(exc))
+    except TruthSourceLagError as exc:
+        return TruthProbeResult(status="truth_source_lag", detail=str(exc))
+    except TruthSourceParseError as exc:
+        return TruthProbeResult(status="truth_parse_failed", detail=str(exc))
     except ValueError as exc:
         status: TruthProbeStatus = "truth_source_lag" if _is_truth_source_lag_error(str(exc)) else "truth_blocked"
         return TruthProbeResult(status=status, detail=str(exc))
@@ -697,6 +716,7 @@ def _collection_entry(
         title=ref.title,
         url=ref.url,
         city=spec.city if spec is not None else ref.city,
+        station_id=spec.station_id if spec is not None else None,
         target_local_date=spec.target_local_date if spec is not None else None,
         official_source_family=spec.adapter_key() if spec is not None else None,
         official_source_name=spec.official_source_name if spec is not None else None,
@@ -849,6 +869,25 @@ def _is_truth_source_lag_error(message: str) -> bool:
 def _is_unsupported_rule_error(message: str) -> bool:
     lowered = message.lower()
     return "unsupported official source" in lowered or "unsupported question format" in lowered
+
+
+def is_retryable_collection_entry(entry: HistoricalCollectionStatusEntry) -> bool:
+    """Return whether a historical collection status should be revisited on resume."""
+
+    if entry.status in NON_TERMINAL_COLLECTION_STATUSES:
+        return True
+    return entry.status == "parse_failed" and entry.detail in LEGACY_RETRYABLE_COLLECTION_DETAILS
+
+
+def collection_status_matches_filter(
+    entry: HistoricalCollectionStatusEntry,
+    status_filters: set[HistoricalCollectionStatus],
+) -> bool:
+    """Return whether an entry matches an explicit reclassification filter."""
+
+    if entry.status in status_filters:
+        return True
+    return entry.status == "parse_failed" and entry.detail in status_filters
 
 
 def merge_historical_event_candidates(
@@ -1278,7 +1317,7 @@ def build_historical_collection_status(
             entries.append(
                 _collection_entry(
                     ref,
-                    status="parse_failed",
+                    status="not_historical",
                     detail="not_historical",
                     snapshot=snapshot,
                     discovered_at=discovered_at,
@@ -1305,7 +1344,7 @@ def build_historical_collection_status(
             entries.append(
                 _collection_entry(
                     ref,
-                    status="parse_failed",
+                    status="not_closed",
                     detail="not_closed",
                     snapshot=snapshot,
                     discovered_at=discovered_at,

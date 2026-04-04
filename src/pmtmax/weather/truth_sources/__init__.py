@@ -14,7 +14,13 @@ from pmtmax.weather.truth_sources.noaa_global_hourly import NoaaGlobalHourlyTrut
 from pmtmax.weather.truth_sources.wunderground import WundergroundTruthSource
 
 
-def make_truth_source(spec: MarketSpec, http: CachedHttpClient, snapshot_dir: Path | None = None) -> TruthSource:
+def make_truth_source(
+    spec: MarketSpec,
+    http: CachedHttpClient,
+    snapshot_dir: Path | None = None,
+    *,
+    use_cache: bool = True,
+) -> TruthSource:
     """Instantiate the right official truth adapter for a market."""
 
     key = spec.truth_source_key()
@@ -23,9 +29,9 @@ def make_truth_source(spec: MarketSpec, http: CachedHttpClient, snapshot_dir: Pa
     if key == "noaa_global_hourly":
         return NoaaGlobalHourlyTruthSource(http, snapshot_dir=snapshot_dir)
     if key == "wunderground":
-        return WundergroundTruthSource(http, snapshot_dir=snapshot_dir)
+        return WundergroundTruthSource(http, snapshot_dir=snapshot_dir, use_cache=use_cache)
     if key == "hko":
-        return HkoTruthSource(http, snapshot_dir=snapshot_dir)
+        return HkoTruthSource(http, snapshot_dir=snapshot_dir, use_cache=use_cache)
     if key == "cwa":
         return CwaTruthSource(http, snapshot_dir=snapshot_dir)
     msg = f"Unsupported truth adapter for {spec.official_source_name}"

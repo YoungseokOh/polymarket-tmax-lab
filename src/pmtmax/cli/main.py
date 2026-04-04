@@ -521,21 +521,29 @@ def _resolve_signal_horizon_with_reason(
     return candidate, None
 
 
-def _backfill_pipeline(config: Any, http: CachedHttpClient, openmeteo: OpenMeteoClient) -> BackfillPipeline:
+def _backfill_pipeline(
+    config: Any,
+    http: CachedHttpClient,
+    openmeteo: OpenMeteoClient,
+    *,
+    use_truth_cache: bool = True,
+) -> BackfillPipeline:
     warehouse = DataWarehouse.from_paths(
         duckdb_path=config.app.duckdb_path,
         parquet_root=config.app.parquet_dir,
         raw_root=config.app.raw_dir,
         manifest_root=config.app.manifest_dir,
         archive_root=config.app.archive_dir,
+        recovery_root=Path("artifacts/recovery"),
     )
     return BackfillPipeline(
         http=http,
         openmeteo=openmeteo,
         warehouse=warehouse,
         models=config.weather.models,
-        truth_snapshot_dir=None,
+        truth_snapshot_dir=config.app.raw_dir / "bronze",
         forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+        use_truth_cache=use_truth_cache,
     )
 
 
@@ -1525,14 +1533,21 @@ def _run_synthetic_backtest(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
     min_train_size: int | None = None,
+    retrain_stride: int = 1,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
-    """Run the existing synthetic-book research backtest."""
+    """Run the existing synthetic-book research backtest.
+
+    retrain_stride: retrain the model only every N test steps; reuse the cached
+    model for intermediate steps.  stride=1 (default) retrains every step.
+    """
 
     broker = PaperBroker(bankroll=bankroll)
     prediction_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
     effective_split_policy = _effective_split_policy(split_policy)
     effective_min_train = min_train_size if min_train_size is not None else 1
+    cached_artifact = None
+    step = 0
     for train, test in rolling_origin_splits(
         frame,
         min_train_size=effective_min_train,
@@ -1545,12 +1560,15 @@ def _run_synthetic_backtest(
         }
         if variant is not None:
             train_kwargs["variant"] = variant
-        artifact = train_model(
-            model_name,
-            train,
-            artifacts_dir,
-            **train_kwargs,
-        )
+        if cached_artifact is None or step % retrain_stride == 0:
+            cached_artifact = train_model(
+                model_name,
+                train,
+                artifacts_dir,
+                **train_kwargs,
+            )
+        artifact = cached_artifact
+        step += 1
         for _, row in test.iterrows():
             spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
             snapshot = MarketSnapshot(
@@ -1644,6 +1662,7 @@ def _run_real_history_backtest(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
     min_train_size: int | None = None,
+    retrain_stride: int = 1,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -1659,6 +1678,7 @@ def _run_real_history_backtest(
         split_policy=split_policy,
         seed=seed,
         min_train_size=min_train_size,
+        retrain_stride=retrain_stride,
     )
 
 
@@ -1693,6 +1713,7 @@ def _run_quote_proxy_backtest(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
     min_train_size: int | None = None,
+    retrain_stride: int = 1,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using last price plus an explicit quote proxy."""
 
@@ -1709,6 +1730,7 @@ def _run_quote_proxy_backtest(
         split_policy=split_policy,
         seed=seed,
         min_train_size=min_train_size,
+        retrain_stride=retrain_stride,
     )
 
 
@@ -1726,6 +1748,7 @@ def _run_panel_pricing_backtest(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
     min_train_size: int | None = None,
+    retrain_stride: int = 1,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using historical pricing or a quote proxy."""
 
@@ -1767,6 +1790,8 @@ def _run_panel_pricing_backtest(
 
     effective_split_policy = _effective_split_policy(split_policy)
     effective_min_train = min_train_size if min_train_size is not None else 1
+    cached_artifact = None
+    step = 0
     for train, test in rolling_origin_splits(
         frame,
         min_train_size=effective_min_train,
@@ -1779,12 +1804,15 @@ def _run_panel_pricing_backtest(
         }
         if variant is not None:
             train_kwargs["variant"] = variant
-        artifact = train_model(
-            model_name,
-            train,
-            artifacts_dir,
-            **train_kwargs,
-        )
+        if cached_artifact is None or step % retrain_stride == 0:
+            cached_artifact = train_model(
+                model_name,
+                train,
+                artifacts_dir,
+                **train_kwargs,
+            )
+        artifact = cached_artifact
+        step += 1
         for _, row in test.iterrows():
             spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
             forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
@@ -2004,6 +2032,8 @@ def scan_edge(
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     horizon: str = "policy",
     min_edge: float = 0.01,
+    min_model_prob: float = 0.05,
+    max_model_prob: float = 0.95,
     output: Annotated[
         Path,
         typer.Option("--output", "--output-json"),
@@ -2064,6 +2094,9 @@ def scan_edge(
         if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
             continue
         for outcome_label, model_prob in forecast.outcome_probabilities.items():
+            # Skip bins where the model is near-certain — these are overconfident extrapolations
+            if model_prob < min_model_prob or model_prob > max_model_prob:
+                continue
             # Use Gamma mid-price: avoids the phantom 0.001/0.999 CLOB spread on illiquid bins
             gamma_price = snapshot.outcome_prices.get(outcome_label)
             if gamma_price is None or gamma_price <= 0.0 or gamma_price >= 1.0:
@@ -2118,6 +2151,9 @@ def scan_edge(
     console.print(f"Saved {len(rows)} signals → {output}")
 
 
+_DEFAULT_FULL_TRAINING_MARKETS = Path("configs/market_inventory/full_training_set_snapshots.json")
+
+
 @app.command("build-dataset")
 def build_dataset(
     markets_path: Path | None = None,
@@ -2128,12 +2164,20 @@ def build_dataset(
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
     allow_demo_fixture_fallback: bool = False,
     output_name: str = "historical_training_set",
+    allow_canonical_overwrite: Annotated[bool, typer.Option("--allow-canonical-overwrite")] = False,
+    truth_no_cache: Annotated[bool, typer.Option("--truth-no-cache")] = False,
 ) -> None:
     """Backfill bronze/silver tables, then materialize a gold training dataset."""
 
+    if markets_path is None and _DEFAULT_FULL_TRAINING_MARKETS.exists():
+        console.print(
+            f"[yellow]No --markets-path given; defaulting to {_DEFAULT_FULL_TRAINING_MARKETS}[/yellow]"
+        )
+        markets_path = _DEFAULT_FULL_TRAINING_MARKETS
+
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
-    pipeline = _backfill_pipeline(config, http, openmeteo)
+    pipeline = _backfill_pipeline(config, http, openmeteo, use_truth_cache=not truth_no_cache)
     run = pipeline.warehouse.start_run(
         command="build-dataset",
         config_hash=_config_hash(
@@ -2147,6 +2191,8 @@ def build_dataset(
             strict_archive=strict_archive,
             allow_demo_fixture_fallback=allow_demo_fixture_fallback,
             output_name=output_name,
+            allow_canonical_overwrite=allow_canonical_overwrite,
+            truth_no_cache=truth_no_cache,
         ),
         notes="Canonical backfill + materialization run.",
     )
@@ -2165,6 +2211,7 @@ def build_dataset(
             output_name=output_name,
             decision_horizons=decision_horizons or config.backtest.decision_horizons or None,
             contract=contract,
+            allow_canonical_overwrite=allow_canonical_overwrite,
         )
         pipeline.warehouse.finish_run(run, status="completed", notes=f"Materialized {len(frame)} tabular rows.")
     except Exception as exc:  # noqa: BLE001
@@ -2293,15 +2340,22 @@ def backfill_forecasts(
 def backfill_truth(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    truth_no_cache: Annotated[bool, typer.Option("--truth-no-cache")] = False,
 ) -> None:
     """Backfill official truth snapshots and normalized daily observations."""
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
-    pipeline = _backfill_pipeline(config, http, openmeteo)
+    pipeline = _backfill_pipeline(config, http, openmeteo, use_truth_cache=not truth_no_cache)
     run = pipeline.warehouse.start_run(
         command="backfill-truth",
-        config_hash=_config_hash(config, "backfill-truth", markets_path=markets_path, cities=cities),
+        config_hash=_config_hash(
+            config,
+            "backfill-truth",
+            markets_path=markets_path,
+            cities=cities,
+            truth_no_cache=truth_no_cache,
+        ),
     )
     pipeline.run_id = run.run_id
     try:
@@ -2478,6 +2532,7 @@ def materialize_backtest_panel(
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     output_name: str = "historical_backtest_panel",
     max_price_age_minutes: int = 720,
+    allow_canonical_overwrite: Annotated[bool, typer.Option("--allow-canonical-overwrite")] = False,
 ) -> None:
     """Materialize a decision-time official-price backtest panel from a gold training dataset."""
 
@@ -2498,6 +2553,7 @@ def materialize_backtest_panel(
             cities=cities,
             output_name=output_name,
             max_price_age_minutes=max_price_age_minutes,
+            allow_canonical_overwrite=allow_canonical_overwrite,
         ),
     )
     pipeline.run_id = run.run_id
@@ -2506,6 +2562,7 @@ def materialize_backtest_panel(
             frame,
             output_name=output_name,
             max_price_age_minutes=max_price_age_minutes,
+            allow_canonical_overwrite=allow_canonical_overwrite,
         )
         pipeline.warehouse.finish_run(run, status="completed", notes=f"Materialized {len(panel)} panel rows.")
     except Exception as exc:  # noqa: BLE001
@@ -2530,6 +2587,7 @@ def materialize_training_set(
     decision_horizons: Annotated[list[str] | None, typer.Option("--decision-horizon")] = None,
     contract: str = "both",
     output_name: str = "historical_training_set",
+    allow_canonical_overwrite: Annotated[bool, typer.Option("--allow-canonical-overwrite")] = False,
 ) -> None:
     """Materialize the gold training dataset from backfilled bronze/silver tables."""
 
@@ -2546,6 +2604,7 @@ def materialize_training_set(
             decision_horizons=decision_horizons,
             contract=contract,
             output_name=output_name,
+            allow_canonical_overwrite=allow_canonical_overwrite,
         ),
     )
     pipeline.run_id = run.run_id
@@ -2555,6 +2614,7 @@ def materialize_training_set(
             output_name=output_name,
             decision_horizons=decision_horizons or config.backtest.decision_horizons or None,
             contract=contract,
+            allow_canonical_overwrite=allow_canonical_overwrite,
         )
         pipeline.warehouse.finish_run(run, status="completed", notes=f"Materialized {len(frame)} rows.")
     except Exception as exc:  # noqa: BLE001
@@ -3038,14 +3098,23 @@ def backtest(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     variant: str | None = None,
     last_n: int = 0,
+    retrain_stride: int = 1,
 ) -> None:
     """Run a rolling-origin backtest with synthetic or official historical pricing.
 
     Use --last-n N to run only the final N rows as test points (fast-eval proxy).
+    Use --retrain-stride N to retrain the model every N steps (e.g. 30 for ~47 min).
     """
 
     config, _ = load_settings()
     resolved_model_name = _resolve_model_name_alias(model_name)
+    # If model_name is an alias and variant was not explicitly provided, pick up
+    # the variant stored in the alias metadata (e.g. champion → high_capacity_fast).
+    if variant is None and model_name in PUBLIC_MODEL_ALIASES:
+        alias_meta = _load_alias_metadata(model_name)
+        alias_variant = alias_meta.get("variant")
+        if alias_variant:
+            variant = str(alias_variant)
     default_fee_bps = _default_fee_bps(config)
     frame = pd.read_parquet(dataset_path)
     # fast-eval: pass min_train_size so only the last `last_n` groups are used as
@@ -3075,6 +3144,7 @@ def backtest(
             split_policy=split_policy,
             seed=config.app.random_seed,
             min_train_size=fast_eval_min_train,
+            retrain_stride=retrain_stride,
         )
         metrics_output = _default_backtest_output("backtest_metrics.json")
         trades_output = _default_backtest_output("backtest_trades.json")
@@ -3109,6 +3179,7 @@ def backtest(
                 split_policy=split_policy,
                 seed=config.app.random_seed,
                 min_train_size=fast_eval_min_train,
+                retrain_stride=retrain_stride,
             )
             metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
             trades_output = _default_backtest_output("backtest_trades_real_history.json")
@@ -3125,6 +3196,7 @@ def backtest(
                 split_policy=split_policy,
                 seed=config.app.random_seed,
                 min_train_size=fast_eval_min_train,
+                retrain_stride=retrain_stride,
             )
             metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
             trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
@@ -3659,6 +3731,7 @@ def benchmark_models(
     leaderboard_output: Path = Path("artifacts/benchmarks/v2/leaderboard.json"),
     leaderboard_csv_output: Path = Path("artifacts/benchmarks/v2/leaderboard.csv"),
     summary_output: Path = Path("artifacts/benchmarks/v2/benchmark_summary.json"),
+    retrain_stride: int = 30,
 ) -> None:
     """Benchmark the canonical v2 models and optionally publish the champion alias."""
 
@@ -3692,6 +3765,7 @@ def benchmark_models(
                 default_fee_bps=_default_fee_bps(config),
                 split_policy=split_policy,
                 seed=seed,
+                retrain_stride=retrain_stride,
             )
             quote_proxy_metrics, _ = _run_quote_proxy_backtest(
                 frame,
@@ -3703,6 +3777,7 @@ def benchmark_models(
                 quote_proxy_half_spread=quote_proxy_half_spread,
                 split_policy=split_policy,
                 seed=seed,
+                retrain_stride=retrain_stride,
             )
             real_history_runs.append(real_history_metrics)
             quote_proxy_runs.append(quote_proxy_metrics)

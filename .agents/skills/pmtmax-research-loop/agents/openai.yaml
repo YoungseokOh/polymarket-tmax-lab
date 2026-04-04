@@ -1,0 +1,7 @@
+interface:
+  display_name: "PM Tmax Research Loop"
+  short_description: "Operate dataset, training, backtest, and paper-trading workflows."
+  default_prompt: "Use $pmtmax-research-loop to work on materialized datasets, model training, backtests, and paper-trading artifacts."
+
+policy:
+  allow_implicit_invocation: true

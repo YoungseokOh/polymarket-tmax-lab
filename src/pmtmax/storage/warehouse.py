@@ -72,6 +72,15 @@ LEGACY_PRECEDENCE: dict[str, int] = {
     "warehouse_smoke.duckdb": 9,
 }
 
+PROTECTED_CANONICAL_GOLD_PATHS = frozenset(
+    {
+        "gold/v2/historical_training_set.parquet",
+        "gold/v2/historical_training_set_compat.parquet",
+        "gold/v2/historical_training_set_sequence.parquet",
+        "gold/v2/historical_backtest_panel.parquet",
+    }
+)
+
 
 def parquet_relative_path(table_name: str) -> str:
     """Map a table to its canonical parquet mirror path."""
@@ -115,8 +124,11 @@ class DataWarehouse:
     raw_store: RawStore
     manifest_root: Path
     archive_root: Path
+    recovery_root: Path
     lock_path: Path
     _lock_handle: Any = field(repr=False)
+    _recovery_session_dir: Path | None = field(default=None, repr=False)
+    _recovery_manifest_copied: bool = field(default=False, repr=False)
 
     @classmethod
     def from_paths(
@@ -127,6 +139,7 @@ class DataWarehouse:
         raw_root: Path,
         manifest_root: Path,
         archive_root: Path,
+        recovery_root: Path | None = None,
     ) -> DataWarehouse:
         """Create a warehouse from concrete storage paths and acquire a writer lock."""
 
@@ -135,6 +148,8 @@ class DataWarehouse:
         raw_root.mkdir(parents=True, exist_ok=True)
         manifest_root.mkdir(parents=True, exist_ok=True)
         archive_root.mkdir(parents=True, exist_ok=True)
+        resolved_recovery_root = recovery_root or (archive_root / "recovery")
+        resolved_recovery_root.mkdir(parents=True, exist_ok=True)
         lock_path = duckdb_path.with_suffix(duckdb_path.suffix + ".lock")
         lock_handle = cls._acquire_lock(lock_path)
         warehouse = cls(
@@ -143,6 +158,7 @@ class DataWarehouse:
             raw_store=RawStore(raw_root / "bronze"),
             manifest_root=manifest_root,
             archive_root=archive_root,
+            recovery_root=resolved_recovery_root,
             lock_path=lock_path,
             _lock_handle=lock_handle,
         )
@@ -229,15 +245,81 @@ class DataWarehouse:
         self.parquet_store.write_frame(parquet_relative_path(table_name), deduped)
         return deduped
 
-    def write_gold_table(self, table_name: str, frame: pd.DataFrame, relative_path: str | None = None) -> Path:
+    def write_gold_table(
+        self,
+        table_name: str,
+        frame: pd.DataFrame,
+        relative_path: str | None = None,
+        *,
+        allow_canonical_overwrite: bool = False,
+    ) -> Path:
         """Replace a gold table and export it to Parquet."""
 
         if frame.empty:
             msg = f"{table_name} is empty; nothing to materialize"
             raise ValueError(msg)
-        self.duckdb_store.write_frame(table_name, frame)
+
         target = relative_path or parquet_relative_path(table_name)
+
+        # Shrinkage guard: refuse to overwrite if new frame is <50% of existing rows.
+        # Prevents accidental dataset destruction (e.g. build-dataset without --markets-path).
+        existing_path = self.parquet_store.root / target
+        if existing_path.exists():
+            if target in PROTECTED_CANONICAL_GOLD_PATHS and not allow_canonical_overwrite:
+                msg = (
+                    f"Protected canonical output already exists: {target}. "
+                    "Pass --allow-canonical-overwrite to replace it. "
+                    "A timestamped recovery backup will be created first."
+                )
+                raise ValueError(msg)
+            try:
+                import pandas as _pd
+                existing_rows = len(_pd.read_parquet(existing_path))
+                if existing_rows > 0 and len(frame) < existing_rows * 0.5:
+                    msg = (
+                        f"Shrinkage guard: refusing to overwrite {target} "
+                        f"({existing_rows} rows → {len(frame)} rows, "
+                        f"{len(frame)/existing_rows:.0%} of original). "
+                        "Use a complete --markets-path and only unlock canonical overwrite "
+                        "when you intend to promote a rebuilt dataset."
+                    )
+                    raise ValueError(msg)
+            except (ImportError, Exception) as _e:
+                if "Shrinkage guard" in str(_e):
+                    raise
+                # If we can't read the existing file, proceed normally
+
+            if target in PROTECTED_CANONICAL_GOLD_PATHS:
+                self._backup_protected_output(existing_path, target)
+
+            # Backup existing parquet before overwriting
+            import shutil as _shutil
+            _shutil.copy2(existing_path, str(existing_path) + ".bak")
+
+        self.duckdb_store.write_frame(table_name, frame)
         return self.parquet_store.write_frame(target, frame)
+
+    def _backup_protected_output(self, existing_path: Path, relative_path: str) -> None:
+        recovery_dir = self._recovery_session_path()
+        destination = recovery_dir / "parquet" / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(existing_path, destination)
+
+        if self._recovery_manifest_copied:
+            return
+        manifest_path = self.manifest_root / "warehouse_manifest.json"
+        if manifest_path.exists():
+            manifest_destination = recovery_dir / "manifests" / "warehouse_manifest.json"
+            manifest_destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(manifest_path, manifest_destination)
+        self._recovery_manifest_copied = True
+
+    def _recovery_session_path(self) -> Path:
+        if self._recovery_session_dir is None:
+            timestamp = dt.datetime.now(tz=dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+            self._recovery_session_dir = self.recovery_root / timestamp
+            self._recovery_session_dir.mkdir(parents=True, exist_ok=True)
+        return self._recovery_session_dir
 
     def read_table(self, table_name: str) -> pd.DataFrame:
         """Read a warehouse table or return an empty DataFrame if absent."""

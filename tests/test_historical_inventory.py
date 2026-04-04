@@ -23,6 +23,7 @@ from pmtmax.markets.inventory import (
     discover_temperature_event_refs,
     discover_temperature_event_refs_from_gamma,
     fetch_historical_event_page_report,
+    is_retryable_collection_entry,
     merge_historical_collection_status_reports,
     merge_historical_event_candidates,
     preserve_existing_capture_times,
@@ -802,6 +803,14 @@ def test_build_historical_collection_status_classifies_retryable_truth_states() 
         city="Seoul",
         closed=True,
     )
+    parse_ref = TemperatureEventRef(
+        event_id="evt-parse",
+        slug="highest-temperature-in-seoul-on-december-14-parse",
+        title="Highest temperature in Seoul on December 14?",
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-december-14-parse",
+        city="Seoul",
+        closed=True,
+    )
     collected_ref = TemperatureEventRef(
         event_id="evt-collected",
         slug="highest-temperature-in-seoul-on-december-15",
@@ -834,6 +843,17 @@ def test_build_historical_collection_status_classifies_retryable_truth_states() 
             ),
         ),
         HistoricalEventFetch(
+            ref=parse_ref,
+            fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
+            html=_event_page_html(
+                title=parse_ref.title,
+                slug=parse_ref.slug,
+                event_id=parse_ref.event_id,
+                active=False,
+                closed=True,
+            ),
+        ),
+        HistoricalEventFetch(
             ref=collected_ref,
             fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
             html=_event_page_html(
@@ -853,6 +873,8 @@ def test_build_historical_collection_status_classifies_retryable_truth_states() 
             return TruthProbeResult(status="truth_source_lag", detail="No HKO record for 2026-03-17")
         if snapshot.spec.market_id == request_ref.event_id:
             return TruthProbeResult(status="truth_request_failed", detail="504 Gateway Timeout")
+        if snapshot.spec.market_id == parse_ref.event_id:
+            return TruthProbeResult(status="truth_parse_failed", detail="Could not parse Wunderground daily max")
         return TruthProbeResult(status="ready")
 
     snapshots, report = build_historical_collection_status(
@@ -865,8 +887,72 @@ def test_build_historical_collection_status_classifies_retryable_truth_states() 
     )
 
     assert len(snapshots) == 1
-    assert report.status_counts == {"collected": 1, "truth_request_failed": 1, "truth_source_lag": 1}
-    assert {entry.status for entry in report.entries if entry.status != "collected"} == {"truth_request_failed", "truth_source_lag"}
+    assert report.status_counts == {
+        "collected": 1,
+        "truth_parse_failed": 1,
+        "truth_request_failed": 1,
+        "truth_source_lag": 1,
+    }
+    assert {entry.status for entry in report.entries if entry.status != "collected"} == {
+        "truth_parse_failed",
+        "truth_request_failed",
+        "truth_source_lag",
+    }
+
+
+def test_build_historical_collection_status_marks_not_closed_and_not_historical_as_retryable() -> None:
+    future_ref = TemperatureEventRef(
+        event_id="evt-future",
+        slug="highest-temperature-in-seoul-on-march-19-2026",
+        title="Highest temperature in Seoul on March 19, 2026?",
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-march-19-2026",
+        city="Seoul",
+        closed=False,
+    )
+    open_ref = TemperatureEventRef(
+        event_id="evt-open",
+        slug="highest-temperature-in-seoul-on-march-17-2026",
+        title="Highest temperature in Seoul on March 17, 2026?",
+        url="https://polymarket.com/event/highest-temperature-in-seoul-on-march-17-2026",
+        city="Seoul",
+        closed=False,
+    )
+
+    _, report = build_historical_collection_status(
+        [
+            HistoricalEventFetch(
+                ref=future_ref,
+                fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
+                html=_event_page_html(
+                    title=future_ref.title,
+                    slug=future_ref.slug,
+                    event_id=future_ref.event_id,
+                    active=True,
+                    closed=False,
+                    description=EXAMPLE_MARKETS["Seoul"]["description"].replace("11 Dec '25", "19 Mar '26"),
+                ),
+            ),
+            HistoricalEventFetch(
+                ref=open_ref,
+                fetched_at=datetime(2026, 3, 19, tzinfo=UTC),
+                html=_event_page_html(
+                    title=open_ref.title,
+                    slug=open_ref.slug,
+                    event_id=open_ref.event_id,
+                    active=True,
+                    closed=False,
+                ),
+            ),
+        ],
+        supported_cities=["Seoul"],
+        truth_probe=lambda _: TruthProbeResult(status="ready"),
+        source_manifest="historical_temperature_event_urls.json",
+        as_of_date=date(2026, 3, 18),
+    )
+
+    assert report.status_counts == {"not_closed": 1, "not_historical": 1}
+    assert all(not entry.terminal for entry in report.entries)
+    assert all(is_retryable_collection_entry(entry) for entry in report.entries)
 
 
 def test_merge_historical_collection_status_reports_overwrites_selected_urls_only() -> None:

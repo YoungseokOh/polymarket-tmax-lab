@@ -143,6 +143,7 @@ class BackfillPipeline:
     models: list[str]
     truth_snapshot_dir: Path | None = None
     forecast_fixture_dir: Path | None = None
+    use_truth_cache: bool = True
     run_id: str | None = None
     data_version: str = "v2"
 
@@ -279,6 +280,28 @@ class BackfillPipeline:
         silver_rows: list[dict[str, object]] = []
         model_rows: list[dict[str, object]] = []
         source_rows: list[dict[str, object]] = []
+        checkpoint_snapshots = 25
+        processed_since_checkpoint = 0
+        bronze = bronze_history
+        silver: pd.DataFrame | None = None
+
+        def flush_buffers(*, force: bool = False) -> None:
+            nonlocal bronze, silver
+
+            should_flush = force or any((bronze_rows, silver_rows, model_rows, source_rows))
+            if not should_flush:
+                return
+            bronze = self.warehouse.upsert_table("bronze_forecast_requests", pd.DataFrame(bronze_rows))
+            silver = self.warehouse.upsert_table("silver_forecast_runs_hourly", pd.DataFrame(silver_rows))
+            if model_rows:
+                self.warehouse.upsert_table("dim_model", pd.DataFrame(model_rows))
+            if source_rows:
+                self.warehouse.upsert_table("dim_source", pd.DataFrame(source_rows))
+            bronze_rows.clear()
+            silver_rows.clear()
+            model_rows.clear()
+            source_rows.clear()
+
         for snapshot in snapshots:
             spec = snapshot.spec
             if spec is None:
@@ -516,14 +539,17 @@ class BackfillPipeline:
                         **self._metadata_fields(source_priority=self._source_priority(endpoint_kind)),
                     }
                 )
+            processed_since_checkpoint += 1
+            # Checkpoint long runs so city/batch shards do not lose all progress on interruption.
+            if processed_since_checkpoint >= checkpoint_snapshots:
+                flush_buffers()
+                self.warehouse.write_manifest()
+                processed_since_checkpoint = 0
 
-        bronze = self.warehouse.upsert_table("bronze_forecast_requests", pd.DataFrame(bronze_rows))
-        silver = self.warehouse.upsert_table("silver_forecast_runs_hourly", pd.DataFrame(silver_rows))
-        if model_rows:
-            self.warehouse.upsert_table("dim_model", pd.DataFrame(model_rows))
-        if source_rows:
-            self.warehouse.upsert_table("dim_source", pd.DataFrame(source_rows))
+        flush_buffers(force=True)
         self.warehouse.write_manifest()
+        if silver is None:
+            silver = self.warehouse.read_table("silver_forecast_runs_hourly")
         return {"bronze_forecast_requests": bronze, "silver_forecast_runs_hourly": silver}
 
     def backfill_truth(self, snapshots: list[MarketSnapshot]) -> dict[str, pd.DataFrame]:
@@ -535,7 +561,12 @@ class BackfillPipeline:
             spec = snapshot.spec
             if spec is None:
                 continue
-            truth_source = make_truth_source(spec, self.http, snapshot_dir=self.truth_snapshot_dir)
+            truth_source = make_truth_source(
+                spec,
+                self.http,
+                snapshot_dir=self.truth_snapshot_dir,
+                use_cache=self.use_truth_cache,
+            )
             fetched_at = dt.datetime.now(tz=dt.UTC)
             try:
                 bundle = truth_source.fetch_observation_bundle(spec, spec.target_local_date)
@@ -561,6 +592,8 @@ class BackfillPipeline:
                             pd.Timestamp(latest_available_date) if latest_available_date is not None else pd.NaT
                         ),
                         "source_url": spec.official_source_url,
+                        "archive_source_url": None,
+                        "source_provenance": "live",
                         "error_message": str(exc),
                         **self._metadata_fields(source_priority=100),
                     }
@@ -593,6 +626,8 @@ class BackfillPipeline:
                     "media_type": artifact.media_type,
                     "latest_available_date": pd.NaT,
                     "source_url": bundle.source_url,
+                    "archive_source_url": bundle.archive_source_url,
+                    "source_provenance": bundle.source_provenance,
                     "error_message": None,
                     **self._metadata_fields(created_at=fetched_at, source_priority=100),
                 }
@@ -963,6 +998,7 @@ class BackfillPipeline:
         *,
         output_name: str = "historical_backtest_panel",
         max_price_age_minutes: int = 720,
+        allow_canonical_overwrite: bool = False,
     ) -> pd.DataFrame:
         """Build a token-level decision-time market-price panel from official history."""
 
@@ -1047,6 +1083,7 @@ class BackfillPipeline:
             "gold_backtest_panel",
             frame,
             relative_path=f"gold/v2/{output_name}.parquet",
+            allow_canonical_overwrite=allow_canonical_overwrite,
         )
         self.warehouse.write_manifest()
         return frame
@@ -1204,6 +1241,7 @@ class BackfillPipeline:
         output_name: str = "historical_training_set",
         decision_horizons: list[str] | None = None,
         contract: str = "both",
+        allow_canonical_overwrite: bool = False,
     ) -> pd.DataFrame:
         """Build the gold training dataset from normalized bronze/silver tables."""
 
@@ -1292,11 +1330,13 @@ class BackfillPipeline:
                 "gold_training_examples_tabular",
                 frame,
                 relative_path=f"gold/v2/{output_name}.parquet",
+                allow_canonical_overwrite=allow_canonical_overwrite,
             )
             self.warehouse.write_gold_table(
                 "gold_training_examples",
                 frame,
                 relative_path=f"gold/v2/{output_name}_compat.parquet",
+                allow_canonical_overwrite=allow_canonical_overwrite,
             )
         if contract in {"sequence", "both"} and sequence_rows:
             sequence_frame = pd.DataFrame(sequence_rows)
@@ -1304,6 +1344,7 @@ class BackfillPipeline:
                 "gold_training_examples_sequence",
                 sequence_frame,
                 relative_path=f"gold/v2/{output_name}_sequence.parquet",
+                allow_canonical_overwrite=allow_canonical_overwrite,
             )
         self.warehouse.write_manifest()
         return frame
