@@ -21,8 +21,9 @@ Use this skill for the research and trading simulation loop.
 - overwrite is promotion-only; use variant `--output-name` values for experiments and rely on the automatic `artifacts/recovery/` backup when promoting canonical output.
 - `scan-edge` MUST include `--min-model-prob 0.05 --max-model-prob 0.95`.
 - Model training: `train-advanced --model-name lgbm_emos --variant <variant>`.
-- Quick eval: `uv run python scripts/quick_eval.py` (top 5 fast variants only).
-- Champion is `recency_neighbor_fast` (CRPS 0.4769).
+- Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
+- Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
+- Previous fast variants (ultra_high_neighbor_fast 등) had σ=0.5 collapse — scale clip floor raised to 2.0.
 
 ## Focus
 - gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`
@@ -31,3 +32,4 @@ Use this skill for the research and trading simulation loop.
 - daily signals: `artifacts/signals/v2/scan_edge_latest.json`
 - paper trades: `artifacts/signals/v2/forward_paper_trades.json`
 - cron log: `logs/daily_experiment.log`
+- 2-hour price check log: `logs/price_check.log`
