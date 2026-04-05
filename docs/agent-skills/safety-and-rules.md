@@ -7,6 +7,10 @@
 - 폴더 책임이나 workflow가 바뀌면 문서도 같은 변경에 포함
 - live/paper execution 경로에서는 missing CLOB book을 synthetic으로 숨기지 말고 명시적 skip/error로 처리
 - signal path에서는 missing calibrator나 forecast contract mismatch도 fail-closed reason으로 남긴다
+- observation station live path는 `live_pilot_queue.json` -> `approve-live-candidate` 수동 승인 순서를 기본으로 유지한다
+- observation candidate가 `research_public`이면 live 후보에서 제외하지는 않더라도 tier/risk flag를 숨기지 말고 더 보수적인 sizing을 유지한다
+- observation path는 target-day market에만 적용한다. 오늘 관측으로 내일 시장을 덮어쓰지 않는다
+- observation source priority는 `exact_public intraday -> documented research intraday -> METAR fallback`이다. source blending은 금지한다
 - 기본 consumer command는 `champion` alias를 사용하므로 benchmark publish가 선행돼야 한다
 - `live-mm`는 기존 주문 cancel 실패 시 새 quote를 올리지 않고 그 cycle을 중단
 - canonical `historical_training_set*` / `historical_backtest_panel`은 기본 immutable이다

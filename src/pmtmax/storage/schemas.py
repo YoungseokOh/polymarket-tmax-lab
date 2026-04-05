@@ -63,6 +63,17 @@ class MetarObservation(BaseModel):
     raw_metar: str = ""
 
 
+class LiveTemperatureObservation(BaseModel):
+    source_family: Literal["aviation", "official_intraday", "research_intraday"]
+    observation_source: str
+    station_id: str
+    observed_at: datetime
+    lower_bound_temp_c: float
+    current_temp_c: float | None = None
+    daily_high_so_far_c: float | None = None
+    source_confidence: str | None = None
+
+
 class CalibrationMetadata(BaseModel):
     model_name: str
     calibration_method: str
@@ -365,6 +376,58 @@ class OpportunityObservation(BaseModel):
     raw_gap: float | None = None
     after_cost_edge: float | None = None
     book_source: str | None = None
+    error: str | None = None
+
+
+class ObservationOpportunity(BaseModel):
+    observed_at: datetime
+    market_id: str
+    city: str
+    question: str
+    target_local_date: date
+    decision_horizon: str
+    reason: str
+    queue_state: Literal["tradable", "manual_review", "blocked"] = "blocked"
+    market_url: str = ""
+    source_family: str | None = None
+    observation_source: str | None = None
+    truth_track: Literal["exact_public", "research_public"] | None = None
+    station_id: str | None = None
+    source_station_id: str | None = None
+    candidate_tier: str | None = None
+    source_confidence: str | None = None
+    book_source_counts: dict[str, int] = Field(default_factory=dict)
+    forecast_generated_at: datetime | None = None
+    forecast_contract_version: str = "v1"
+    probability_source: Literal["raw", "calibrated"] = "raw"
+    distribution_family: str = "gaussian"
+    forecast_mean: float | None = None
+    forecast_std: float | None = None
+    observed_temp_c: float | None = None
+    observed_temp_market_unit: float | None = None
+    observation_observed_at: datetime | None = None
+    observation_freshness_minutes: float | None = None
+    observation_override_mass: float | None = None
+    impossible_outcome_count: int = 0
+    impossible_price_mass: float | None = None
+    price_vs_observation_gap: float | None = None
+    token_id: str | None = None
+    outcome_label: str | None = None
+    fair_probability: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    spread: float | None = None
+    visible_liquidity: float | None = None
+    fee_estimate: float | None = None
+    slippage_estimate: float | None = None
+    raw_gap: float | None = None
+    after_cost_edge: float | None = None
+    book_source: str | None = None
+    approval_required: bool = False
+    live_eligible: bool = False
+    manual_approval_token: str | None = None
+    approval_expires_at: datetime | None = None
+    risk_flags: list[str] = Field(default_factory=list)
     error: str | None = None
 
 

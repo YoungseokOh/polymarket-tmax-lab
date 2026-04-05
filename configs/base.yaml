@@ -119,6 +119,41 @@ hope_hunt:
   history_output_path: artifacts/signals/v2/hope_hunt_history.jsonl
   summary_output_path: artifacts/signals/v2/hope_hunt_summary.json
 
+observation_station:
+  interval_seconds: 300
+  max_cycles: 0
+  observation_hours: 24
+  observation_stale_minutes: 120
+  candidate_max_age_minutes: 20
+  approval_ttl_minutes: 20
+  exact_public_size_multiplier: 1.0
+  research_public_size_multiplier: 0.5
+  state_path: artifacts/signals/v2/observation_shadow_state.json
+  latest_output_path: artifacts/signals/v2/observation_shadow_latest.json
+  history_output_path: artifacts/signals/v2/observation_shadow.jsonl
+  summary_output_path: artifacts/signals/v2/observation_shadow_summary.json
+  alerts_output_path: artifacts/signals/v2/observation_alerts_latest.json
+  queue_output_path: artifacts/signals/v2/live_pilot_queue.json
+
+station_dashboard:
+  interval_seconds: 60
+  max_cycles: 0
+  opportunity_report_path: artifacts/signals/v2/opportunity_report.json
+  observation_latest_path: artifacts/signals/v2/observation_shadow_latest.json
+  observation_summary_path: artifacts/signals/v2/observation_shadow_summary.json
+  queue_output_path: artifacts/signals/v2/live_pilot_queue.json
+  open_phase_latest_path: artifacts/signals/v2/open_phase_shadow_latest.json
+  open_phase_summary_path: artifacts/signals/v2/open_phase_shadow_summary.json
+  revenue_gate_summary_path: artifacts/signals/v2/revenue_gate_summary.json
+  json_output_path: artifacts/signals/v2/station_dashboard.json
+  html_output_path: artifacts/signals/v2/station_dashboard.html
+  state_path: artifacts/signals/v2/station_dashboard_state.json
+
+station_orchestrator:
+  interval_seconds: 300
+  max_cycles: 0
+  state_path: artifacts/signals/v2/station_cycle_state.json
+
 firebase:
   enabled: false
   bucket_name: ""

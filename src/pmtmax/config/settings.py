@@ -102,6 +102,44 @@ class HopeHuntConfig(BaseModel):
     summary_output_path: Path = Path("artifacts/signals/v2/hope_hunt_summary.json")
 
 
+class ObservationStationConfig(BaseModel):
+    interval_seconds: int = 300
+    max_cycles: int = 0
+    observation_hours: int = 24
+    observation_stale_minutes: int = 120
+    candidate_max_age_minutes: int = 20
+    approval_ttl_minutes: int = 20
+    exact_public_size_multiplier: float = 1.0
+    research_public_size_multiplier: float = 0.5
+    state_path: Path = Path("artifacts/signals/v2/observation_shadow_state.json")
+    latest_output_path: Path = Path("artifacts/signals/v2/observation_shadow_latest.json")
+    history_output_path: Path = Path("artifacts/signals/v2/observation_shadow.jsonl")
+    summary_output_path: Path = Path("artifacts/signals/v2/observation_shadow_summary.json")
+    alerts_output_path: Path = Path("artifacts/signals/v2/observation_alerts_latest.json")
+    queue_output_path: Path = Path("artifacts/signals/v2/live_pilot_queue.json")
+
+
+class StationDashboardConfig(BaseModel):
+    interval_seconds: int = 60
+    max_cycles: int = 0
+    opportunity_report_path: Path = Path("artifacts/signals/v2/opportunity_report.json")
+    observation_latest_path: Path = Path("artifacts/signals/v2/observation_shadow_latest.json")
+    observation_summary_path: Path = Path("artifacts/signals/v2/observation_shadow_summary.json")
+    queue_output_path: Path = Path("artifacts/signals/v2/live_pilot_queue.json")
+    open_phase_latest_path: Path = Path("artifacts/signals/v2/open_phase_shadow_latest.json")
+    open_phase_summary_path: Path = Path("artifacts/signals/v2/open_phase_shadow_summary.json")
+    revenue_gate_summary_path: Path = Path("artifacts/signals/v2/revenue_gate_summary.json")
+    json_output_path: Path = Path("artifacts/signals/v2/station_dashboard.json")
+    html_output_path: Path = Path("artifacts/signals/v2/station_dashboard.html")
+    state_path: Path = Path("artifacts/signals/v2/station_dashboard_state.json")
+
+
+class StationOrchestratorConfig(BaseModel):
+    interval_seconds: int = 300
+    max_cycles: int = 0
+    state_path: Path = Path("artifacts/signals/v2/station_cycle_state.json")
+
+
 class FirebaseConfig(BaseModel):
     enabled: bool = False
     bucket_name: str = ""
@@ -143,6 +181,9 @@ class RepoConfig(BaseModel):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     opportunity_shadow: OpportunityShadowConfig = Field(default_factory=OpportunityShadowConfig)
     hope_hunt: HopeHuntConfig = Field(default_factory=HopeHuntConfig)
+    observation_station: ObservationStationConfig = Field(default_factory=ObservationStationConfig)
+    station_dashboard: StationDashboardConfig = Field(default_factory=StationDashboardConfig)
+    station_orchestrator: StationOrchestratorConfig = Field(default_factory=StationOrchestratorConfig)
     firebase: FirebaseConfig = Field(default_factory=FirebaseConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

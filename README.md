@@ -111,6 +111,36 @@ uv run pmtmax opportunity-report --core-recent-only --model-name trading_champio
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
 use the same policy-aware horizon selection where applicable.
 
+If you want to run the observation-driven watcher that zeros out already-impossible
+lower bins using the strongest target-day lower bound, run:
+
+```bash
+uv run pmtmax observation-report --model-name trading_champion
+uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
+uv run pmtmax station-dashboard
+uv run pmtmax station-cycle --model-name trading_champion
+```
+
+`observation-report` and `observation-shadow` write the latest candidate table,
+manual-review alerts, and `live_pilot_queue.json` under `artifacts/signals/v2/`.
+The queue is still manual-approval-only; candidates are classified as
+`tradable`, `manual_review`, or `blocked`.
+The live source stack is layered and fail-closed:
+- target-day markets only
+- exact-public intraday first when documented (`HKO` text readings for Hong Kong, `CWA CODiS` current-month daily max for Taipei)
+- research-public same-airport intraday where documented (`AMO AIR_CALP` for Seoul / RKSI)
+- `METAR` fallback after those source-specific paths
+`observation_shadow_summary.json` now includes `by_source_family`,
+`by_observation_source`, `top_after_cost_edges`, and `top_price_vs_observation_gaps`
+so you can see which source layer is actually generating after-cost candidates.
+`station-dashboard` reads the latest opportunity / observation / open-phase / revenue-gate
+artifacts and writes `artifacts/signals/v2/station_dashboard.json` plus
+`artifacts/signals/v2/station_dashboard.html`. `station-dashboard-daemon` keeps the
+same outputs refreshed on one host for the Discovery / Observation / Execution view.
+`station-cycle` is the one-shot orchestrator that refreshes opportunity, observation,
+open-phase, revenue-gate, and dashboard outputs in sequence. `station-daemon` repeats
+that full cycle on an interval.
+
 If you want to test the listing/open-phase hypothesis instead of the near-term
 policy path, run:
 
@@ -148,6 +178,20 @@ promotion decision, run:
 ```bash
 uv run pmtmax revenue-gate-report
 ```
+
+The revenue gate now also reads `observation_shadow_summary.json` when present, so
+benchmark `GO` can be confirmed by the near-term opportunity path, the open-phase
+path, or the observation-station path.
+
+To run the all-supported small live pilot preset with explicit manual approval,
+point `PMTMAX_CONFIG` at the checked-in preset and approve one queued candidate:
+
+```bash
+PMTMAX_CONFIG=configs/live-pilot-all-supported.yaml uv run pmtmax observation-daemon
+PMTMAX_CONFIG=configs/live-pilot-all-supported.yaml uv run pmtmax approve-live-candidate <token> --dry-run
+```
+
+The default observation-only preset is `configs/observation-station.yaml`.
 
 The canonical engine is now v2-only:
 

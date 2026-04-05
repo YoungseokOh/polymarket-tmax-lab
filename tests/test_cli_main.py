@@ -26,6 +26,9 @@ from pmtmax.cli.main import (
     opportunity_report,
     opportunity_shadow,
     revenue_gate_report,
+    station_cycle,
+    station_daemon,
+    station_dashboard,
     summarize_dataset_readiness,
     summarize_price_history_coverage,
     summarize_truth_coverage,
@@ -1263,6 +1266,182 @@ def test_revenue_gate_report_writes_combined_summary(tmp_path: Path) -> None:
     assert payload["decision"] == "GO"
     assert payload["required_model_alias"] == "trading_champion"
     assert payload["opportunity_shadow_gate"]["decision"] == "GO"
+
+
+def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
+    opportunity_path = tmp_path / "opportunity.json"
+    observation_path = tmp_path / "observation.json"
+    observation_summary_path = tmp_path / "observation_summary.json"
+    queue_path = tmp_path / "queue.json"
+    open_phase_path = tmp_path / "open_phase.json"
+    open_phase_summary_path = tmp_path / "open_phase_summary.json"
+    revenue_gate_path = tmp_path / "revenue_gate.json"
+
+    opportunity_path.write_text(
+        json.dumps(
+            [
+                {
+                    "city": "Seoul",
+                    "target_local_date": "2026-04-05",
+                    "decision_horizon": "morning_of",
+                    "outcome_label": "11°C",
+                    "edge": 0.02,
+                    "reason": "tradable",
+                }
+            ]
+        )
+    )
+    observation_path.write_text(
+        json.dumps(
+            [
+                {
+                    "city": "Taipei",
+                    "target_local_date": "2026-04-05",
+                    "decision_horizon": "morning_of",
+                    "queue_state": "tradable",
+                    "outcome_label": "21°C",
+                    "edge": 0.01,
+                    "source_family": "official_intraday",
+                    "observation_source": "cwa_codis_report_month",
+                }
+            ]
+        )
+    )
+    observation_summary_path.write_text(
+        json.dumps(
+            {
+                "gate_decision": "GO",
+                "gate_reason": "x",
+                "by_source_family": {
+                    "official_intraday": {
+                        "markets_evaluated": 1,
+                        "tradable_count": 1,
+                        "manual_review_count": 0,
+                        "after_cost_edge_positive_count": 1,
+                        "gate_decision": "GO",
+                    }
+                },
+                "by_observation_source": {
+                    "cwa_codis_report_month": {
+                        "markets_evaluated": 1,
+                        "tradable_count": 1,
+                        "manual_review_count": 0,
+                        "after_cost_edge_positive_count": 1,
+                        "gate_decision": "GO",
+                    }
+                },
+            }
+        )
+    )
+    queue_path.write_text(observation_path.read_text())
+    open_phase_path.write_text(
+        json.dumps(
+            [
+                {
+                    "city": "London",
+                    "target_local_date": "2026-04-05",
+                    "decision_horizon": "market_open",
+                    "outcome_label": "14°C",
+                    "edge": 0.015,
+                    "reason": "tradable",
+                    "open_phase_age_hours": 2.0,
+                }
+            ]
+        )
+    )
+    open_phase_summary_path.write_text(json.dumps({"gate_decision": "INCONCLUSIVE", "gate_reason": "x"}))
+    revenue_gate_path.write_text(
+        json.dumps(
+            {
+                "decision": "GO",
+                "decision_reason": "x",
+                "eligible_for_live_pilot": True,
+                "required_model_alias": "trading_champion",
+            }
+        )
+    )
+
+    json_output = tmp_path / "station_dashboard.json"
+    html_output = tmp_path / "station_dashboard.html"
+    station_dashboard(
+        opportunity_report_path=opportunity_path,
+        observation_latest_path=observation_path,
+        observation_summary_path=observation_summary_path,
+        queue_path=queue_path,
+        open_phase_latest_path=open_phase_path,
+        open_phase_summary_path=open_phase_summary_path,
+        revenue_gate_summary_path=revenue_gate_path,
+        json_output=json_output,
+        html_output=html_output,
+        state_path=tmp_path / "station_dashboard_state.json",
+    )
+
+    payload = json.loads(json_output.read_text())
+    assert payload["overview"]["revenue_gate_decision"] == "GO"
+    assert payload["observation_panel"]["source_family_breakdown"][0]["name"] == "official_intraday"
+    assert "PMTMAX Station Dashboard" in html_output.read_text()
+
+
+def test_station_cycle_command_writes_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "pmtmax.cli.main._run_station_cycle",
+        lambda **kwargs: {
+            "generated_at": "2026-04-05T00:00:00+00:00",
+            "revenue_gate_decision": "GO",
+            "queue_size": 2,
+            "observation_tradable_count": 1,
+            "opportunity_tradable_count": 1,
+            "open_phase_count": 3,
+            "dashboard_json_output": str(tmp_path / "station_dashboard.json"),
+            "dashboard_html_output": str(tmp_path / "station_dashboard.html"),
+        },
+    )
+
+    state_path = tmp_path / "station_cycle_state.json"
+    station_cycle(
+        dashboard_json_output=tmp_path / "station_dashboard.json",
+        dashboard_html_output=tmp_path / "station_dashboard.html",
+        dashboard_state_path=tmp_path / "station_dashboard_state.json",
+        state_path=state_path,
+    )
+
+    payload = json.loads(state_path.read_text())
+    assert payload["revenue_gate_decision"] == "GO"
+    assert payload["queue_size"] == 2
+
+
+def test_station_daemon_runs_single_cycle_and_writes_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_station_cycle(**kwargs):
+        calls.append(kwargs)
+        return {
+            "generated_at": "2026-04-05T00:00:00+00:00",
+            "revenue_gate_decision": "INCONCLUSIVE",
+            "queue_size": 0,
+            "observation_tradable_count": 0,
+            "opportunity_tradable_count": 0,
+            "open_phase_count": 0,
+            "dashboard_json_output": str(tmp_path / "station_dashboard.json"),
+            "dashboard_html_output": str(tmp_path / "station_dashboard.html"),
+        }
+
+    monkeypatch.setattr("pmtmax.cli.main._run_station_cycle", _fake_run_station_cycle)
+
+    state_path = tmp_path / "station_cycle_state.json"
+    station_daemon(
+        max_cycles=1,
+        interval=1,
+        dashboard_json_output=tmp_path / "station_dashboard.json",
+        dashboard_html_output=tmp_path / "station_dashboard.html",
+        dashboard_state_path=tmp_path / "station_dashboard_state.json",
+        state_path=state_path,
+    )
+
+    assert len(calls) == 1
+    payload = json.loads(state_path.read_text())
+    assert payload["cycle"] == 1
+    assert payload["revenue_gate_decision"] == "INCONCLUSIVE"
 
 
 def test_live_mm_uses_inventory_mapping_for_quoter(

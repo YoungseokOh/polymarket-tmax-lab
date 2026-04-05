@@ -90,3 +90,17 @@ def lookup_station_by_station_id(station_id: str) -> StationDefinition | None:
 
     _, by_station_id, _ = _station_maps()
     return by_station_id.get(station_id.strip().upper())
+
+
+def lookup_city_stations(city: str) -> list[StationDefinition]:
+    """Return all known station definitions for one canonical city."""
+
+    canonical = canonical_city(city)
+    by_city, by_station_id, _ = _station_maps()
+    primary = by_city.get(canonical)
+    matches = [definition for definition in by_station_id.values() if definition.city == canonical]
+    if primary is None:
+        return matches
+    ordered = [primary]
+    ordered.extend(definition for definition in matches if definition.station_id != primary.station_id)
+    return ordered

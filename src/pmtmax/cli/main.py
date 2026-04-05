@@ -6,7 +6,7 @@ import csv
 import json
 import shutil
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
@@ -53,6 +53,7 @@ from pmtmax.markets.repository import (
     load_market_snapshots,
     save_market_snapshots,
 )
+from pmtmax.markets.station_registry import lookup_city_stations
 from pmtmax.markets.station_registry import lookup_station
 from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
 from pmtmax.modeling.advanced.lgbm_emos import LgbmEMOSVariantConfig
@@ -100,12 +101,16 @@ from pmtmax.modeling.train import (
     train_model,
 )
 from pmtmax.monitoring.hope_hunt import HopeHuntRunner
+from pmtmax.monitoring.observation_station import (
+    ObservationShadowRunner,
+)
 from pmtmax.monitoring.open_phase import (
     OpenPhaseShadowRunner,
     extract_open_phase_metadata,
     open_phase_age_bucket,
     select_open_phase_candidates,
 )
+from pmtmax.monitoring.station_dashboard import StationDashboardRunner
 from pmtmax.storage.duckdb_store import DuckDBStore
 from pmtmax.storage.firebase_mirror import FirebaseMirror
 from pmtmax.storage.lab_bootstrap import (
@@ -121,7 +126,9 @@ from pmtmax.storage.schemas import (
     BookSnapshot,
     HopeHuntObservation,
     LegacyRunInventory,
+    LiveTemperatureObservation,
     MarketSnapshot,
+    ObservationOpportunity,
     OpenPhaseObservation,
     OpportunityObservation,
     ProbForecast,
@@ -130,7 +137,10 @@ from pmtmax.storage.schemas import (
 )
 from pmtmax.storage.warehouse import DataWarehouse, backup_duckdb_file, ordered_legacy_paths
 from pmtmax.utils import dump_json, load_json, load_yaml_with_extends, set_global_seed, stable_hash
+from pmtmax.weather.intraday_observation import fetch_intraday_observations
+from pmtmax.weather.metar_client import MetarClient
 from pmtmax.weather.openmeteo_client import OpenMeteoClient
+from pmtmax.weather.truth_sources.base import celsius_to_fahrenheit
 
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
@@ -1232,6 +1242,587 @@ def _forecast_contract_rejection_reason(
     if getattr(forecast, "probability_source", "raw") != "calibrated":
         return "missing_calibrator"
     return None
+
+
+def _as_utc_datetime(value: datetime) -> datetime:
+    """Normalize one datetime into UTC."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _is_icao_station_id(station_id: str | None) -> bool:
+    """Return whether one station id looks like an ICAO code."""
+
+    if not station_id:
+        return False
+    normalized = station_id.strip().upper()
+    return len(normalized) == 4 and normalized.isalpha()
+
+
+def _observation_station_candidates(spec: MarketSpec) -> list[tuple[str, str]]:
+    """Return ordered live observation station candidates for one market."""
+
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _append(station_id: str | None, confidence: str) -> None:
+        if not _is_icao_station_id(station_id):
+            return
+        normalized = str(station_id).strip().upper()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append((normalized, confidence))
+
+    _append(spec.station_id, "primary_station")
+    _append(spec.public_truth_station_id, "public_truth_station")
+    for definition in lookup_city_stations(spec.city):
+        _append(definition.station_id, "same_city_station")
+        _append(definition.public_truth_station_id, "same_city_public_truth_station")
+    return candidates
+
+
+def _is_target_day_observation(spec: MarketSpec, *, observed_at: datetime) -> bool:
+    """Return whether one observation cycle lines up with the market's target local day."""
+
+    local_now = _as_utc_datetime(observed_at).astimezone(ZoneInfo(spec.timezone))
+    return local_now.date() == spec.target_local_date
+
+
+def _market_unit_from_celsius(spec: MarketSpec, value_c: float) -> float:
+    """Convert one Celsius observation into the market's settlement unit."""
+
+    if spec.unit == "F":
+        return celsius_to_fahrenheit(value_c)
+    return value_c
+
+
+def _observation_adjusted_probabilities(
+    spec: MarketSpec,
+    forecast_probs: dict[str, float],
+    *,
+    observed_market_unit: float,
+) -> tuple[dict[str, float], list[str], float]:
+    """Zero out bins already made impossible by the latest observed temperature."""
+
+    schema_by_label = {item.label: item for item in spec.outcome_schema}
+    feasible: dict[str, float] = {}
+    impossible: list[str] = []
+    for label, probability in forecast_probs.items():
+        outcome = schema_by_label.get(label)
+        if outcome is None:
+            continue
+        if outcome.upper is not None and observed_market_unit > outcome.upper:
+            impossible.append(label)
+            continue
+        feasible[label] = max(float(probability), 0.0)
+
+    if not feasible:
+        return forecast_probs, impossible, 0.0
+
+    feasible_mass = float(sum(feasible.values()))
+    if feasible_mass <= 0:
+        uniform = 1.0 / float(len(feasible))
+        adjusted = dict.fromkeys(feasible, uniform)
+    else:
+        adjusted = {label: probability / feasible_mass for label, probability in feasible.items()}
+
+    for label in impossible:
+        adjusted[label] = 0.0
+
+    removed_mass = max(0.0, 1.0 - feasible_mass)
+    return adjusted, impossible, removed_mass
+
+
+def _impossible_price_mass(impossible_labels: list[str], books: dict[str, BookSnapshot]) -> float | None:
+    """Return the total best-ask mass still assigned to impossible outcomes."""
+
+    prices = [
+        books[label].best_ask()
+        for label in impossible_labels
+        if label in books and books[label].source == "clob" and books[label].asks
+    ]
+    if not prices:
+        return None
+    return float(sum(prices))
+
+
+def _candidate_tier_for_spec(spec: MarketSpec) -> str:
+    """Return the live-candidate tier for one market spec."""
+
+    if spec.truth_track == "research_public":
+        return "research_public_live"
+    return "exact_public_live"
+
+
+def _observation_risk_flags(
+    *,
+    spec: MarketSpec,
+    reason: str,
+    observation_freshness_minutes: float | None,
+    stale_minutes: int,
+    impossible_price_mass: float | None,
+) -> list[str]:
+    """Return explicit review flags for one observation-driven candidate."""
+
+    flags: list[str] = []
+    if spec.truth_track != "exact_public":
+        flags.append("research_public")
+    if not spec.settlement_eligible:
+        flags.append("settlement_ineligible")
+    if observation_freshness_minutes is None:
+        flags.append("missing_observation")
+    elif observation_freshness_minutes > stale_minutes:
+        flags.append("stale_observation")
+    if reason == "after_cost_positive_but_spread_too_wide":
+        flags.append("wide_spread")
+    elif reason == "after_cost_positive_but_liquidity_too_low":
+        flags.append("low_liquidity")
+    elif reason == "after_cost_positive_but_below_threshold":
+        flags.append("below_edge_threshold")
+    elif reason == "missing_book":
+        flags.append("missing_book")
+    if impossible_price_mass is None or impossible_price_mass <= 0:
+        flags.append("no_observation_dislocation")
+    return flags
+
+
+def _observation_queue_state(
+    *,
+    reason: str,
+    risk_flags: list[str],
+) -> Literal["tradable", "manual_review", "blocked"]:
+    """Return the approval queue state for one observation-driven opportunity."""
+
+    blocking_flags = {"missing_observation", "missing_book"}
+    if any(flag in blocking_flags for flag in risk_flags):
+        return "blocked"
+    if reason == "tradable" and not {"research_public", "stale_observation"} & set(risk_flags):
+        return "tradable"
+    if reason in {
+        "tradable",
+        "after_cost_positive_but_spread_too_wide",
+        "after_cost_positive_but_liquidity_too_low",
+        "after_cost_positive_but_below_threshold",
+    }:
+        return "manual_review"
+    return "blocked"
+
+
+def _manual_approval_token(
+    *,
+    market_id: str,
+    outcome_label: str | None,
+    observation_observed_at: datetime | None,
+    source_station_id: str | None,
+) -> str | None:
+    """Return a stable approval token for one observation candidate."""
+
+    if outcome_label is None or observation_observed_at is None:
+        return None
+    payload = "|".join(
+        [
+            market_id,
+            outcome_label,
+            _as_utc_datetime(observation_observed_at).isoformat(),
+            source_station_id or "",
+        ]
+    )
+    return stable_hash(payload)[:16]
+
+
+def _empty_observation_opportunity(
+    snapshot: MarketSnapshot,
+    *,
+    observed_at: datetime,
+    decision_horizon: str,
+    reason: str,
+    source_family: str | None = None,
+    observation_source: str | None = None,
+    station_id: str | None = None,
+    source_station_id: str | None = None,
+    candidate_tier: str | None = None,
+    source_confidence: str | None = None,
+    book_source_counts: dict[str, int] | None = None,
+    forecast_generated_at: datetime | None = None,
+    forecast_contract_version: str = "v1",
+    probability_source: Literal["raw", "calibrated"] = "raw",
+    distribution_family: str = "gaussian",
+    forecast_mean: float | None = None,
+    forecast_std: float | None = None,
+    observed_temp_c: float | None = None,
+    observed_temp_market_unit: float | None = None,
+    observation_observed_at: datetime | None = None,
+    observation_freshness_minutes: float | None = None,
+    observation_override_mass: float | None = None,
+    impossible_outcome_count: int = 0,
+    impossible_price_mass: float | None = None,
+    price_vs_observation_gap: float | None = None,
+    queue_state: Literal["tradable", "manual_review", "blocked"] = "blocked",
+    approval_required: bool = False,
+    live_eligible: bool = False,
+    manual_approval_token: str | None = None,
+    approval_expires_at: datetime | None = None,
+    risk_flags: list[str] | None = None,
+    error: str | None = None,
+) -> ObservationOpportunity:
+    """Build a minimal observation-driven opportunity for skipped/error cases."""
+
+    spec = snapshot.spec
+    if spec is None:
+        msg = "Snapshot is missing spec"
+        raise ValueError(msg)
+    return ObservationOpportunity(
+        observed_at=observed_at,
+        market_id=spec.market_id,
+        city=spec.city,
+        question=spec.question,
+        target_local_date=spec.target_local_date,
+        decision_horizon=decision_horizon,
+        reason=reason,
+        queue_state=queue_state,
+        market_url=_market_url_for_spec(spec),
+        source_family=source_family,
+        observation_source=observation_source,
+        truth_track=spec.truth_track,
+        station_id=station_id or spec.station_id,
+        source_station_id=source_station_id,
+        candidate_tier=candidate_tier or _candidate_tier_for_spec(spec),
+        source_confidence=source_confidence,
+        book_source_counts=book_source_counts or {},
+        forecast_generated_at=forecast_generated_at,
+        forecast_contract_version=forecast_contract_version,
+        probability_source=probability_source,
+        distribution_family=distribution_family,
+        forecast_mean=forecast_mean,
+        forecast_std=forecast_std,
+        observed_temp_c=observed_temp_c,
+        observed_temp_market_unit=observed_temp_market_unit,
+        observation_observed_at=observation_observed_at,
+        observation_freshness_minutes=observation_freshness_minutes,
+        observation_override_mass=observation_override_mass,
+        impossible_outcome_count=impossible_outcome_count,
+        impossible_price_mass=impossible_price_mass,
+        price_vs_observation_gap=price_vs_observation_gap,
+        approval_required=approval_required,
+        live_eligible=live_eligible,
+        manual_approval_token=manual_approval_token,
+        approval_expires_at=approval_expires_at,
+        risk_flags=risk_flags or [],
+        error=error,
+    )
+
+
+def _metar_live_observations(
+    spec: MarketSpec,
+    *,
+    metar: MetarClient,
+) -> list[LiveTemperatureObservation]:
+    """Return METAR-backed lower-bound candidates for one market."""
+
+    observations: list[LiveTemperatureObservation] = []
+    for station_id, confidence in _observation_station_candidates(spec):
+        observation = metar.fetch_latest(station_id)
+        if observation is None:
+            continue
+        observations.append(
+            LiveTemperatureObservation(
+                source_family="aviation",
+                observation_source="aviationweather_metar",
+                station_id=station_id,
+                observed_at=_as_utc_datetime(observation.observed_at),
+                lower_bound_temp_c=float(observation.temp_c),
+                current_temp_c=float(observation.temp_c),
+                daily_high_so_far_c=None,
+                source_confidence=confidence,
+            )
+        )
+    return observations
+
+
+def _live_observation_priority(source_family: str | None) -> int:
+    """Return deterministic source-family precedence for equally strong candidates."""
+
+    priorities = {
+        "official_intraday": 3,
+        "research_intraday": 2,
+        "aviation": 1,
+    }
+    return priorities.get(source_family or "", 0)
+
+
+def _select_best_live_observation(
+    spec: MarketSpec,
+    candidates: list[LiveTemperatureObservation],
+) -> LiveTemperatureObservation | None:
+    """Pick the strongest lower-bound candidate for one market."""
+
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda candidate: (
+            _market_unit_from_celsius(spec, candidate.lower_bound_temp_c),
+            _as_utc_datetime(candidate.observed_at),
+            _live_observation_priority(candidate.source_family),
+        ),
+    )
+
+
+def _fetch_live_observation(
+    spec: MarketSpec,
+    *,
+    http: CachedHttpClient,
+    metar: MetarClient,
+    observed_at: datetime,
+    allow_metar: bool,
+) -> LiveTemperatureObservation | None:
+    """Return the best available live lower-bound candidate for one market."""
+
+    candidates = fetch_intraday_observations(
+        spec,
+        http=http,
+        observed_at=observed_at,
+    )
+    if allow_metar:
+        candidates.extend(_metar_live_observations(spec, metar=metar))
+    return _select_best_live_observation(spec, candidates)
+
+
+def _evaluate_observation_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    builder: DatasetBuilder,
+    clob: ClobReadClient,
+    http: CachedHttpClient,
+    metar: MetarClient,
+    model_path: Path,
+    model_name: str,
+    config: Any,
+    observed_at: datetime,
+    decision_horizon: str,
+    edge_threshold: float,
+) -> ObservationOpportunity | None:
+    """Evaluate one active market using the latest live observation as a lower bound."""
+
+    spec = snapshot.spec
+    if spec is None:
+        return None
+    if not _is_target_day_observation(spec, observed_at=observed_at):
+        return _empty_observation_opportunity(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="not_target_day",
+            station_id=spec.station_id,
+            candidate_tier=_candidate_tier_for_spec(spec),
+            risk_flags=["off_target_day"],
+        )
+    candidate_tier = _candidate_tier_for_spec(spec)
+    observation = _fetch_live_observation(
+        spec,
+        http=http,
+        metar=metar,
+        observed_at=observed_at,
+        allow_metar=bool(getattr(config.metar, "enabled", True)),
+    )
+    if observation is None:
+        return _empty_observation_opportunity(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="missing_observation",
+            source_family=None,
+            observation_source=None,
+            station_id=spec.station_id,
+            candidate_tier=candidate_tier,
+            source_confidence=None,
+            source_station_id=None,
+            risk_flags=["missing_observation"],
+        )
+
+    observation_freshness_minutes = max(
+        (_as_utc_datetime(observed_at) - _as_utc_datetime(observation.observed_at)).total_seconds() / 60.0,
+        0.0,
+    )
+    observed_temp_c = float(observation.lower_bound_temp_c)
+    observed_temp_market_unit = _market_unit_from_celsius(spec, observed_temp_c)
+    try:
+        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
+        forecast = predict_market(
+            model_path,
+            model_name,
+            spec,
+            feature_frame,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _empty_observation_opportunity(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="forecast_failed",
+            source_family=observation.source_family,
+            observation_source=observation.observation_source,
+            station_id=spec.station_id,
+            source_station_id=observation.station_id,
+            candidate_tier=candidate_tier,
+            source_confidence=observation.source_confidence,
+            observed_temp_c=observed_temp_c,
+            observed_temp_market_unit=observed_temp_market_unit,
+            observation_observed_at=observation.observed_at,
+            observation_freshness_minutes=observation_freshness_minutes,
+            error=str(exc),
+        )
+
+    if not forecast_fresh(forecast.generated_at, config.execution.stale_forecast_minutes):
+        return _empty_observation_opportunity(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason="stale_forecast",
+            source_family=observation.source_family,
+            observation_source=observation.observation_source,
+            station_id=spec.station_id,
+            source_station_id=observation.station_id,
+            candidate_tier=candidate_tier,
+            source_confidence=observation.source_confidence,
+            forecast_generated_at=forecast.generated_at,
+            forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            forecast_mean=forecast.mean,
+            forecast_std=forecast.std,
+            observed_temp_c=observed_temp_c,
+            observed_temp_market_unit=observed_temp_market_unit,
+            observation_observed_at=observation.observed_at,
+            observation_freshness_minutes=observation_freshness_minutes,
+        )
+
+    forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
+    if forecast_rejection_reason is not None:
+        return _empty_observation_opportunity(
+            snapshot,
+            observed_at=observed_at,
+            decision_horizon=decision_horizon,
+            reason=forecast_rejection_reason,
+            source_family=observation.source_family,
+            observation_source=observation.observation_source,
+            station_id=spec.station_id,
+            source_station_id=observation.station_id,
+            candidate_tier=candidate_tier,
+            source_confidence=observation.source_confidence,
+            forecast_generated_at=forecast.generated_at,
+            forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            forecast_mean=forecast.mean,
+            forecast_std=forecast.std,
+            observed_temp_c=observed_temp_c,
+            observed_temp_market_unit=observed_temp_market_unit,
+            observation_observed_at=observation.observed_at,
+            observation_freshness_minutes=observation_freshness_minutes,
+        )
+
+    active_probs = forecast.active_outcome_probabilities()
+    observation_probs, impossible_labels, removed_mass = _observation_adjusted_probabilities(
+        spec,
+        active_probs,
+        observed_market_unit=observed_temp_market_unit,
+    )
+    books = _load_books_for_forecast(clob, snapshot, observation_probs)
+    impossible_price_mass = _impossible_price_mass(impossible_labels, books)
+    evaluation = _evaluate_market_signal(
+        snapshot,
+        observation_probs,
+        books,
+        mode="paper",
+        clob=clob,
+        default_fee_bps=_default_fee_bps(config),
+        edge_threshold=edge_threshold,
+        max_spread_bps=config.execution.max_spread_bps,
+        min_liquidity=config.execution.min_liquidity,
+        forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+        probability_source=getattr(forecast, "probability_source", "raw"),
+        distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+        decision_horizon=decision_horizon,
+    )
+    reason = str(evaluation["reason"])
+    risk_flags = _observation_risk_flags(
+        spec=spec,
+        reason=reason,
+        observation_freshness_minutes=observation_freshness_minutes,
+        stale_minutes=config.observation_station.observation_stale_minutes,
+        impossible_price_mass=impossible_price_mass,
+    )
+    queue_state = _observation_queue_state(reason=reason, risk_flags=risk_flags)
+    approval_required = queue_state in {"tradable", "manual_review"}
+    approval_expires_at = None
+    if approval_required:
+        approval_expires_at = observed_at + timedelta(minutes=config.observation_station.approval_ttl_minutes)
+    observation_row = _empty_observation_opportunity(
+        snapshot,
+        observed_at=observed_at,
+        decision_horizon=decision_horizon,
+        reason=reason,
+        queue_state=queue_state,
+        source_family=observation.source_family,
+        observation_source=observation.observation_source,
+        station_id=spec.station_id,
+        source_station_id=observation.station_id,
+        candidate_tier=candidate_tier,
+        source_confidence=observation.source_confidence,
+        book_source_counts=dict(evaluation["book_source_counts"]),
+        forecast_generated_at=forecast.generated_at,
+        forecast_contract_version=getattr(forecast, "contract_version", "v1"),
+        probability_source=getattr(forecast, "probability_source", "raw"),
+        distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+        forecast_mean=forecast.mean,
+        forecast_std=forecast.std,
+        observed_temp_c=observed_temp_c,
+        observed_temp_market_unit=observed_temp_market_unit,
+        observation_observed_at=observation.observed_at,
+        observation_freshness_minutes=observation_freshness_minutes,
+        observation_override_mass=removed_mass,
+        impossible_outcome_count=len(impossible_labels),
+        impossible_price_mass=impossible_price_mass,
+        price_vs_observation_gap=impossible_price_mass,
+        approval_required=approval_required,
+        live_eligible=approval_required,
+        approval_expires_at=approval_expires_at,
+        manual_approval_token=_manual_approval_token(
+            market_id=spec.market_id,
+            outcome_label=str(evaluation["candidate"]["outcome_label"]) if evaluation.get("candidate") is not None else None,
+            observation_observed_at=observation.observed_at,
+            source_station_id=observation.station_id,
+        ),
+        risk_flags=risk_flags,
+    )
+    best_candidate = evaluation.get("candidate")
+    if best_candidate is None:
+        return observation_row
+    return observation_row.model_copy(update=best_candidate)
+
+
+def _serialize_observation_opportunity(observation: ObservationOpportunity) -> dict[str, object]:
+    """Normalize one observation-driven opportunity for JSON outputs."""
+
+    row = observation.model_dump(mode="json")
+    row["target_local_date"] = observation.target_local_date.isoformat()
+    if observation.after_cost_edge is not None:
+        row["edge"] = round(observation.after_cost_edge, 6)
+    if observation.visible_liquidity is not None:
+        row["liquidity"] = round(observation.visible_liquidity, 6)
+    if observation.best_ask is not None:
+        row["executable_price"] = round(observation.best_ask, 6)
+    if observation.observation_freshness_minutes is not None:
+        row["observation_freshness_minutes"] = round(observation.observation_freshness_minutes, 3)
+    if observation.observed_temp_market_unit is not None:
+        row["observed_temp_market_unit"] = round(observation.observed_temp_market_unit, 3)
+    if observation.price_vs_observation_gap is not None:
+        row["price_vs_observation_gap"] = round(observation.price_vs_observation_gap, 6)
+    return row
 
 
 def _evaluate_opportunity_snapshot(
@@ -4574,6 +5165,26 @@ def _load_optional_json(path: Path) -> dict[str, object] | None:
     return None
 
 
+def _load_optional_rows(path: Path) -> list[dict[str, object]]:
+    """Load a JSON row array when present, otherwise return an empty list."""
+
+    if not path.exists():
+        return []
+    payload = load_json(path)
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _path_or_default(value: Path | None, default: Path) -> Path:
+    """Resolve optional CLI path arguments against a concrete default path."""
+
+    resolved = _resolve_option_value(value)
+    if resolved is None:
+        return default
+    return resolved
+
+
 @app.command("revenue-gate-report")
 def revenue_gate_report(
     benchmark_summary_path: Path = typer.Option(
@@ -4587,6 +5198,10 @@ def revenue_gate_report(
     open_phase_summary_path: Path = typer.Option(
         Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
         help="Open-phase shadow summary JSON",
+    ),
+    observation_summary_path: Path = typer.Option(
+        Path("artifacts/signals/v2/observation_shadow_summary.json"),
+        help="Observation-station shadow summary JSON",
     ),
     output: Path = typer.Option(
         Path("artifacts/signals/v2/revenue_gate_summary.json"),
@@ -4615,6 +5230,10 @@ def revenue_gate_report(
         open_phase_summary_path,
         Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
     )
+    observation_summary_path = _resolve_option_value(
+        observation_summary_path,
+        Path("artifacts/signals/v2/observation_shadow_summary.json"),
+    )
     output = _resolve_option_value(output, Path("artifacts/signals/v2/revenue_gate_summary.json"))
     trading_alias_name = _resolve_option_value(trading_alias_name, TRADING_MODEL_ALIAS)
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "recent_core"), core_recent_only=False)
@@ -4625,10 +5244,12 @@ def revenue_gate_report(
     benchmark_summary = _load_optional_json(benchmark_summary_path)
     opportunity_summary = _load_optional_json(opportunity_summary_path)
     open_phase_summary = _load_optional_json(open_phase_summary_path)
+    observation_summary = _load_optional_json(observation_summary_path)
     report = build_revenue_gate_report(
         benchmark_summary=benchmark_summary,
         opportunity_summary=opportunity_summary,
         open_phase_summary=open_phase_summary,
+        observation_summary=observation_summary,
         trading_alias_name=trading_alias_name,
         pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
         market_scope=market_scope,
@@ -4636,6 +5257,977 @@ def revenue_gate_report(
     output.parent.mkdir(parents=True, exist_ok=True)
     dump_json(output, report)
     console.print_json(data=report)
+
+
+def _build_station_dashboard_runner(
+    *,
+    opportunity_report_path: Path,
+    observation_latest_path: Path,
+    observation_summary_path: Path,
+    queue_path: Path,
+    open_phase_latest_path: Path,
+    open_phase_summary_path: Path,
+    revenue_gate_summary_path: Path,
+    interval_seconds: int,
+    max_cycles: int,
+    json_output_path: Path,
+    html_output_path: Path,
+    state_path: Path,
+) -> StationDashboardRunner:
+    """Build one reusable station-dashboard renderer."""
+
+    config, _env = load_settings()
+
+    def _data_loader() -> dict[str, Any]:
+        return {
+            "opportunity_rows": _load_optional_rows(opportunity_report_path),
+            "observation_rows": _load_optional_rows(observation_latest_path),
+            "queue_rows": _load_optional_rows(queue_path),
+            "open_phase_rows": _load_optional_rows(open_phase_latest_path),
+            "revenue_gate_summary": _load_optional_json(revenue_gate_summary_path),
+            "observation_summary": _load_optional_json(observation_summary_path),
+            "open_phase_summary": _load_optional_json(open_phase_summary_path),
+        }
+
+    return StationDashboardRunner(
+        config=config,
+        interval_seconds=interval_seconds,
+        max_cycles=max_cycles,
+        state_path=state_path,
+        json_output_path=json_output_path,
+        html_output_path=html_output_path,
+        data_loader=_data_loader,
+    )
+
+
+def _run_station_cycle(
+    *,
+    model_path: Path,
+    model_name: str,
+    cities: list[str] | None,
+    core_recent_only: bool,
+    market_scope: str,
+    markets_path: Path | None,
+    horizon: str,
+    min_edge: float | None,
+    open_window_hours: float,
+    benchmark_summary_path: Path,
+    opportunity_report_path: Path,
+    opportunity_shadow_summary_path: Path,
+    observation_latest_path: Path,
+    observation_summary_path: Path,
+    observation_alerts_path: Path,
+    queue_path: Path,
+    open_phase_latest_path: Path,
+    open_phase_summary_path: Path,
+    revenue_gate_summary_path: Path,
+    dashboard_json_output: Path,
+    dashboard_html_output: Path,
+    dashboard_state_path: Path,
+) -> dict[str, Any]:
+    """Run one end-to-end station cycle and return a compact summary."""
+
+    opportunity_report(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        core_recent_only=core_recent_only,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        horizon=horizon,
+        min_edge=min_edge,
+        output=opportunity_report_path,
+    )
+    opportunity_shadow(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        core_recent_only=core_recent_only,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval=1,
+        max_cycles=1,
+        near_term_days=None,
+        output=None,
+        latest_output=None,
+        summary_output=opportunity_shadow_summary_path,
+        state_path=None,
+    )
+    observation_report(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        core_recent_only=core_recent_only,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        horizon=horizon,
+        min_edge=min_edge,
+        output=observation_latest_path,
+        summary_output=observation_summary_path,
+        alerts_output=observation_alerts_path,
+        queue_output=queue_path,
+    )
+    open_phase_shadow(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        core_recent_only=core_recent_only,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval=1,
+        max_cycles=1,
+        open_window_hours=open_window_hours,
+        horizon="market_open",
+        min_edge=min_edge,
+        output=_default_signal_output("open_phase_shadow.jsonl"),
+        latest_output=open_phase_latest_path,
+        summary_output=open_phase_summary_path,
+        state_path=_default_signal_output("open_phase_shadow_state.json"),
+    )
+    revenue_gate_report(
+        benchmark_summary_path=benchmark_summary_path,
+        opportunity_summary_path=opportunity_shadow_summary_path,
+        open_phase_summary_path=open_phase_summary_path,
+        observation_summary_path=observation_summary_path,
+        output=revenue_gate_summary_path,
+        trading_alias_name=TRADING_MODEL_ALIAS,
+        market_scope=market_scope,
+    )
+    station_dashboard(
+        opportunity_report_path=opportunity_report_path,
+        observation_latest_path=observation_latest_path,
+        observation_summary_path=observation_summary_path,
+        queue_path=queue_path,
+        open_phase_latest_path=open_phase_latest_path,
+        open_phase_summary_path=open_phase_summary_path,
+        revenue_gate_summary_path=revenue_gate_summary_path,
+        json_output=dashboard_json_output,
+        html_output=dashboard_html_output,
+        state_path=dashboard_state_path,
+    )
+    dashboard_payload = _load_optional_json(dashboard_json_output) or {}
+    overview = dict(dashboard_payload.get("overview", {}))
+    return {
+        "generated_at": datetime.now(tz=UTC),
+        "revenue_gate_decision": overview.get("revenue_gate_decision", "INCONCLUSIVE"),
+        "queue_size": int(overview.get("queue_size", 0) or 0),
+        "observation_tradable_count": int(overview.get("observation_tradable_count", 0) or 0),
+        "opportunity_tradable_count": int(overview.get("opportunity_tradable_count", 0) or 0),
+        "open_phase_count": int(overview.get("open_phase_count", 0) or 0),
+        "dashboard_json_output": str(dashboard_json_output),
+        "dashboard_html_output": str(dashboard_html_output),
+    }
+
+
+@app.command("station-dashboard")
+def station_dashboard(
+    opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report JSON path"),
+    observation_latest_path: Path | None = typer.Option(None, help="Observation latest JSON path"),
+    observation_summary_path: Path | None = typer.Option(None, help="Observation summary JSON path"),
+    queue_path: Path | None = typer.Option(None, help="Manual approval queue JSON path"),
+    open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest JSON path"),
+    open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary JSON path"),
+    revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary JSON path"),
+    json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
+    html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
+    state_path: Path | None = typer.Option(None, help="Dashboard state path"),
+) -> None:
+    """Render one combined station dashboard from existing signal artifacts."""
+
+    config, _env = load_settings()
+    dashboard_config = config.station_dashboard
+    runner = _build_station_dashboard_runner(
+        opportunity_report_path=_path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path),
+        observation_latest_path=_path_or_default(observation_latest_path, dashboard_config.observation_latest_path),
+        observation_summary_path=_path_or_default(
+            observation_summary_path,
+            dashboard_config.observation_summary_path,
+        ),
+        queue_path=_path_or_default(queue_path, dashboard_config.queue_output_path),
+        open_phase_latest_path=_path_or_default(open_phase_latest_path, dashboard_config.open_phase_latest_path),
+        open_phase_summary_path=_path_or_default(
+            open_phase_summary_path,
+            dashboard_config.open_phase_summary_path,
+        ),
+        revenue_gate_summary_path=_path_or_default(
+            revenue_gate_summary_path,
+            dashboard_config.revenue_gate_summary_path,
+        ),
+        interval_seconds=dashboard_config.interval_seconds,
+        max_cycles=1,
+        json_output_path=_path_or_default(json_output, dashboard_config.json_output_path),
+        html_output_path=_path_or_default(html_output, dashboard_config.html_output_path),
+        state_path=_path_or_default(state_path, dashboard_config.state_path),
+    )
+    summary = runner.run_once()
+
+    table = Table(title="Station Dashboard")
+    table.add_column("Metric")
+    table.add_column("Value")
+    for key in [
+        "revenue_gate_decision",
+        "queue_size",
+        "observation_tradable_count",
+        "opportunity_tradable_count",
+        "open_phase_count",
+    ]:
+        table.add_row(key, str(summary.get(key, "")))
+    console.print(table)
+    console.print(f"Wrote JSON {runner.json_output_path}")
+    console.print(f"Wrote HTML {runner.html_output_path}")
+
+
+@app.command("station-dashboard-daemon")
+def station_dashboard_daemon(
+    opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report JSON path"),
+    observation_latest_path: Path | None = typer.Option(None, help="Observation latest JSON path"),
+    observation_summary_path: Path | None = typer.Option(None, help="Observation summary JSON path"),
+    queue_path: Path | None = typer.Option(None, help="Manual approval queue JSON path"),
+    open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest JSON path"),
+    open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary JSON path"),
+    revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary JSON path"),
+    interval: int | None = typer.Option(None, help="Seconds between dashboard refresh cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
+    html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
+    state_path: Path | None = typer.Option(None, help="Dashboard state path"),
+) -> None:
+    """Continuously refresh the combined station dashboard."""
+
+    config, _env = load_settings()
+    dashboard_config = config.station_dashboard
+    runner = _build_station_dashboard_runner(
+        opportunity_report_path=_path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path),
+        observation_latest_path=_path_or_default(observation_latest_path, dashboard_config.observation_latest_path),
+        observation_summary_path=_path_or_default(
+            observation_summary_path,
+            dashboard_config.observation_summary_path,
+        ),
+        queue_path=_path_or_default(queue_path, dashboard_config.queue_output_path),
+        open_phase_latest_path=_path_or_default(open_phase_latest_path, dashboard_config.open_phase_latest_path),
+        open_phase_summary_path=_path_or_default(
+            open_phase_summary_path,
+            dashboard_config.open_phase_summary_path,
+        ),
+        revenue_gate_summary_path=_path_or_default(
+            revenue_gate_summary_path,
+            dashboard_config.revenue_gate_summary_path,
+        ),
+        interval_seconds=_resolve_option_value(interval, dashboard_config.interval_seconds),
+        max_cycles=_resolve_option_value(max_cycles, dashboard_config.max_cycles) or 0,
+        json_output_path=_path_or_default(json_output, dashboard_config.json_output_path),
+        html_output_path=_path_or_default(html_output, dashboard_config.html_output_path),
+        state_path=_path_or_default(state_path, dashboard_config.state_path),
+    )
+    console.print(
+        "Station dashboard daemon: "
+        f"interval={runner.interval_seconds}s, max_cycles={runner.max_cycles}, "
+        f"html={runner.html_output_path}"
+    )
+    runner.run_loop()
+    console.print(f"Wrote JSON {runner.json_output_path}")
+    console.print(f"Wrote HTML {runner.html_output_path}")
+
+
+@app.command("station-cycle")
+def station_cycle(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    open_window_hours: float = typer.Option(24.0, help="Open-phase window in hours"),
+    benchmark_summary_path: Path = typer.Option(
+        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        help="Recent-core benchmark summary JSON",
+    ),
+    opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report output path"),
+    opportunity_shadow_summary_path: Path | None = typer.Option(None, help="Opportunity shadow summary output path"),
+    observation_latest_path: Path | None = typer.Option(None, help="Observation latest output path"),
+    observation_summary_path: Path | None = typer.Option(None, help="Observation summary path"),
+    observation_alerts_path: Path | None = typer.Option(None, help="Observation alerts output path"),
+    queue_path: Path | None = typer.Option(None, help="Manual approval queue path"),
+    open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest output path"),
+    open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary path"),
+    revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary output path"),
+    dashboard_json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
+    dashboard_html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
+    dashboard_state_path: Path | None = typer.Option(None, help="Dashboard state path"),
+    state_path: Path | None = typer.Option(None, help="Station cycle state path"),
+) -> None:
+    """Run one full station cycle from discovery through dashboard rendering."""
+
+    config, _env = load_settings()
+    dashboard_config = config.station_dashboard
+    observation_config = config.observation_station
+    orchestrator_config = config.station_orchestrator
+    summary = _run_station_cycle(
+        model_path=_resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl")),
+        model_name=_resolve_option_value(model_name, TRADING_MODEL_ALIAS),
+        cities=_resolve_option_value(cities),
+        core_recent_only=bool(_resolve_option_value(core_recent_only, False)),
+        market_scope=_resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only),
+        markets_path=_resolve_option_value(markets_path),
+        horizon=_resolve_option_value(horizon, "policy"),
+        min_edge=_resolve_option_value(min_edge),
+        open_window_hours=float(_resolve_option_value(open_window_hours, 24.0)),
+        benchmark_summary_path=_resolve_option_value(
+            benchmark_summary_path,
+            Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        ),
+        opportunity_report_path=_path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path),
+        opportunity_shadow_summary_path=_path_or_default(
+            opportunity_shadow_summary_path,
+            _default_signal_output("opportunity_shadow_summary.json"),
+        ),
+        observation_latest_path=_path_or_default(observation_latest_path, dashboard_config.observation_latest_path),
+        observation_summary_path=_path_or_default(observation_summary_path, dashboard_config.observation_summary_path),
+        observation_alerts_path=_path_or_default(observation_alerts_path, observation_config.alerts_output_path),
+        queue_path=_path_or_default(queue_path, dashboard_config.queue_output_path),
+        open_phase_latest_path=_path_or_default(open_phase_latest_path, dashboard_config.open_phase_latest_path),
+        open_phase_summary_path=_path_or_default(open_phase_summary_path, dashboard_config.open_phase_summary_path),
+        revenue_gate_summary_path=_path_or_default(
+            revenue_gate_summary_path,
+            dashboard_config.revenue_gate_summary_path,
+        ),
+        dashboard_json_output=_path_or_default(dashboard_json_output, dashboard_config.json_output_path),
+        dashboard_html_output=_path_or_default(dashboard_html_output, dashboard_config.html_output_path),
+        dashboard_state_path=_path_or_default(dashboard_state_path, dashboard_config.state_path),
+    )
+    effective_state_path = _path_or_default(state_path, orchestrator_config.state_path)
+    dump_json(effective_state_path, summary)
+    console.print_json(data=json.loads(json.dumps(summary, default=str)))
+
+
+@app.command("station-daemon")
+def station_daemon(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    open_window_hours: float = typer.Option(24.0, help="Open-phase window in hours"),
+    benchmark_summary_path: Path = typer.Option(
+        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        help="Recent-core benchmark summary JSON",
+    ),
+    opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report output path"),
+    opportunity_shadow_summary_path: Path | None = typer.Option(None, help="Opportunity shadow summary output path"),
+    observation_latest_path: Path | None = typer.Option(None, help="Observation latest output path"),
+    observation_summary_path: Path | None = typer.Option(None, help="Observation summary path"),
+    observation_alerts_path: Path | None = typer.Option(None, help="Observation alerts output path"),
+    queue_path: Path | None = typer.Option(None, help="Manual approval queue path"),
+    open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest output path"),
+    open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary path"),
+    revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary output path"),
+    dashboard_json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
+    dashboard_html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
+    dashboard_state_path: Path | None = typer.Option(None, help="Dashboard state path"),
+    interval: int | None = typer.Option(None, help="Seconds between station cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    state_path: Path | None = typer.Option(None, help="Station cycle state path"),
+) -> None:
+    """Continuously run the full station cycle."""
+
+    import signal as sig
+    import time
+
+    config, _env = load_settings()
+    dashboard_config = config.station_dashboard
+    observation_config = config.observation_station
+    orchestrator_config = config.station_orchestrator
+    effective_interval = _resolve_option_value(interval, orchestrator_config.interval_seconds)
+    effective_max_cycles = _resolve_option_value(max_cycles, orchestrator_config.max_cycles) or 0
+    effective_state_path = _path_or_default(state_path, orchestrator_config.state_path)
+    resolved_model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    resolved_model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    resolved_cities = _resolve_option_value(cities)
+    resolved_core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    resolved_market_scope = _resolve_market_scope(
+        _resolve_option_value(market_scope, "default"),
+        core_recent_only=resolved_core_recent_only,
+    )
+    resolved_markets_path = _resolve_option_value(markets_path)
+    resolved_horizon = _resolve_option_value(horizon, "policy")
+    resolved_min_edge = _resolve_option_value(min_edge)
+    resolved_open_window_hours = float(_resolve_option_value(open_window_hours, 24.0))
+    resolved_benchmark_summary_path = _resolve_option_value(
+        benchmark_summary_path,
+        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+    )
+    resolved_opportunity_report_path = _path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path)
+    resolved_opportunity_shadow_summary_path = _path_or_default(
+        opportunity_shadow_summary_path,
+        _default_signal_output("opportunity_shadow_summary.json"),
+    )
+    resolved_observation_latest_path = _path_or_default(observation_latest_path, dashboard_config.observation_latest_path)
+    resolved_observation_summary_path = _path_or_default(observation_summary_path, dashboard_config.observation_summary_path)
+    resolved_observation_alerts_path = _path_or_default(observation_alerts_path, observation_config.alerts_output_path)
+    resolved_queue_path = _path_or_default(queue_path, dashboard_config.queue_output_path)
+    resolved_open_phase_latest_path = _path_or_default(open_phase_latest_path, dashboard_config.open_phase_latest_path)
+    resolved_open_phase_summary_path = _path_or_default(open_phase_summary_path, dashboard_config.open_phase_summary_path)
+    resolved_revenue_gate_summary_path = _path_or_default(
+        revenue_gate_summary_path,
+        dashboard_config.revenue_gate_summary_path,
+    )
+    resolved_dashboard_json_output = _path_or_default(dashboard_json_output, dashboard_config.json_output_path)
+    resolved_dashboard_html_output = _path_or_default(dashboard_html_output, dashboard_config.html_output_path)
+    resolved_dashboard_state_path = _path_or_default(dashboard_state_path, dashboard_config.state_path)
+
+    running = True
+
+    def _shutdown(signum: int, frame: object) -> None:
+        nonlocal running
+        running = False
+
+    sig.signal(sig.SIGINT, _shutdown)
+    sig.signal(sig.SIGTERM, _shutdown)
+
+    cycle = 0
+    console.print(
+        "Station daemon: "
+        f"interval={effective_interval}s, max_cycles={effective_max_cycles}, "
+        f"market_scope={resolved_market_scope}"
+    )
+    while running:
+        summary = _run_station_cycle(
+            model_path=resolved_model_path,
+            model_name=resolved_model_name,
+            cities=resolved_cities,
+            core_recent_only=resolved_core_recent_only,
+            market_scope=resolved_market_scope,
+            markets_path=resolved_markets_path,
+            horizon=resolved_horizon,
+            min_edge=resolved_min_edge,
+            open_window_hours=resolved_open_window_hours,
+            benchmark_summary_path=resolved_benchmark_summary_path,
+            opportunity_report_path=resolved_opportunity_report_path,
+            opportunity_shadow_summary_path=resolved_opportunity_shadow_summary_path,
+            observation_latest_path=resolved_observation_latest_path,
+            observation_summary_path=resolved_observation_summary_path,
+            observation_alerts_path=resolved_observation_alerts_path,
+            queue_path=resolved_queue_path,
+            open_phase_latest_path=resolved_open_phase_latest_path,
+            open_phase_summary_path=resolved_open_phase_summary_path,
+            revenue_gate_summary_path=resolved_revenue_gate_summary_path,
+            dashboard_json_output=resolved_dashboard_json_output,
+            dashboard_html_output=resolved_dashboard_html_output,
+            dashboard_state_path=resolved_dashboard_state_path,
+        )
+        cycle += 1
+        payload = {
+            "cycle": cycle,
+            **summary,
+        }
+        dump_json(effective_state_path, payload)
+        console.print_json(data=json.loads(json.dumps(payload, default=str)))
+        if 0 < effective_max_cycles <= cycle:
+            break
+        if running:
+            time.sleep(effective_interval)
+
+
+def _build_observation_station_runner(
+    *,
+    model_path: Path,
+    model_name: str,
+    cities: list[str] | None,
+    market_scope: str,
+    markets_path: Path | None,
+    interval_seconds: int,
+    max_cycles: int,
+    output: Path,
+    latest_output: Path,
+    summary_output: Path,
+    alerts_output: Path,
+    queue_output: Path,
+    state_path: Path,
+    horizon: str,
+    edge_threshold: float | None,
+) -> tuple[ObservationShadowRunner, CachedHttpClient]:
+    """Build one reusable observation-station runner."""
+
+    config, _env, http, _duckdb, _parquet, openmeteo = _runtime(include_stores=False)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    metar = MetarClient(http, config.metar.base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    horizon_policy = _load_recent_horizon_policy()
+    effective_edge_threshold = edge_threshold if edge_threshold is not None else config.backtest.default_edge_threshold
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+
+    def _snapshot_fetcher() -> list[MarketSnapshot]:
+        return _load_scoped_snapshots(
+            markets_path=markets_path,
+            cities=scoped_cities,
+            market_scope=market_scope,
+            active=True,
+            closed=False,
+        )
+
+    def _evaluator(snapshots: list[MarketSnapshot], observed_at: datetime) -> list[ObservationOpportunity]:
+        observations: list[ObservationOpportunity] = []
+        for snapshot in snapshots:
+            spec = snapshot.spec
+            if spec is None:
+                continue
+            decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                spec,
+                now_utc=observed_at,
+                horizon=horizon,
+                horizon_policy=horizon_policy,
+            )
+            if horizon_reason == "policy_filtered":
+                observations.append(
+                    _empty_observation_opportunity(
+                        snapshot,
+                        observed_at=observed_at,
+                        decision_horizon=decision_horizon or "policy",
+                        reason="policy_filtered",
+                        source_family="aviation",
+                        observation_source="aviationweather_metar",
+                        station_id=spec.station_id,
+                        risk_flags=["policy_filtered"],
+                    )
+                )
+                continue
+            if decision_horizon is None:
+                continue
+            observation = _evaluate_observation_snapshot(
+                snapshot,
+                builder=builder,
+                clob=clob,
+                http=http,
+                metar=metar,
+                model_path=model_path,
+                model_name=resolved_model_name,
+                config=config,
+                observed_at=observed_at,
+                decision_horizon=decision_horizon,
+                edge_threshold=effective_edge_threshold,
+            )
+            if observation is not None:
+                observations.append(observation)
+        return observations
+
+    runner = ObservationShadowRunner(
+        config=config,
+        interval_seconds=interval_seconds,
+        max_cycles=max_cycles,
+        state_path=state_path,
+        latest_output_path=latest_output,
+        history_output_path=output,
+        summary_output_path=summary_output,
+        alerts_output_path=alerts_output,
+        queue_output_path=queue_output,
+        snapshot_fetcher=_snapshot_fetcher,
+        evaluator=_evaluator,
+    )
+    return runner, http
+
+
+@app.command("observation-report")
+def observation_report(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path | None = typer.Option(None, help="Latest observation report JSON output"),
+    summary_output: Path | None = typer.Option(None, help="Observation summary JSON output"),
+    alerts_output: Path | None = typer.Option(None, help="Alert queue JSON output"),
+    queue_output: Path | None = typer.Option(None, help="Manual approval queue JSON output"),
+) -> None:
+    """Generate one observation-driven opportunity snapshot across active markets."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
+    markets_path = _resolve_option_value(markets_path)
+    horizon = _resolve_option_value(horizon, "policy")
+    min_edge = _resolve_option_value(min_edge)
+    config, _env = load_settings()
+    latest_output = _resolve_option_value(
+        output,
+        _default_signal_output(config.observation_station.latest_output_path.name),
+    )
+    summary_output_path = _resolve_option_value(
+        summary_output,
+        _default_signal_output(config.observation_station.summary_output_path.name),
+    )
+    alerts_output_path = _resolve_option_value(
+        alerts_output,
+        _default_signal_output(config.observation_station.alerts_output_path.name),
+    )
+    queue_output_path = _resolve_option_value(
+        queue_output,
+        _default_signal_output(config.observation_station.queue_output_path.name),
+    )
+    runner, http = _build_observation_station_runner(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval_seconds=config.observation_station.interval_seconds,
+        max_cycles=1,
+        output=_default_signal_output(config.observation_station.history_output_path.name),
+        latest_output=latest_output,
+        summary_output=summary_output_path,
+        alerts_output=alerts_output_path,
+        queue_output=queue_output_path,
+        state_path=_default_signal_output(config.observation_station.state_path.name),
+        horizon=horizon,
+        edge_threshold=min_edge,
+    )
+    try:
+        summary = runner.run_once()
+    finally:
+        http.close()
+
+    rows = json.loads(latest_output.read_text()) if latest_output.exists() else []
+    summary_payload = json.loads(runner.summary_output_path.read_text()) if runner.summary_output_path.exists() else {}
+    table = Table(title="Observation Report")
+    table.add_column("City")
+    table.add_column("Date")
+    table.add_column("Obs")
+    table.add_column("Outcome")
+    table.add_column("Edge")
+    table.add_column("Queue")
+    table.add_column("Reason")
+    for row in rows[:20]:
+        observed_value = row.get("observed_temp_market_unit")
+        table.add_row(
+            str(row.get("city", "")),
+            str(row.get("target_local_date", "")),
+            f"{float(observed_value):.1f}" if observed_value is not None else "—",
+            str(row.get("outcome_label", "—")),
+            f"{float(row['edge']):+.4f}" if row.get("edge") is not None else "—",
+            str(row.get("queue_state", "")),
+            str(row.get("reason", "")),
+        )
+    console.print(table)
+    if isinstance(summary_payload, dict):
+        source_table = Table(title="Observation Source Breakdown")
+        source_table.add_column("Source Family")
+        source_table.add_column("Observed")
+        source_table.add_column("Raw+")
+        source_table.add_column("Edge+")
+        source_table.add_column("Gate")
+        for source_family, source_summary in sorted(dict(summary_payload.get("by_source_family", {})).items()):
+            if not isinstance(source_summary, dict):
+                continue
+            source_table.add_row(
+                str(source_family),
+                str(int(source_summary.get("markets_evaluated", 0) or 0)),
+                str(int(source_summary.get("raw_gap_positive_count", 0) or 0)),
+                str(int(source_summary.get("after_cost_edge_positive_count", 0) or 0)),
+                str(source_summary.get("gate_decision", "")),
+            )
+        console.print(source_table)
+
+        observation_source_table = Table(title="Observation Adapter Breakdown")
+        observation_source_table.add_column("Observation Source")
+        observation_source_table.add_column("Observed")
+        observation_source_table.add_column("Manual")
+        observation_source_table.add_column("Tradable")
+        for observation_source, source_summary in sorted(dict(summary_payload.get("by_observation_source", {})).items()):
+            if not isinstance(source_summary, dict):
+                continue
+            observation_source_table.add_row(
+                str(observation_source),
+                str(int(source_summary.get("markets_evaluated", 0) or 0)),
+                str(int(source_summary.get("manual_review_count", 0) or 0)),
+                str(int(source_summary.get("tradable_count", 0) or 0)),
+            )
+        console.print(observation_source_table)
+    console.print(
+        "Observation report: "
+        f"markets_evaluated={summary['markets_evaluated']}, "
+        f"tradable={summary['tradable_count']}, "
+        f"manual_review={summary['manual_review_count']}"
+    )
+    console.print(f"Wrote latest {latest_output}")
+    console.print(f"Wrote summary {summary_output_path}")
+    console.print(f"Wrote alerts {alerts_output_path}")
+    console.print(f"Wrote queue {queue_output_path}")
+
+
+@app.command("observation-shadow")
+def observation_shadow(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    interval: int | None = typer.Option(None, help="Seconds between observation cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    output: Path | None = typer.Option(None, help="Append-only JSONL output"),
+    latest_output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
+    summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
+    alerts_output: Path | None = typer.Option(None, help="Alert queue JSON output"),
+    queue_output: Path | None = typer.Option(None, help="Manual approval queue JSON output"),
+    state_path: Path | None = typer.Option(None, help="State JSON path"),
+) -> None:
+    """Continuously validate observation-driven edges without posting orders."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
+    markets_path = _resolve_option_value(markets_path)
+    interval = _resolve_option_value(interval)
+    max_cycles = _resolve_option_value(max_cycles)
+    horizon = _resolve_option_value(horizon, "policy")
+    min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output)
+    latest_output = _resolve_option_value(latest_output)
+    summary_output = _resolve_option_value(summary_output)
+    alerts_output = _resolve_option_value(alerts_output)
+    queue_output = _resolve_option_value(queue_output)
+    state_path = _resolve_option_value(state_path)
+    config, _env = load_settings()
+    runner, http = _build_observation_station_runner(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval_seconds=interval or config.observation_station.interval_seconds,
+        max_cycles=(config.observation_station.max_cycles if max_cycles is None else max_cycles) or 0,
+        output=output or _default_signal_output(config.observation_station.history_output_path.name),
+        latest_output=latest_output or _default_signal_output(config.observation_station.latest_output_path.name),
+        summary_output=summary_output or _default_signal_output(config.observation_station.summary_output_path.name),
+        alerts_output=alerts_output or _default_signal_output(config.observation_station.alerts_output_path.name),
+        queue_output=queue_output or _default_signal_output(config.observation_station.queue_output_path.name),
+        state_path=state_path or _default_signal_output(config.observation_station.state_path.name),
+        horizon=horizon,
+        edge_threshold=min_edge,
+    )
+    try:
+        console.print(
+            "Observation shadow: "
+            f"interval={runner.interval_seconds}s, max_cycles={runner.max_cycles}, horizon={horizon}"
+        )
+        runner.run_loop()
+    finally:
+        http.close()
+
+    console.print(f"Wrote latest {runner.latest_output_path}")
+    console.print(f"Wrote history {runner.history_output_path}")
+    console.print(f"Wrote summary {runner.summary_output_path}")
+    console.print(f"Wrote alerts {runner.alerts_output_path}")
+    console.print(f"Wrote queue {runner.queue_output_path}")
+
+
+@app.command("observation-daemon")
+def observation_daemon(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    interval: int | None = typer.Option(None, help="Seconds between observation cycles"),
+    max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+) -> None:
+    """Run the observation-station loop using the checked-in default outputs."""
+
+    observation_shadow(
+        model_path=model_path,
+        model_name=model_name,
+        cities=cities,
+        core_recent_only=False,
+        market_scope=market_scope,
+        markets_path=markets_path,
+        interval=interval,
+        max_cycles=max_cycles,
+        horizon=horizon,
+        min_edge=min_edge,
+        output=None,
+        latest_output=None,
+        summary_output=None,
+        alerts_output=None,
+        queue_output=None,
+        state_path=None,
+    )
+
+
+@app.command("approve-live-candidate")
+def approve_live_candidate(
+    manual_approval_token: str = typer.Argument(..., help="Manual approval token from live_pilot_queue.json"),
+    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    queue_path: Path = typer.Option(
+        Path("artifacts/signals/v2/live_pilot_queue.json"),
+        help="Manual approval queue JSON path",
+    ),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    dry_run: bool = typer.Option(True, help="Preview only; do not post by default"),
+    post_order: bool = typer.Option(False, help="Actually post the order after approval"),
+) -> None:
+    """Revalidate one queued observation candidate and create a live order preview."""
+
+    manual_approval_token = str(_resolve_option_value(manual_approval_token))
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
+    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    queue_path = _resolve_option_value(queue_path, Path("artifacts/signals/v2/live_pilot_queue.json"))
+    markets_path = _resolve_option_value(markets_path)
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=False)
+    dry_run = bool(_resolve_option_value(dry_run, True))
+    post_order = bool(_resolve_option_value(post_order, False))
+
+    if not queue_path.exists():
+        raise typer.BadParameter(f"Manual approval queue does not exist: {queue_path}")
+    payload = load_json(queue_path)
+    if not isinstance(payload, list):
+        raise typer.BadParameter(f"Manual approval queue is malformed: {queue_path}")
+
+    queued_row = next(
+        (
+            ObservationOpportunity.model_validate(item)
+            for item in payload
+            if isinstance(item, dict) and str(item.get("manual_approval_token", "")) == manual_approval_token
+        ),
+        None,
+    )
+    if queued_row is None:
+        raise typer.BadParameter(f"Manual approval token not found: {manual_approval_token}")
+    if queued_row.approval_expires_at is not None and datetime.now(tz=UTC) > _as_utc_datetime(queued_row.approval_expires_at):
+        raise typer.BadParameter(f"Manual approval token expired: {manual_approval_token}")
+
+    config, env, http, _duckdb, _parquet, openmeteo = _runtime(include_stores=False)
+    broker = LiveBroker(env)
+    preflight = broker.preflight(require_posting=post_order and not dry_run)
+
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    metar = MetarClient(http, config.metar.base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    snapshots = _load_scoped_snapshots(
+        markets_path=markets_path,
+        cities=None,
+        market_scope=market_scope,
+        active=True,
+        closed=False,
+    )
+    snapshot = next(
+        (
+            item
+            for item in snapshots
+            if item.spec is not None and item.spec.market_id == queued_row.market_id
+        ),
+        None,
+    )
+    if snapshot is None:
+        http.close()
+        raise typer.BadParameter(f"Active market snapshot not found for {queued_row.market_id}")
+
+    refreshed = _evaluate_observation_snapshot(
+        snapshot,
+        builder=builder,
+        clob=clob,
+        http=http,
+        metar=metar,
+        model_path=model_path,
+        model_name=resolved_model_name,
+        config=config,
+        observed_at=datetime.now(tz=UTC),
+        decision_horizon=queued_row.decision_horizon,
+        edge_threshold=config.backtest.default_edge_threshold,
+    )
+    if refreshed is None:
+        http.close()
+        raise typer.BadParameter(f"Could not re-evaluate live candidate for {queued_row.market_id}")
+    if refreshed.queue_state == "blocked":
+        http.close()
+        raise typer.BadParameter(f"Candidate is no longer live-eligible: {refreshed.reason}")
+    if refreshed.outcome_label != queued_row.outcome_label:
+        http.close()
+        raise typer.BadParameter(
+            f"Candidate outcome changed from {queued_row.outcome_label} to {refreshed.outcome_label}"
+        )
+
+    signal = TradeSignal(
+        market_id=refreshed.market_id,
+        token_id=str(refreshed.token_id or ""),
+        outcome_label=str(refreshed.outcome_label),
+        side="buy",
+        fair_probability=float(refreshed.fair_probability or 0.0),
+        executable_price=float(refreshed.best_ask or 0.0),
+        fee_estimate=float(refreshed.fee_estimate or 0.0),
+        slippage_estimate=float(refreshed.slippage_estimate or 0.0),
+        edge=float(refreshed.after_cost_edge or 0.0),
+        confidence=float(refreshed.fair_probability or 0.0),
+        rationale=f"Approved observation candidate {refreshed.outcome_label}",
+        mode="live",
+        forecast_contract_version=refreshed.forecast_contract_version,
+        probability_source=refreshed.probability_source,
+        distribution_family=refreshed.distribution_family,
+        decision_horizon=refreshed.decision_horizon,
+    )
+    size_multiplier = (
+        config.observation_station.exact_public_size_multiplier
+        if refreshed.truth_track == "exact_public"
+        else config.observation_station.research_public_size_multiplier
+    )
+    bankroll = DEFAULT_PILOT_CONSTRAINTS["bankroll"] * size_multiplier
+    size_notional = capped_kelly(signal.edge, signal.fair_probability, bankroll, signal.executable_price)
+    size_notional = min(size_notional, config.execution.max_city_exposure * size_multiplier)
+    size_notional = min(size_notional, config.execution.global_max_exposure * size_multiplier)
+    size = size_notional / max(signal.executable_price, 1e-6)
+    if size <= 0:
+        http.close()
+        raise typer.BadParameter("Candidate size collapsed to zero under the pilot guardrails.")
+
+    preview = broker.preview_limit_order(signal, size=size)
+    if post_order and not dry_run and preflight.ok:
+        preview["post_result"] = broker.post_limit_order(signal, size=size)
+
+    payload = {
+        "preflight": preflight.model_dump(mode="json"),
+        "queued_candidate": _serialize_observation_opportunity(queued_row),
+        "refreshed_candidate": _serialize_observation_opportunity(refreshed),
+        "size_notional": round(size_notional, 6),
+        "size": round(size, 6),
+        "preview": preview,
+    }
+    http.close()
+    dump_json(_default_signal_output("live_pilot_approval_preview.json"), payload)
+    console.print_json(data=payload)
 
 
 @app.command("paper-trader")

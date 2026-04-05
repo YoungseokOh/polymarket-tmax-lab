@@ -1,0 +1,16 @@
+extends: live.example.yaml
+app:
+  env: live
+execution:
+  max_city_exposure: 50.0
+  global_max_exposure: 150.0
+  min_liquidity: 250.0
+  max_spread_bps: 700
+backtest:
+  default_edge_threshold: 0.03
+observation_station:
+  interval_seconds: 120
+  observation_stale_minutes: 120
+  approval_ttl_minutes: 15
+  exact_public_size_multiplier: 1.0
+  research_public_size_multiplier: 0.35

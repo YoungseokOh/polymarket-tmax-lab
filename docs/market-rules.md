@@ -49,6 +49,11 @@
 - Seoul / RKSI uses the Korea Aviation Meteorological Office `AIR_CALP` daily-extremes feed as the default research-truth proxy for the same airport.
 - London / EGLC and NYC / KLGA use the Wunderground public historical API for the same airport station as the default research-truth path.
 - Other Wunderground-family expansion cities may use NOAA Global Hourly when the checked-in station catalog maps that airport to a documented same-airport public archive id.
+- Live observation-station overrides are target-day only and keep source fidelity:
+  - Hong Kong exact-public markets: HKO text readings page for the same HKA station
+  - Taipei exact-public markets: CWA CODiS current-month station report for the same `466920` station
+  - Seoul research-public markets: AMO `AIR_CALP` current-month same-airport feed for RKSI
+  - aviation `METAR` is a fallback after the documented source-specific path, not a silent replacement for it
 - The bin mapper expands labels to settlement intervals using the market precision rule:
   - `8°C` -> `[7.5, 8.5)`
   - `70-71°F` -> `[34.0? no]` not generic conversion; it becomes the rule-specific two-degree Fahrenheit settlement interval centered on the labeled integer endpoints.

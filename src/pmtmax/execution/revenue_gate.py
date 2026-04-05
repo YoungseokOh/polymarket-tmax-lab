@@ -58,6 +58,7 @@ def build_revenue_gate_report(
     benchmark_summary: Mapping[str, Any] | None,
     opportunity_summary: Mapping[str, Any] | None,
     open_phase_summary: Mapping[str, Any] | None,
+    observation_summary: Mapping[str, Any] | None = None,
     trading_alias_name: str = "trading_champion",
     pilot_constraints: Mapping[str, Any] | None = None,
     market_scope: str = "recent_core",
@@ -82,6 +83,12 @@ def build_revenue_gate_report(
 
     opportunity_gate = classify_path_viability(opportunity_summary)
     open_phase_gate = classify_path_viability(open_phase_summary)
+    observation_gate = classify_path_viability(observation_summary)
+    observation_source_breakdown = (
+        dict(observation_summary.get("by_source_family", {}))
+        if observation_summary is not None and isinstance(observation_summary.get("by_source_family", {}), Mapping)
+        else {}
+    )
 
     if benchmark_decision == "NO_GO":
         decision = "NO_GO"
@@ -89,10 +96,18 @@ def build_revenue_gate_report(
     elif benchmark_decision != "GO":
         decision = "INCONCLUSIVE"
         decision_reason = "benchmark_not_go"
-    elif opportunity_gate["decision"] == "GO" or open_phase_gate["decision"] == "GO":
+    elif (
+        opportunity_gate["decision"] == "GO"
+        or open_phase_gate["decision"] == "GO"
+        or observation_gate["decision"] == "GO"
+    ):
         decision = "GO"
         decision_reason = "benchmark_go_with_live_path_confirmation"
-    elif opportunity_gate["decision"] == "NO_GO" and open_phase_gate["decision"] == "NO_GO":
+    elif (
+        opportunity_gate["decision"] == "NO_GO"
+        and open_phase_gate["decision"] == "NO_GO"
+        and observation_gate["decision"] == "NO_GO"
+    ):
         decision = "NO_GO"
         decision_reason = "benchmark_go_but_live_paths_no_go"
     else:
@@ -116,6 +131,8 @@ def build_revenue_gate_report(
         },
         "opportunity_shadow_gate": opportunity_gate,
         "open_phase_shadow_gate": open_phase_gate,
+        "observation_shadow_gate": observation_gate,
+        "observation_source_breakdown": observation_source_breakdown,
         "required_model_alias": trading_alias_name,
         "eligible_for_live_pilot": decision == "GO",
         "pilot_constraints": constraints,

@@ -64,3 +64,40 @@ def test_build_revenue_gate_report_requires_benchmark_and_one_live_path() -> Non
     assert report["market_scope"] == "recent_core"
     assert report["required_model_alias"] == "trading_champion"
     assert report["pilot_constraints"]["bankroll"] == 500.0
+
+
+def test_build_revenue_gate_report_accepts_observation_shadow_as_live_confirmation() -> None:
+    report = build_revenue_gate_report(
+        benchmark_summary={
+            "decision": "GO",
+            "decision_reason": "positive_policy_pnl_in_real_and_proxy",
+        },
+        opportunity_summary={
+            "cycles": 3,
+            "markets_evaluated": 5,
+            "raw_gap_positive_count": 0,
+            "after_cost_edge_positive_count": 0,
+        },
+        open_phase_summary={
+            "cycles": 3,
+            "markets_evaluated": 5,
+            "raw_gap_positive_count": 0,
+            "after_cost_edge_positive_count": 0,
+        },
+        observation_summary={
+            "cycles": 3,
+            "markets_evaluated": 5,
+            "raw_gap_positive_count": 2,
+            "after_cost_edge_positive_count": 2,
+            "by_source_family": {
+                "official_intraday": {
+                    "markets_evaluated": 3,
+                    "after_cost_edge_positive_count": 2,
+                }
+            },
+        },
+    )
+
+    assert report["decision"] == "GO"
+    assert report["observation_shadow_gate"]["decision"] == "GO"
+    assert report["observation_source_breakdown"]["official_intraday"]["markets_evaluated"] == 3

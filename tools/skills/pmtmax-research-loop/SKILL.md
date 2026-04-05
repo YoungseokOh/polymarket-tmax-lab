@@ -20,8 +20,13 @@ Use this skill for the research and trading simulation loop.
 - canonical `historical_training_set*` / `historical_backtest_panel` overwrite requires `--allow-canonical-overwrite`.
 - overwrite is promotion-only; use variant `--output-name` values for experiments and rely on the automatic `artifacts/recovery/` backup when promoting canonical output.
 - `scan-edge` MUST include `--min-model-prob 0.05 --max-model-prob 0.95`.
+- cron-based 2-hour price checks MUST call `scripts/run_price_check.sh` and redirect to an absolute `logs/price_check.log` path. Do not put raw `uv run python scripts/log_gamma_prices.py` commands directly in crontab.
 - Model training: `train-advanced --model-name lgbm_emos --variant <variant>`.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
+- observation weather-station loop: `observation-report`, `observation-shadow`, `observation-daemon`, `approve-live-candidate`.
+- observation source priority: `exact_public intraday -> documented research intraday -> METAR fallback`, target-day only.
+- station dashboard loop: `station-dashboard`, `station-dashboard-daemon`.
+- station orchestrator loop: `station-cycle`, `station-daemon`.
 - Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
 - Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
 
@@ -30,5 +35,8 @@ Use this skill for the research and trading simulation loop.
 - model artifacts: `artifacts/models/v2/`
 - champion alias: `artifacts/models/v2/champion.json`
 - daily signals: `artifacts/signals/v2/scan_edge_latest.json`
+- observation queue: `artifacts/signals/v2/live_pilot_queue.json`
 - paper trades: `artifacts/signals/v2/forward_paper_trades.json`
 - cron log: `logs/daily_experiment.log`
+- 2-hour cron wrapper: `scripts/run_price_check.sh`
+- 2-hour price check log: `logs/price_check.log`

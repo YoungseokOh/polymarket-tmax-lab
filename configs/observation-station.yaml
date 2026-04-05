@@ -1,0 +1,10 @@
+extends: research.yaml
+app:
+  env: paper
+observation_station:
+  interval_seconds: 180
+  observation_stale_minutes: 120
+  approval_ttl_minutes: 20
+execution:
+  mode: paper
+  live_trading: false

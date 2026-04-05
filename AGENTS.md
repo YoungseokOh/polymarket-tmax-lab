@@ -53,6 +53,10 @@ uv run python scripts/quick_eval.py
 uv run pmtmax benchmark-models --retrain-stride 30
 uv run pmtmax autoresearch-init
 uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax observation-report --model-name trading_champion
+uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
+uv run pmtmax station-dashboard
+uv run pmtmax station-cycle --model-name trading_champion
 uv run pmtmax scan-edge \
     --model-name trading_champion \
     --min-edge 0.15 \
@@ -73,6 +77,10 @@ uv run pytest
 - lag recovery should prefer `--truth-no-cache` plus source-family concurrency `--truth-per-source-limit 1`.
 - autoresearch loops should stay on YAML candidate specs under `artifacts/autoresearch/<run_tag>/candidates/`.
   Do not rewrite canonical aliases or canonical datasets inside quick keep/discard loops.
+- observation-driven live pilots must stay manual-approval-first.
+  Queue candidates via `observation-report` / `observation-shadow`, then use `approve-live-candidate` for preview/post.
+- if a live candidate comes from a `research_public` market, do not hide its tier or risk flags and keep sizing more conservative than `exact_public`.
+- observation overrides are target-day only and should prefer `exact_public intraday -> documented research intraday -> METAR fallback`.
 - `scan-edge` without `--min-model-prob`/`--max-model-prob` generates 0%/100% model-prob signals (overconfident noise).
 - Never run `benchmark-models` without `--retrain-stride 30` — default stride=1 takes 10+ hours.
 

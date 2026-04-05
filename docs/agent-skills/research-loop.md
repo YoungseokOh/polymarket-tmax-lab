@@ -7,6 +7,10 @@
 - `paper-trader`
 - `opportunity-report`
 - `opportunity-shadow`
+- `observation-report`
+- `observation-shadow`
+- `observation-daemon`
+- `approve-live-candidate`
 - `open-phase-shadow`
 - `hope-hunt-report`
 - `hope-hunt-daemon`
@@ -21,6 +25,19 @@
 bash scripts/daily_experiment.sh
 ```
 Runs: scan-markets → backfill-truth → backfill-forecasts → log_gamma_prices → scan-edge → track_paper_trade_outcomes
+
+## 2-Hour Price Check (cron every 2 hours)
+```bash
+bash scripts/run_price_check.sh
+```
+Runs: log_gamma_prices → track_paper_trade_outcomes
+
+Cron should call the wrapper, not raw `uv run ...` commands, and the redirect
+must use an absolute path:
+
+```bash
+0 */2 * * * bash /home/seok436/projects/polymarket-tmax-lab/scripts/run_price_check.sh >> /home/seok436/projects/polymarket-tmax-lab/logs/price_check.log 2>&1
+```
 
 ## scan-edge (signal generation)
 ```bash
@@ -104,6 +121,28 @@ scripts/run_opportunity_shadow_watch.sh --max-cycles 1
 recent-core 바깥의 fresh listing 탐색은 `--market-scope supported_wu_open_phase`
 또는 전용 wrapper인 `hope-hunt-report` / `hope-hunt-daemon`을 쓴다.
 
+관측 기반 weather-station 루프는 다음 command를 쓴다.
+
+```bash
+uv run pmtmax observation-report --model-name trading_champion
+uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
+uv run pmtmax observation-daemon --model-name trading_champion
+uv run pmtmax approve-live-candidate <token> --dry-run
+uv run pmtmax station-dashboard
+uv run pmtmax station-dashboard-daemon
+uv run pmtmax station-cycle --model-name trading_champion
+uv run pmtmax station-daemon --model-name trading_champion
+```
+
+- `observation-report` / `observation-shadow`는 target-day market에서 strongest lower-bound를 골라 이미 불가능해진 하단 outcome을 0으로 만들고 queue를 `tradable`, `manual_review`, `blocked`로 분리한다
+- source priority는 `exact_public intraday -> documented research intraday -> METAR fallback`이다. 현재 내장 exact/research intraday는 Hong Kong/HKO, Taipei/CWA, Seoul/AIR_CALP다
+- output은 `artifacts/signals/v2/observation_shadow_latest.json`, `observation_alerts_latest.json`, `live_pilot_queue.json`에 기록된다
+- `observation_shadow_summary.json`에는 `by_source_family`, `by_observation_source`, `top_after_cost_edges`, `top_price_vs_observation_gaps`가 들어가므로 어떤 소스 계층이 실제 edge를 만드는지 바로 비교할 수 있다
+- `approve-live-candidate`는 queue token을 다시 검증하고 preview/post 전에 candidate가 여전히 살아 있는지 fail-closed로 확인한다
+- `station-dashboard`는 opportunity / observation / open-phase / revenue-gate 아티팩트를 한 화면용 JSON/HTML로 합쳐서 Discovery / Observation / Execution 패널을 만든다
+- `station-cycle`은 opportunity-report, opportunity-shadow, observation-report, open-phase-shadow, revenue-gate-report, station-dashboard를 순서대로 갱신하는 one-shot orchestrator다
+- `station-daemon`은 같은 전체 cycle을 interval 기반으로 반복한다
+
 ## Real Historical Workflow
 ```bash
 scripts/run_historical_refresh_pipeline.sh
@@ -139,6 +178,9 @@ uv run python scripts/build_active_weather_watchlist.py
 - paper outputs: `artifacts/signals/v2/paper_signals.json`
 - opportunity outputs: `artifacts/signals/v2/opportunity_report.json`
 - shadow validation outputs: `artifacts/signals/v2/opportunity_shadow.jsonl`, `artifacts/signals/v2/opportunity_shadow_latest.json`, `artifacts/signals/v2/opportunity_shadow_summary.json`
+- observation-station outputs: `artifacts/signals/v2/observation_shadow.jsonl`, `artifacts/signals/v2/observation_shadow_latest.json`, `artifacts/signals/v2/observation_shadow_summary.json`, `artifacts/signals/v2/observation_alerts_latest.json`, `artifacts/signals/v2/live_pilot_queue.json`
+- station dashboard outputs: `artifacts/signals/v2/station_dashboard.json`, `artifacts/signals/v2/station_dashboard.html`, `artifacts/signals/v2/station_dashboard_state.json`
+- station orchestrator state: `artifacts/signals/v2/station_cycle_state.json`
 - open-phase validation outputs: `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`, `artifacts/signals/v2/open_phase_shadow_summary.json`
 - hope-hunt outputs: `artifacts/signals/v2/hope_hunt_history.jsonl`, `artifacts/signals/v2/hope_hunt_latest.json`, `artifacts/signals/v2/hope_hunt_summary.json`
 - revenue gate output: `artifacts/signals/v2/revenue_gate_summary.json`
@@ -155,10 +197,12 @@ uv run python scripts/build_active_weather_watchlist.py
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
 - live/paper/opportunity 경로는 calibrated probability가 없으면 `missing_calibrator`로 fail closed 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다
+- `observation-shadow`는 같은 book/fee/slippage guardrail 위에 target-day intraday lower-bound를 덧씌워 관측 기반 dislocation이 실제로 반복되는지 검증하는 경로다
 - `open-phase-shadow`는 `componentMarkets[*].acceptingOrdersTimestamp` 기준 최근 상장 시장만 골라 `market_open` horizon으로 평가하는 실험 경로다
 - `hope-hunt-report`와 `hope-hunt-daemon`은 `supported_wu_open_phase` 범위에서 fresh listing을 우선순위화하는 no-order candidate loop다
 - shadow/open-phase summary에는 `by_city`, `by_horizon`, `by_city_horizon`, `gate_decision`, `gate_reason`이 함께 기록된다
 - hope-hunt summary에는 `by_open_phase_age_bucket`, `by_priority_bucket`, `top_candidates`, `gate_decision`, `gate_reason`이 함께 기록된다
-- `revenue-gate-report`는 recent-core benchmark와 두 shadow summary를 합쳐 소액 live pilot 전환 가능 여부를 `GO / INCONCLUSIVE / NO_GO`로 출력한다
+- `revenue-gate-report`는 recent-core benchmark와 세 shadow summary를 합쳐 소액 live pilot 전환 가능 여부를 `GO / INCONCLUSIVE / NO_GO`로 출력한다
 - active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다
+- observation live pilot은 manual approval이 기본이며, `research_public` candidate는 exact-public과 같은 queue에 오르더라도 tier/risk flag를 숨기지 않는다
 - 현재 기본 horizon policy는 `Seoul=market_open+previous_evening+morning_of`, `NYC=market_open+previous_evening`, `London=previous_evening`이다
