@@ -7,6 +7,7 @@
 - `pmtmax-data-ops`: `bootstrap-lab`, warehouse, seed, legacy run 정리
 - `pmtmax-market-rules`: 시장 탐색, 규칙 파싱, station/source fidelity
 - `pmtmax-research-loop`: 데이터셋, 학습, 백테스트, paper-trader 흐름
+- `pmtmax-autoresearch`: `recency_neighbor_oof` 기준 autoresearch 루프와 candidate YAML gating
 - `pmtmax-commit`: 커밋 메시지와 staging, push 전 점검
 - `pmtmax-release-checklist`: `bootstrap-lab` 이후 연구 환경 점검
 

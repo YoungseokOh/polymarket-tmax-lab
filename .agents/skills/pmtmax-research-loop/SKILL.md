@@ -24,6 +24,7 @@ Use this skill for the research and trading simulation loop.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
 - Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
 - Previous fast variants (ultra_high_neighbor_fast 등) had σ=0.5 collapse — scale clip floor raised to 2.0.
+- Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
 
 ## Focus
 - gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`

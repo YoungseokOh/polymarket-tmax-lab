@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -528,9 +528,10 @@ class LgbmEMOSModel:
     split_policy: Literal["market_day", "target_day"] = "market_day"
     min_train_rows: int = 40
     variant: str | None = None
+    variant_config: LgbmEMOSVariantConfig | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        self._variant_config = resolve_lgbm_emos_variant(self.variant)
+        self._variant_config = self.variant_config or resolve_lgbm_emos_variant(self.variant)
         self.variant = self._variant_config.name
         self.builder = ContextualFeatureBuilder(self.feature_names)
         self._mean_model: LGBMRegressor | None = None

@@ -48,9 +48,11 @@ uv run pmtmax backfill-forecasts
 uv run pmtmax build-dataset \
     --markets-path configs/market_inventory/full_training_set_snapshots.json \
     --allow-canonical-overwrite
-uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_fast
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 uv run python scripts/quick_eval.py
 uv run pmtmax benchmark-models --retrain-stride 30
+uv run pmtmax autoresearch-init
+uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
 uv run pmtmax scan-edge \
     --model-name trading_champion \
     --min-edge 0.15 \
@@ -69,6 +71,8 @@ uv run pytest
   Prefer variant `--output-name` values for experiments, and only unlock canonical writes when you intend to replace the checked-in research baseline.
 - canonical overwrite now creates a timestamped backup under `artifacts/recovery/` before replacing parquet/manifests.
 - lag recovery should prefer `--truth-no-cache` plus source-family concurrency `--truth-per-source-limit 1`.
+- autoresearch loops should stay on YAML candidate specs under `artifacts/autoresearch/<run_tag>/candidates/`.
+  Do not rewrite canonical aliases or canonical datasets inside quick keep/discard loops.
 - `scan-edge` without `--min-model-prob`/`--max-model-prob` generates 0%/100% model-prob signals (overconfident noise).
 - Never run `benchmark-models` without `--retrain-stride 30` — default stride=1 takes 10+ hours.
 
@@ -85,6 +89,7 @@ Recommended shared skills:
 - `pmtmax-data-ops`
 - `pmtmax-market-rules`
 - `pmtmax-research-loop`
+- `pmtmax-autoresearch`
 - `pmtmax-commit`
 - `pmtmax-release-checklist`
 

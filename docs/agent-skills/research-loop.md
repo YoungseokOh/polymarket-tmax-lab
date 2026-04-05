@@ -11,9 +11,9 @@
 - `hope-hunt-report`
 - `hope-hunt-daemon`
 
-## Current Champion (as of 2026-04-03)
-- Model: `lgbm_emos`, variant: `recency_neighbor_fast`, CRPS: 0.4769
-- pkl: `artifacts/models/v2/lgbm_emos__recency_neighbor_fast.pkl`
+## Current Champion (as of 2026-04-04)
+- Model: `lgbm_emos`, variant: `recency_neighbor_oof`
+- pkl: `artifacts/models/v2/lgbm_emos__recency_neighbor_oof.pkl`
 - champion.json: `artifacts/models/v2/champion.json`
 
 ## Daily Data Collection (cron 00:00 UTC = 09:00 KST)
@@ -36,12 +36,9 @@ uv run pmtmax scan-edge \
 ## Model Training
 ```bash
 # Train a specific lgbm_emos variant
-uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_fast
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 
-# Publish as champion
-uv run pmtmax publish-champion --model-name lgbm_emos --variant recency_neighbor_fast
-
-# Quick comparison (top variants only, fast)
+# Quick comparison (champion baseline + OOF family)
 uv run python scripts/quick_eval.py
 ```
 
@@ -71,10 +68,25 @@ uv run pmtmax build-dataset \
     --markets-path configs/market_inventory/full_training_set_snapshots.json \
     --allow-canonical-overwrite
 uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
-uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_fast
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 uv run python scripts/quick_eval.py
 uv run pmtmax benchmark-models --retrain-stride 30
 ```
+
+## Autoresearch Loop
+`karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `recency_neighbor_oof`.
+
+```bash
+uv run pmtmax autoresearch-init
+uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-gate --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+```
+
+- candidate YAML is the only thing the agent should edit inside the loop
+- promoted winners are copied to `configs/autoresearch/lgbm_emos/promoted/`
+- alias publish remains explicit even after promotion
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
 shadow watcher를 돌리고 싶으면 다음 래퍼를 사용한다.

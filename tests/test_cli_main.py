@@ -360,7 +360,7 @@ def test_backtest_real_history_writes_separate_artifacts(
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_real_history_backtest",
-        lambda frame, panel, *, model_name, variant=None, artifacts_dir, flat_stake, default_fee_bps, split_policy, seed, min_train_size=None, retrain_stride=1: (
+        lambda frame, panel, *, model_name, variant=None, variant_config=None, artifacts_dir, flat_stake, default_fee_bps, split_policy, seed, min_train_size=None, retrain_stride=1: (
             {"mae": 1.0, "rmse": 1.0, "nll": 1.0, "avg_brier": 0.1, "avg_crps": 0.2, "num_trades": 1.0, "pnl": 0.5, "hit_rate": 1.0, "avg_edge": 0.1},
             [{"market_id": "101025", "pricing_source": "real_history"}],
         ),
@@ -432,7 +432,7 @@ def test_backtest_quote_proxy_writes_separate_artifacts(
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._run_quote_proxy_backtest",
-        lambda frame, panel, *, model_name, variant=None, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread, split_policy, seed, min_train_size=None, retrain_stride=1: (
+        lambda frame, panel, *, model_name, variant=None, variant_config=None, artifacts_dir, flat_stake, default_fee_bps, quote_proxy_half_spread, split_policy, seed, min_train_size=None, retrain_stride=1: (
             {
                 "mae": 1.0,
                 "rmse": 1.0,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -54,6 +55,26 @@ from pmtmax.markets.repository import (
 )
 from pmtmax.markets.station_registry import lookup_station
 from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
+from pmtmax.modeling.advanced.lgbm_emos import LgbmEMOSVariantConfig
+from pmtmax.modeling.autoresearch import (
+    DEFAULT_AUTORESEARCH_ROOT,
+    AutoresearchManifest,
+    AutoresearchStepResult,
+    autoresearch_analysis_dir,
+    autoresearch_candidates_dir,
+    autoresearch_manifest_path,
+    autoresearch_models_dir,
+    autoresearch_program_path,
+    autoresearch_results_path,
+    autoresearch_run_dir,
+    default_autoresearch_run_tag,
+    load_lgbm_autoresearch_spec,
+    path_signature,
+    promoted_lgbm_emos_spec_path,
+    render_autoresearch_program,
+    render_candidate_template,
+    save_lgbm_autoresearch_spec,
+)
 from pmtmax.modeling.champion import (
     score_leaderboard,
     score_trading_leaderboard,
@@ -70,6 +91,7 @@ from pmtmax.modeling.evaluation import (
     rmse,
 )
 from pmtmax.modeling.predict import predict_market
+from pmtmax.modeling.quick_eval import evaluate_saved_model, quick_eval_holdout
 from pmtmax.modeling.train import (
     require_supported_model_name,
     require_supported_variant,
@@ -182,6 +204,152 @@ def _default_signal_output(filename: str) -> Path:
     return Path("artifacts/signals/v2") / filename
 
 
+def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    """Append one JSON object to a JSONL file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
+
+
+def _artifact_calibration_path(model_path: Path) -> Path:
+    """Return the sibling calibrator path for one saved model artifact."""
+
+    return model_path.with_name(f"{model_path.stem}.calibrator.pkl")
+
+
+def _current_alias_variant(alias_name: str) -> str | None:
+    """Return the current variant recorded for one public alias."""
+
+    metadata_path = _default_alias_metadata_path(alias_name)
+    if not metadata_path.exists():
+        return None
+    payload = load_json(metadata_path)
+    if not isinstance(payload, dict):
+        return None
+    variant = payload.get("variant")
+    return str(variant) if variant else None
+
+
+def _load_autoresearch_manifest(
+    run_tag: str,
+    *,
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+) -> AutoresearchManifest:
+    """Load one autoresearch run manifest or fail with a clear CLI error."""
+
+    manifest_path = autoresearch_manifest_path(run_tag, root_dir=root_dir)
+    if not manifest_path.exists():
+        msg = (
+            f"Autoresearch manifest does not exist: {manifest_path}. "
+            "Run `uv run pmtmax autoresearch-init` first."
+        )
+        raise typer.BadParameter(msg)
+    return AutoresearchManifest.model_validate(load_json(manifest_path))
+
+
+def _resolve_lgbm_variant_inputs(
+    *,
+    model_name: str,
+    variant: str | None,
+    variant_spec: Path | None,
+) -> tuple[str | None, LgbmEMOSVariantConfig | None, object | None]:
+    """Resolve one built-in variant or one YAML-backed external candidate."""
+
+    resolved_variant = _resolve_option_value(variant)
+    resolved_spec_path = _resolve_option_value(variant_spec)
+    if resolved_spec_path is None:
+        return resolved_variant, None, None
+    if resolved_variant is not None:
+        raise typer.BadParameter("Use either --variant or --variant-spec, not both.")
+    if model_name != "lgbm_emos":
+        raise typer.BadParameter("--variant-spec is only supported for lgbm_emos.")
+    spec = load_lgbm_autoresearch_spec(Path(resolved_spec_path))
+    return spec.candidate_name, spec.build_variant_config(), spec
+
+
+def _publish_existing_model_alias(
+    *,
+    alias_name: str,
+    model_name: str,
+    variant: str | None,
+    source_model_path: Path,
+    source_calibration_path: Path | None = None,
+    leaderboard_path: Path | None = None,
+) -> dict[str, object]:
+    """Publish one alias from an already-trained artifact instead of retraining."""
+
+    alias_path = _default_model_path(alias_name)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_model_path, alias_path)
+    alias_calibration_path = alias_path.with_name(f"{alias_path.stem}.calibrator.pkl")
+    if source_calibration_path is not None and source_calibration_path.exists():
+        shutil.copyfile(source_calibration_path, alias_calibration_path)
+    metadata: dict[str, object] = {
+        "alias_name": alias_name,
+        "alias_path": str(alias_path),
+        "alias_calibration_path": str(alias_calibration_path),
+        "contract_version": "v2",
+        "model_name": model_name,
+        "published_at": datetime.now(tz=UTC).isoformat(),
+        "source_model_path": str(source_model_path),
+        "source_calibration_path": str(source_calibration_path) if source_calibration_path is not None else None,
+        "variant": variant,
+    }
+    if leaderboard_path is not None:
+        metadata["leaderboard_path"] = str(leaderboard_path)
+    dump_json(_default_alias_metadata_path(alias_name), metadata)
+    return metadata
+
+
+def _summarize_reason_rows(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Aggregate one signal/report payload by reason, city, and horizon."""
+
+    reason_counts: dict[str, int] = {}
+    by_city: dict[str, int] = {}
+    by_horizon: dict[str, int] = {}
+    book_source_counts: dict[str, int] = {}
+    edges: list[float] = []
+    tradable_count = 0
+    for row in rows:
+        reason = str(row.get("reason", "unknown"))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        city = row.get("city")
+        if city:
+            by_city[str(city)] = by_city.get(str(city), 0) + 1
+        horizon = row.get("decision_horizon")
+        if horizon:
+            by_horizon[str(horizon)] = by_horizon.get(str(horizon), 0) + 1
+        if reason == "tradable":
+            tradable_count += 1
+        edge = row.get("edge")
+        if edge is not None:
+            with suppress(TypeError, ValueError):
+                edges.append(float(edge))
+        row_book_counts = row.get("book_source_counts")
+        if isinstance(row_book_counts, dict):
+            for key, value in row_book_counts.items():
+                try:
+                    increment = int(value)
+                except (TypeError, ValueError):
+                    continue
+                book_source_counts[str(key)] = book_source_counts.get(str(key), 0) + increment
+    return {
+        "row_count": len(rows),
+        "tradable_count": tradable_count,
+        "reason_counts": reason_counts,
+        "by_city": by_city,
+        "by_horizon": by_horizon,
+        "book_source_counts": book_source_counts,
+        "edge_summary": {
+            "count": len(edges),
+            "positive_count": sum(1 for edge in edges if edge > 0),
+            "max": max(edges) if edges else 0.0,
+            "mean": float(sum(edges) / len(edges)) if edges else 0.0,
+        },
+    }
+
+
 def _effective_split_policy(
     split_policy: Literal["market_day", "target_day"],
 ) -> Literal["market_day", "target_day"]:
@@ -250,14 +418,12 @@ def _repair_alias_metadata(
             shutil.copyfile(source_calibrator_path, alias_calibration_path)
         repaired_any = True
 
-    if alias_path.exists():
-        if repaired.get("alias_path") != str(alias_path):
-            repaired["alias_path"] = str(alias_path)
-            repaired_any = True
-    if alias_calibration_path.exists():
-        if repaired.get("alias_calibration_path") != str(alias_calibration_path):
-            repaired["alias_calibration_path"] = str(alias_calibration_path)
-            repaired_any = True
+    if alias_path.exists() and repaired.get("alias_path") != str(alias_path):
+        repaired["alias_path"] = str(alias_path)
+        repaired_any = True
+    if alias_calibration_path.exists() and repaired.get("alias_calibration_path") != str(alias_calibration_path):
+        repaired["alias_calibration_path"] = str(alias_calibration_path)
+        repaired_any = True
     if source_model_path is not None and repaired.get("source_model_path") != str(source_model_path):
         repaired["source_model_path"] = str(source_model_path)
         repaired_any = True
@@ -754,9 +920,9 @@ def _default_fee_bps(config: Any) -> float:
     if execution is None:
         return 30.0
     if hasattr(execution, "default_fee_bps"):
-        return float(getattr(execution, "default_fee_bps"))
+        return float(execution.default_fee_bps)
     if hasattr(execution, "fee_bps"):
-        return float(getattr(execution, "fee_bps"))
+        return float(execution.fee_bps)
     return 30.0
 
 
@@ -1527,6 +1693,7 @@ def _run_synthetic_backtest(
     *,
     model_name: str,
     variant: str | None = None,
+    variant_config: LgbmEMOSVariantConfig | None = None,
     artifacts_dir: Path,
     bankroll: float,
     default_fee_bps: float,
@@ -1560,6 +1727,8 @@ def _run_synthetic_backtest(
         }
         if variant is not None:
             train_kwargs["variant"] = variant
+        if variant_config is not None:
+            train_kwargs["variant_config"] = variant_config
         if cached_artifact is None or step % retrain_stride == 0:
             cached_artifact = train_model(
                 model_name,
@@ -1656,6 +1825,7 @@ def _run_real_history_backtest(
     *,
     model_name: str,
     variant: str | None = None,
+    variant_config: LgbmEMOSVariantConfig | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
@@ -1671,6 +1841,7 @@ def _run_real_history_backtest(
         panel,
         model_name=model_name,
         variant=variant,
+        variant_config=variant_config,
         artifacts_dir=artifacts_dir,
         flat_stake=flat_stake,
         default_fee_bps=default_fee_bps,
@@ -1706,6 +1877,7 @@ def _run_quote_proxy_backtest(
     *,
     model_name: str,
     variant: str | None = None,
+    variant_config: LgbmEMOSVariantConfig | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
@@ -1722,6 +1894,7 @@ def _run_quote_proxy_backtest(
         panel,
         model_name=model_name,
         variant=variant,
+        variant_config=variant_config,
         artifacts_dir=artifacts_dir,
         flat_stake=flat_stake,
         default_fee_bps=default_fee_bps,
@@ -1740,6 +1913,7 @@ def _run_panel_pricing_backtest(
     *,
     model_name: str,
     variant: str | None = None,
+    variant_config: LgbmEMOSVariantConfig | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
@@ -1804,6 +1978,8 @@ def _run_panel_pricing_backtest(
         }
         if variant is not None:
             train_kwargs["variant"] = variant
+        if variant_config is not None:
+            train_kwargs["variant_config"] = variant_config
         if cached_artifact is None or step % retrain_stride == 0:
             cached_artifact = train_model(
                 model_name,
@@ -3049,19 +3225,26 @@ def train_advanced(
     model_name: str = "det2prob_nn",
     artifacts_dir: Path = Path("artifacts/models/v2"),
     variant: str | None = None,
+    variant_spec: Path | None = None,
     publish_champion: bool = False,
 ) -> None:
     """Train an advanced probabilistic model, optionally publish the champion alias."""
 
     config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
+    resolved_variant, resolved_variant_config, _ = _resolve_lgbm_variant_inputs(
+        model_name=model_name,
+        variant=variant,
+        variant_spec=variant_spec,
+    )
     artifact = train_model(
         require_supported_model_name(model_name),
         frame,
         artifacts_dir,
         split_policy="market_day",
         seed=config.app.random_seed,
-        variant=variant,
+        variant=resolved_variant,
+        variant_config=resolved_variant_config,
     )
     console.print(f"Trained {model_name} -> {artifact.path}")
     if publish_champion:
@@ -3077,7 +3260,7 @@ def train_advanced(
             "alias_calibration_path": str(champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")),
             "source_model_path": artifact.path,
             "source_calibration_path": artifact.calibration_path,
-            "variant": variant,
+            "variant": artifact.variant,
             "contract_version": "v2",
             "published_at": datetime.now(tz=UTC).isoformat(),
         }
@@ -3097,6 +3280,7 @@ def backtest(
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
     variant: str | None = None,
+    variant_spec: Path | None = None,
     last_n: int = 0,
     retrain_stride: int = 1,
 ) -> None:
@@ -3110,11 +3294,16 @@ def backtest(
     resolved_model_name = _resolve_model_name_alias(model_name)
     # If model_name is an alias and variant was not explicitly provided, pick up
     # the variant stored in the alias metadata (e.g. champion → high_capacity_fast).
-    if variant is None and model_name in PUBLIC_MODEL_ALIASES:
+    if variant_spec is None and variant is None and model_name in PUBLIC_MODEL_ALIASES:
         alias_meta = _load_alias_metadata(model_name)
         alias_variant = alias_meta.get("variant")
         if alias_variant:
             variant = str(alias_variant)
+    variant, variant_config, _ = _resolve_lgbm_variant_inputs(
+        model_name=resolved_model_name,
+        variant=variant,
+        variant_spec=variant_spec,
+    )
     default_fee_bps = _default_fee_bps(config)
     frame = pd.read_parquet(dataset_path)
     # fast-eval: pass min_train_size so only the last `last_n` groups are used as
@@ -3138,6 +3327,7 @@ def backtest(
             frame,
             model_name=resolved_model_name,
             variant=variant,
+            variant_config=variant_config,
             artifacts_dir=artifacts_dir,
             bankroll=bankroll,
             default_fee_bps=default_fee_bps,
@@ -3173,6 +3363,7 @@ def backtest(
                 panel,
                 model_name=resolved_model_name,
                 variant=variant,
+                variant_config=variant_config,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
@@ -3189,6 +3380,7 @@ def backtest(
                 panel,
                 model_name=resolved_model_name,
                 variant=variant,
+                variant_config=variant_config,
                 artifacts_dir=artifacts_dir,
                 flat_stake=flat_stake,
                 default_fee_bps=default_fee_bps,
@@ -3280,6 +3472,7 @@ def _run_grouped_holdout_ablation(
     *,
     model_name: str,
     variant: str,
+    variant_config: LgbmEMOSVariantConfig | None = None,
     artifacts_dir: Path,
     flat_stake: float,
     default_fee_bps: float,
@@ -3300,6 +3493,7 @@ def _run_grouped_holdout_ablation(
         split_policy=split_policy,
         seed=seed,
         variant=variant,
+        variant_config=variant_config,
     )
     lookup = _panel_lookup(panel)
     prediction_rows: list[dict[str, object]] = []
@@ -3843,6 +4037,532 @@ def benchmark_models(
     console.print_json(data=summary)
 
 
+def _quick_eval_deltas(
+    baseline_metrics: dict[str, float],
+    candidate_metrics: dict[str, float],
+) -> dict[str, float]:
+    """Return candidate-minus-baseline deltas for shared quick-eval metrics."""
+
+    keys = sorted(set(baseline_metrics).intersection(candidate_metrics))
+    return {
+        f"{key}_delta": float(candidate_metrics[key] - baseline_metrics[key])
+        for key in keys
+        if key != "n"
+    }
+
+
+def _quick_eval_candidate_beats_baseline(
+    baseline_metrics: dict[str, float],
+    candidate_metrics: dict[str, float],
+) -> bool:
+    """Return whether one candidate wins the quick-eval lexicographic comparison."""
+
+    baseline_key = (
+        float(baseline_metrics.get("crps", float("inf"))),
+        float(baseline_metrics.get("brier", float("inf"))),
+        float(baseline_metrics.get("mae", float("inf"))),
+    )
+    candidate_key = (
+        float(candidate_metrics.get("crps", float("inf"))),
+        float(candidate_metrics.get("brier", float("inf"))),
+        float(candidate_metrics.get("mae", float("inf"))),
+    )
+    return candidate_key < baseline_key
+
+
+def _paper_overall_gate_decision(
+    *,
+    paper_summary: dict[str, object],
+    opportunity_summary: dict[str, object],
+    shadow_summary: dict[str, object],
+    open_phase_summary: dict[str, object],
+    hope_hunt_summary: dict[str, object],
+) -> str:
+    """Collapse paper-analysis outputs into GO / INCONCLUSIVE / NO_GO."""
+
+    tradable_total = int(paper_summary.get("tradable_count", 0)) + int(opportunity_summary.get("tradable_count", 0))
+    shadow_tradable = int(dict(shadow_summary.get("reason_counts", {})).get("tradable", 0))
+    open_phase_candidates = int(open_phase_summary.get("candidate_count", 0))
+    hope_candidates = int(hope_hunt_summary.get("candidate_count", 0))
+    if tradable_total > 0 or shadow_tradable > 0 or open_phase_candidates > 0 or hope_candidates > 0:
+        return "GO"
+
+    hard_reasons = {"missing_calibrator", "forecast_failed", "model_error"}
+    hard_failures = 0
+    for summary in (paper_summary, opportunity_summary, shadow_summary, open_phase_summary, hope_hunt_summary):
+        reason_counts = summary.get("reason_counts", {})
+        if isinstance(reason_counts, dict):
+            hard_failures += sum(int(reason_counts.get(reason, 0)) for reason in hard_reasons)
+    if hard_failures > 0:
+        return "NO_GO"
+    return "INCONCLUSIVE"
+
+
+@app.command("autoresearch-init")
+def autoresearch_init(
+    run_tag: str | None = None,
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    baseline_variant: str = "recency_neighbor_oof",
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+    force: bool = False,
+) -> None:
+    """Create one autoresearch run scaffold plus the shared program.md."""
+
+    run_tag = str(_resolve_option_value(run_tag, default_autoresearch_run_tag()))
+    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    panel_path = _resolve_option_value(panel_path, Path("data/parquet/gold/v2/historical_backtest_panel.parquet"))
+    baseline_variant = str(_resolve_option_value(baseline_variant, "recency_neighbor_oof"))
+    root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
+    force = bool(_resolve_option_value(force, False))
+    require_supported_variant("lgbm_emos", baseline_variant)
+
+    run_dir = autoresearch_run_dir(run_tag, root_dir=root_dir)
+    if run_dir.exists() and not force:
+        raise typer.BadParameter(f"Autoresearch run already exists: {run_dir}")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    autoresearch_candidates_dir(run_tag, root_dir=root_dir).mkdir(parents=True, exist_ok=True)
+    autoresearch_models_dir(run_tag, root_dir=root_dir).mkdir(parents=True, exist_ok=True)
+    autoresearch_analysis_dir(run_tag, root_dir=root_dir).mkdir(parents=True, exist_ok=True)
+
+    manifest = AutoresearchManifest(
+        run_tag=run_tag,
+        baseline_variant=baseline_variant,
+        root_dir=str(run_dir),
+        dataset_path=str(dataset_path),
+        dataset_signature=path_signature(dataset_path),
+        panel_path=str(panel_path),
+        panel_signature=path_signature(panel_path),
+        created_at=datetime.now(tz=UTC),
+        current_champion_variant=_current_alias_variant(DEFAULT_MODEL_NAME),
+        current_trading_variant=_current_alias_variant(TRADING_MODEL_ALIAS),
+    )
+    dump_json(autoresearch_manifest_path(run_tag, root_dir=root_dir), manifest.model_dump(mode="json"))
+    autoresearch_program_path(run_tag, root_dir=root_dir).write_text(render_autoresearch_program(manifest))
+    (autoresearch_candidates_dir(run_tag, root_dir=root_dir) / "candidate_template.yaml").write_text(
+        render_candidate_template(run_tag, baseline_variant=baseline_variant)
+    )
+    autoresearch_results_path(run_tag, root_dir=root_dir).parent.mkdir(parents=True, exist_ok=True)
+    autoresearch_results_path(run_tag, root_dir=root_dir).touch(exist_ok=True)
+    console.print_json(data=manifest.model_dump(mode="json"))
+
+
+@app.command("autoresearch-step")
+def autoresearch_step(
+    spec_path: Path,
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+) -> None:
+    """Train one candidate spec, run quick eval, and append keep/discard/crash to the ledger."""
+
+    spec_path = _resolve_option_value(spec_path)
+    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
+    spec = load_lgbm_autoresearch_spec(spec_path)
+    manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
+    if manifest.dataset_signature != path_signature(dataset_path):
+        raise typer.BadParameter("Dataset signature does not match the autoresearch manifest.")
+
+    run_tag = spec.run_tag
+    normalized_spec_path = autoresearch_candidates_dir(run_tag, root_dir=root_dir) / f"{spec.candidate_name}.yaml"
+    save_lgbm_autoresearch_spec(normalized_spec_path, spec)
+
+    config, _ = load_settings()
+    frame = pd.read_parquet(dataset_path)
+    models_dir = autoresearch_models_dir(run_tag, root_dir=root_dir)
+    baseline_path = models_dir / f"lgbm_emos__{manifest.baseline_variant}.pkl"
+    if not baseline_path.exists():
+        baseline_artifact = train_model(
+            "lgbm_emos",
+            frame,
+            models_dir,
+            split_policy="market_day",
+            seed=config.app.random_seed,
+            variant=manifest.baseline_variant,
+        )
+        baseline_path = Path(baseline_artifact.path)
+
+    _, holdout = quick_eval_holdout(frame)
+    baseline_metrics = evaluate_saved_model(baseline_path, holdout)
+    if baseline_metrics is None:
+        raise typer.BadParameter(f"Quick eval failed for baseline artifact: {baseline_path}")
+
+    candidate_variant = spec.build_variant_config()
+    candidate_path = models_dir / f"lgbm_emos__{spec.candidate_name}.pkl"
+    candidate_metrics: dict[str, float] = {}
+    status: Literal["keep", "discard", "crash"]
+    notes = ""
+    try:
+        candidate_artifact = train_model(
+            "lgbm_emos",
+            frame,
+            models_dir,
+            split_policy="market_day",
+            seed=config.app.random_seed,
+            variant=spec.candidate_name,
+            variant_config=candidate_variant,
+        )
+        candidate_path = Path(candidate_artifact.path)
+        loaded_candidate_metrics = evaluate_saved_model(candidate_path, holdout)
+        if loaded_candidate_metrics is None:
+            raise RuntimeError(f"Quick eval failed for candidate artifact: {candidate_path}")
+        candidate_metrics = loaded_candidate_metrics
+        status = "keep" if _quick_eval_candidate_beats_baseline(baseline_metrics, candidate_metrics) else "discard"
+    except Exception as exc:
+        status = "crash"
+        notes = str(exc)
+
+    result = AutoresearchStepResult(
+        run_tag=run_tag,
+        candidate_name=spec.candidate_name,
+        baseline_variant=manifest.baseline_variant,
+        evaluated_at=datetime.now(tz=UTC),
+        status=status,
+        dataset_signature=manifest.dataset_signature,
+        baseline_artifact_path=str(baseline_path),
+        candidate_artifact_path=str(candidate_path),
+        baseline_metrics=baseline_metrics,
+        candidate_metrics=candidate_metrics,
+        metric_deltas=_quick_eval_deltas(baseline_metrics, candidate_metrics) if candidate_metrics else {},
+        notes=notes,
+    )
+    output_path = autoresearch_analysis_dir(run_tag, root_dir=root_dir) / f"quick_eval__{spec.candidate_name}.json"
+    dump_json(output_path, result.model_dump(mode="json"))
+    _append_jsonl(autoresearch_results_path(run_tag, root_dir=root_dir), result.model_dump(mode="json"))
+    console.print_json(data=result.model_dump(mode="json"))
+
+
+@app.command("autoresearch-gate")
+def autoresearch_gate(
+    spec_path: Path,
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+    split_policies: Annotated[list[str] | None, typer.Option("--split-policy")] = None,
+    seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
+    flat_stake: float = 1.0,
+    quote_proxy_half_spread: float = 0.02,
+) -> None:
+    """Run grouped-holdout benchmark gates for one baseline/candidate pair."""
+
+    spec_path = _resolve_option_value(spec_path)
+    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    panel_path = _resolve_option_value(panel_path, Path("data/parquet/gold/v2/historical_backtest_panel.parquet"))
+    root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
+    split_policies = _resolve_option_value(split_policies)
+    seeds = _resolve_option_value(seeds)
+    spec = load_lgbm_autoresearch_spec(spec_path)
+    manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
+    if manifest.dataset_signature != path_signature(dataset_path):
+        raise typer.BadParameter("Dataset signature does not match the autoresearch manifest.")
+    if manifest.panel_signature != path_signature(panel_path):
+        raise typer.BadParameter("Panel signature does not match the autoresearch manifest.")
+
+    config, _ = load_settings()
+    benchmark_seeds = list(dict.fromkeys(seeds or [config.app.random_seed]))
+    resolved_split_policies = [str(value) for value in (split_policies or ["market_day", "target_day"])]
+    for split_policy in resolved_split_policies:
+        if split_policy not in {"market_day", "target_day"}:
+            raise typer.BadParameter(f"Unsupported split_policy: {split_policy}")
+
+    frame = pd.read_parquet(dataset_path)
+    panel = pd.read_parquet(panel_path)
+    artifacts_dir = autoresearch_models_dir(spec.run_tag, root_dir=root_dir) / "gate"
+    rows: list[dict[str, object]] = []
+    candidate_config = spec.build_variant_config()
+    for split_policy in resolved_split_policies:
+        for variant_name, variant_config in (
+            (manifest.baseline_variant, None),
+            (spec.candidate_name, candidate_config),
+        ):
+            real_runs: list[dict[str, float]] = []
+            quote_runs: list[dict[str, float]] = []
+            metadata_runs: list[dict[str, object]] = []
+            for seed in benchmark_seeds:
+                real_metrics, quote_metrics, metadata = _run_grouped_holdout_ablation(
+                    frame,
+                    panel,
+                    model_name="lgbm_emos",
+                    variant=variant_name,
+                    variant_config=variant_config,
+                    artifacts_dir=artifacts_dir / split_policy / variant_name / f"seed_{seed}",
+                    flat_stake=flat_stake,
+                    default_fee_bps=_default_fee_bps(config),
+                    quote_proxy_half_spread=quote_proxy_half_spread,
+                    split_policy=split_policy,  # type: ignore[arg-type]
+                    seed=seed,
+                )
+                real_runs.append(real_metrics)
+                quote_runs.append(quote_metrics)
+                metadata_runs.append(metadata)
+            rows.append(
+                _ablation_row(
+                    model_name="lgbm_emos",
+                    variant=variant_name,
+                    split_policy=split_policy,  # type: ignore[arg-type]
+                    seeds=benchmark_seeds,
+                    real_history_runs=real_runs,
+                    quote_proxy_runs=quote_runs,
+                    metadata_runs=metadata_runs,
+                )
+            )
+
+    leaderboard_rows = sorted(
+        rows,
+        key=lambda row: (
+            str(row["split_policy"]),
+            float(row["avg_crps_mean"]),
+            float(row["avg_brier_mean"]),
+        ),
+    )
+    gate_leaderboard_path = autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"gate_leaderboard__{spec.candidate_name}.json"
+    gate_csv_path = gate_leaderboard_path.with_suffix(".csv")
+    dump_json(gate_leaderboard_path, leaderboard_rows)
+    _write_leaderboard_csv(gate_csv_path, leaderboard_rows)
+
+    benchmark_gate_details: dict[str, dict[str, float | bool]] = {}
+    benchmark_gate_passed = True
+    for split_policy in resolved_split_policies:
+        baseline_row = next(row for row in leaderboard_rows if row["split_policy"] == split_policy and row["variant"] == manifest.baseline_variant)
+        candidate_row = next(row for row in leaderboard_rows if row["split_policy"] == split_policy and row["variant"] == spec.candidate_name)
+        passed = (
+            float(candidate_row["avg_crps_mean"]) < float(baseline_row["avg_crps_mean"])
+            and bool(candidate_row.get("calibration_available", False))
+        )
+        benchmark_gate_passed = benchmark_gate_passed and passed
+        benchmark_gate_details[split_policy] = {
+            "passed": passed,
+            "baseline_avg_crps_mean": float(baseline_row["avg_crps_mean"]),
+            "candidate_avg_crps_mean": float(candidate_row["avg_crps_mean"]),
+            "baseline_real_history_pnl_mean": float(baseline_row["real_history_pnl_mean"]),
+            "candidate_real_history_pnl_mean": float(candidate_row["real_history_pnl_mean"]),
+        }
+
+    summary = {
+        "run_tag": spec.run_tag,
+        "candidate_name": spec.candidate_name,
+        "baseline_variant": manifest.baseline_variant,
+        "dataset_signature": manifest.dataset_signature,
+        "panel_signature": manifest.panel_signature,
+        "seeds": benchmark_seeds,
+        "split_policies": resolved_split_policies,
+        "leaderboard_path": str(gate_leaderboard_path),
+        "leaderboard_csv_path": str(gate_csv_path),
+        "benchmark_gate_passed": benchmark_gate_passed,
+        "benchmark_gate_details": benchmark_gate_details,
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    dump_json(
+        autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"gate_summary__{spec.candidate_name}.json",
+        summary,
+    )
+    console.print_json(data=summary)
+
+
+@app.command("autoresearch-analyze-paper")
+def autoresearch_analyze_paper(
+    spec_path: Path,
+    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+) -> None:
+    """Run paper and live-shadow diagnostics for one autoresearch candidate artifact."""
+
+    spec_path = _resolve_option_value(spec_path)
+    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
+    spec = load_lgbm_autoresearch_spec(spec_path)
+    manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
+    if manifest.dataset_signature != path_signature(dataset_path):
+        raise typer.BadParameter("Dataset signature does not match the autoresearch manifest.")
+
+    config, _ = load_settings()
+    run_tag = spec.run_tag
+    models_dir = autoresearch_models_dir(run_tag, root_dir=root_dir)
+    candidate_artifact_path = models_dir / f"lgbm_emos__{spec.candidate_name}.pkl"
+    if not candidate_artifact_path.exists():
+        frame = pd.read_parquet(dataset_path)
+        candidate_artifact = train_model(
+            "lgbm_emos",
+            frame,
+            models_dir,
+            split_policy="market_day",
+            seed=config.app.random_seed,
+            variant=spec.candidate_name,
+            variant_config=spec.build_variant_config(),
+        )
+        candidate_artifact_path = Path(candidate_artifact.path)
+
+    paper_dir = autoresearch_analysis_dir(run_tag, root_dir=root_dir) / "paper"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+
+    paper_signals_path = paper_dir / "paper_signals_recent_core.json"
+    paper_trader(
+        model_path=candidate_artifact_path,
+        model_name="lgbm_emos",
+        core_recent_only=True,
+        output=paper_signals_path,
+    )
+
+    opportunity_report_path = paper_dir / "opportunity_report_recent_core.json"
+    opportunity_report(
+        model_path=candidate_artifact_path,
+        model_name="lgbm_emos",
+        market_scope="recent_core",
+        output=opportunity_report_path,
+    )
+
+    shadow_history_path = paper_dir / "opportunity_shadow_recent_core.jsonl"
+    shadow_latest_path = paper_dir / "opportunity_shadow_recent_core_latest.json"
+    shadow_summary_path = paper_dir / "opportunity_shadow_recent_core_summary.json"
+    shadow_state_path = paper_dir / "opportunity_shadow_recent_core_state.json"
+    opportunity_shadow(
+        model_path=candidate_artifact_path,
+        model_name="lgbm_emos",
+        market_scope="recent_core",
+        max_cycles=1,
+        output=shadow_history_path,
+        latest_output=shadow_latest_path,
+        summary_output=shadow_summary_path,
+        state_path=shadow_state_path,
+    )
+
+    open_phase_history_path = paper_dir / "open_phase_shadow_supported_wu_open_phase.jsonl"
+    open_phase_latest_path = paper_dir / "open_phase_shadow_supported_wu_open_phase_latest.json"
+    open_phase_summary_path = paper_dir / "open_phase_shadow_supported_wu_open_phase_summary.json"
+    open_phase_state_path = paper_dir / "open_phase_shadow_supported_wu_open_phase_state.json"
+    open_phase_shadow(
+        model_path=candidate_artifact_path,
+        model_name="lgbm_emos",
+        market_scope="supported_wu_open_phase",
+        max_cycles=1,
+        output=open_phase_history_path,
+        latest_output=open_phase_latest_path,
+        summary_output=open_phase_summary_path,
+        state_path=open_phase_state_path,
+    )
+
+    hope_hunt_latest_path = paper_dir / "hope_hunt_supported_wu_open_phase_latest.json"
+    hope_hunt_history_path = paper_dir / "hope_hunt_supported_wu_open_phase_history.jsonl"
+    hope_hunt_summary_path = paper_dir / "hope_hunt_supported_wu_open_phase_summary.json"
+    hope_hunt_report(
+        model_path=candidate_artifact_path,
+        model_name="lgbm_emos",
+        market_scope="supported_wu_open_phase",
+        output=hope_hunt_latest_path,
+        history_output=hope_hunt_history_path,
+        summary_output=hope_hunt_summary_path,
+    )
+
+    paper_rows = load_json(paper_signals_path)
+    opportunity_rows = load_json(opportunity_report_path)
+    paper_summary = _summarize_reason_rows(paper_rows if isinstance(paper_rows, list) else [])
+    opportunity_summary = _summarize_reason_rows(opportunity_rows if isinstance(opportunity_rows, list) else [])
+    shadow_summary = _load_optional_json(shadow_summary_path) or {}
+    open_phase_summary = _load_optional_json(open_phase_summary_path) or {}
+    hope_hunt_summary = _load_optional_json(hope_hunt_summary_path) or {}
+
+    summary = {
+        "run_tag": run_tag,
+        "candidate_name": spec.candidate_name,
+        "model_path": str(candidate_artifact_path),
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+        "analysis_completed": True,
+        "paper_recent_core": paper_summary,
+        "opportunity_recent_core": opportunity_summary,
+        "opportunity_shadow_recent_core": shadow_summary,
+        "open_phase_supported_wu_open_phase": open_phase_summary,
+        "hope_hunt_supported_wu_open_phase": hope_hunt_summary,
+    }
+    summary["overall_gate_decision"] = _paper_overall_gate_decision(
+        paper_summary=paper_summary,
+        opportunity_summary=opportunity_summary,
+        shadow_summary=shadow_summary,
+        open_phase_summary=open_phase_summary,
+        hope_hunt_summary=hope_hunt_summary,
+    )
+    dump_json(paper_dir / f"paper_analysis_summary__{spec.candidate_name}.json", summary)
+    console.print_json(data=summary)
+
+
+@app.command("autoresearch-promote")
+def autoresearch_promote(
+    spec_path: Path,
+    root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+    publish_champion: bool = False,
+    publish_trading_champion: bool = False,
+    force: bool = False,
+) -> None:
+    """Promote one gated candidate into the persistent promoted-spec registry."""
+
+    spec_path = _resolve_option_value(spec_path)
+    root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
+    publish_champion = bool(_resolve_option_value(publish_champion, False))
+    publish_trading_champion = bool(_resolve_option_value(publish_trading_champion, False))
+    force = bool(_resolve_option_value(force, False))
+    spec = load_lgbm_autoresearch_spec(spec_path)
+
+    gate_summary_path = autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"gate_summary__{spec.candidate_name}.json"
+    paper_summary_path = (
+        autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir)
+        / "paper"
+        / f"paper_analysis_summary__{spec.candidate_name}.json"
+    )
+    if not gate_summary_path.exists():
+        raise typer.BadParameter(f"Gate summary does not exist: {gate_summary_path}")
+    if not paper_summary_path.exists():
+        raise typer.BadParameter(f"Paper analysis summary does not exist: {paper_summary_path}")
+
+    gate_summary = load_json(gate_summary_path)
+    paper_summary = load_json(paper_summary_path)
+    if not bool(gate_summary.get("benchmark_gate_passed", False)):
+        raise typer.BadParameter("Candidate did not pass the benchmark gate.")
+    if str(paper_summary.get("overall_gate_decision", "INCONCLUSIVE")) == "NO_GO":
+        raise typer.BadParameter("Paper analysis marked this candidate as NO_GO.")
+
+    target_path = promoted_lgbm_emos_spec_path(spec.candidate_name)
+    if target_path.exists() and not force:
+        raise typer.BadParameter(f"Promoted spec already exists: {target_path}")
+    save_lgbm_autoresearch_spec(target_path, spec)
+
+    model_path = autoresearch_models_dir(spec.run_tag, root_dir=root_dir) / f"lgbm_emos__{spec.candidate_name}.pkl"
+    if not model_path.exists():
+        raise typer.BadParameter(f"Candidate artifact does not exist: {model_path}")
+    calibration_path = _artifact_calibration_path(model_path)
+    published: dict[str, object] = {}
+    if publish_champion:
+        published["champion"] = _publish_existing_model_alias(
+            alias_name=DEFAULT_MODEL_NAME,
+            model_name="lgbm_emos",
+            variant=spec.candidate_name,
+            source_model_path=model_path,
+            source_calibration_path=calibration_path if calibration_path.exists() else None,
+            leaderboard_path=gate_summary_path,
+        )
+    if publish_trading_champion:
+        published["trading_champion"] = _publish_existing_model_alias(
+            alias_name=TRADING_MODEL_ALIAS,
+            model_name="lgbm_emos",
+            variant=spec.candidate_name,
+            source_model_path=model_path,
+            source_calibration_path=calibration_path if calibration_path.exists() else None,
+            leaderboard_path=gate_summary_path,
+        )
+
+    summary = {
+        "run_tag": spec.run_tag,
+        "candidate_name": spec.candidate_name,
+        "promoted_spec_path": str(target_path),
+        "published_aliases": published,
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    dump_json(
+        autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"promotion_summary__{spec.candidate_name}.json",
+        summary,
+    )
+    console.print_json(data=summary)
+
+
 def _load_optional_json(path: Path) -> dict[str, object] | None:
     """Load a JSON object when present, otherwise return None."""
 
@@ -3928,6 +4648,7 @@ def paper_trader(
     horizon: str = "policy",
     bankroll: float = 10_000.0,
     min_edge: float | None = None,
+    output: Path = Path("artifacts/signals/v2/paper_signals.json"),
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
 
@@ -3939,6 +4660,7 @@ def paper_trader(
     horizon = _resolve_option_value(horizon, "policy")
     bankroll = float(_resolve_option_value(bankroll, 10_000.0))
     min_edge = _resolve_option_value(min_edge)
+    output = _resolve_option_value(output, Path("artifacts/signals/v2/paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     broker = PaperBroker(bankroll=bankroll)
@@ -4057,7 +4779,7 @@ def paper_trader(
                 "fill": fill_payload,
             }
         )
-    dump_json(_default_signal_output("paper_signals.json"), results)
+    dump_json(output, results)
     console.print_json(data=results)
 
 
@@ -4728,6 +5450,7 @@ def opportunity_shadow(
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
     near_term_days: int | None = typer.Option(None, help="How many days ahead to include beyond local today"),
     output: Path | None = typer.Option(None, help="Append-only JSONL output"),
+    latest_output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
     summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
     state_path: Path | None = typer.Option(None, help="State JSON path"),
 ) -> None:
@@ -4743,6 +5466,7 @@ def opportunity_shadow(
     max_cycles = _resolve_option_value(max_cycles)
     near_term_days = _resolve_option_value(near_term_days)
     output = _resolve_option_value(output)
+    latest_output = _resolve_option_value(latest_output)
     summary_output = _resolve_option_value(summary_output)
     state_path = _resolve_option_value(state_path)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
@@ -4764,7 +5488,7 @@ def opportunity_shadow(
     effective_near_term_days = near_term_days if near_term_days is not None else shadow_config.near_term_days
     history_output_path = output or _default_signal_output(shadow_config.history_output_path.name)
     summary_output_path = summary_output or _default_signal_output(shadow_config.summary_output_path.name)
-    latest_output_path = _default_signal_output(shadow_config.latest_output_path.name)
+    latest_output_path = latest_output or _default_signal_output(shadow_config.latest_output_path.name)
     effective_state_path = state_path or _default_signal_output(shadow_config.state_path.name)
     horizon_policy = _load_recent_horizon_policy()
     edge_threshold = config.backtest.default_edge_threshold

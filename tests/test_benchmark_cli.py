@@ -58,12 +58,18 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
         panel,
         *,
         model_name,
+        variant=None,
+        variant_config=None,
         artifacts_dir,
         flat_stake,
         default_fee_bps,
         split_policy,
         seed,
+        retrain_stride=1,
     ):
+        assert variant is None
+        assert variant_config is None
+        assert retrain_stride >= 1
         base = 1.0 if model_name == "det2prob_nn" else 2.0
         return (
             {
@@ -87,13 +93,19 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
         panel,
         *,
         model_name,
+        variant=None,
+        variant_config=None,
         artifacts_dir,
         flat_stake,
         default_fee_bps,
         quote_proxy_half_spread,
         split_policy,
         seed,
+        retrain_stride=1,
     ):
+        assert variant is None
+        assert variant_config is None
+        assert retrain_stride >= 1
         return (
             {
                 "num_trades": 10.0,

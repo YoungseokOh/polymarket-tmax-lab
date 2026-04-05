@@ -206,6 +206,7 @@ Useful shared skills:
 - `pmtmax-data-ops`
 - `pmtmax-market-rules`
 - `pmtmax-research-loop`
+- `pmtmax-autoresearch`
 - `pmtmax-commit`
 - `pmtmax-release-checklist`
 
@@ -219,17 +220,32 @@ uv run pmtmax bootstrap-lab
 uv run pmtmax build-dataset --allow-canonical-overwrite
 uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
 uv run pmtmax train-baseline --model-name gaussian_emos
-uv run pmtmax train-advanced --model-name det2prob_nn
+uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 uv run pmtmax benchmark-models
-uv run pmtmax benchmark-ablations --model-name tuned_ensemble
-uv run pmtmax paper-trader
+uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
 ```
 
 Canonical research paths are now v2-only.
-Public model support is intentionally reduced to `gaussian_emos`, `tuned_ensemble`, and `det2prob_nn`.
-`tuned_ensemble` is now the contextual mixture-of-experts candidate, while `det2prob_nn` is a standalone mixture-density neural network.
+Public model support is `gaussian_emos`, `tuned_ensemble`, `det2prob_nn`, and `lgbm_emos`.
+The current active aliases point to `lgbm_emos / recency_neighbor_oof`, while `benchmark-models` still remains the canonical publish path for public aliases.
 `benchmark-models` writes the leaderboard under `artifacts/benchmarks/v2/` and publishes both the research `champion` alias and the trading-focused `trading_champion` alias under `artifacts/models/v2/`.
 `benchmark-ablations` is internal research tooling for variant-level grouped-holdout diagnostics and writes family-specific leaderboards under `artifacts/benchmarks/v2/`.
+
+## Autoresearch Workflow
+`karpathy/autoresearch`-style exploration is wired into the repo as a YAML candidate loop around `lgbm_emos / recency_neighbor_oof`.
+
+```bash
+uv run pmtmax autoresearch-init
+
+# Edit one candidate YAML under artifacts/autoresearch/<run_tag>/candidates/
+uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-gate --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+```
+
+`scripts/autoresearch.sh` is a thin wrapper over the same commands.
+The loop never rewrites canonical datasets or aliases unless promotion explicitly asks to publish them.
 
 ## Real Historical Collection
 Use the curated inventory workflow when you want real historical temperature markets instead of bundled examples.

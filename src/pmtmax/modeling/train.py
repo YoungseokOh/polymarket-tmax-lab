@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,15 +17,20 @@ from pmtmax.modeling.advanced.det2prob_nn import (
     resolve_det2prob_variant,
     supported_det2prob_variants,
 )
+from pmtmax.modeling.advanced.lgbm_emos import (
+    LgbmEMOSModel,
+    LgbmEMOSVariantConfig,
+    resolve_lgbm_emos_variant,
+    supported_lgbm_emos_variants,
+)
 from pmtmax.modeling.advanced.tuned_ensemble import (
     TunedEnsembleModel,
     resolve_tuned_ensemble_variant,
     supported_tuned_ensemble_variants,
 )
-from pmtmax.modeling.advanced.lgbm_emos import (
-    LgbmEMOSModel,
-    resolve_lgbm_emos_variant,
-    supported_lgbm_emos_variants,
+from pmtmax.modeling.autoresearch import (
+    load_promoted_lgbm_emos_variant,
+    supported_promoted_lgbm_emos_variants,
 )
 from pmtmax.modeling.baselines.gaussian_emos import (
     GaussianEMOSModel,
@@ -65,7 +71,9 @@ def supported_ablation_variants(model_name: str) -> tuple[str, ...]:
     if model_name == "gaussian_emos":
         return supported_gaussian_emos_variants()
     if model_name == "lgbm_emos":
-        return supported_lgbm_emos_variants()
+        builtins = list(supported_lgbm_emos_variants())
+        promoted = [variant for variant in supported_promoted_lgbm_emos_variants() if variant not in builtins]
+        return tuple(builtins + promoted)
     return ()
 
 
@@ -82,6 +90,32 @@ def require_supported_variant(model_name: str, variant: str | None) -> str | Non
         msg = f"Unsupported {model_name} variant: {variant}. Supported variants: {', '.join(supported)}."
         raise ValueError(msg)
     return variant
+
+
+def _resolve_lgbm_training_variant(
+    variant: str | None,
+    variant_config: LgbmEMOSVariantConfig | None,
+) -> tuple[str | None, LgbmEMOSVariantConfig]:
+    """Resolve one built-in, promoted, or ephemeral LGBM variant."""
+
+    if variant_config is not None:
+        effective_variant = variant or variant_config.name
+        if effective_variant is None:
+            msg = "LGBM external variant configs must define a candidate name."
+            raise ValueError(msg)
+        if variant_config.name != effective_variant:
+            variant_config = LgbmEMOSVariantConfig(**{**asdict(variant_config), "name": effective_variant})
+        return effective_variant, variant_config
+
+    effective_variant = require_supported_variant("lgbm_emos", variant)
+    if effective_variant is None:
+        resolved = resolve_lgbm_emos_variant(None)
+        return None, resolved
+
+    promoted = load_promoted_lgbm_emos_variant(effective_variant)
+    if promoted is not None:
+        return effective_variant, promoted
+    return effective_variant, resolve_lgbm_emos_variant(effective_variant)
 
 
 def sanitize_model_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -236,11 +270,16 @@ def train_model(
     split_policy: Literal["market_day", "target_day"] = "market_day",
     seed: int | None = None,
     variant: str | None = None,
+    variant_config: LgbmEMOSVariantConfig | None = None,
 ) -> ModelArtifact:
     """Train a named model and persist it to disk."""
 
     require_supported_model_name(model_name)
-    require_supported_variant(model_name, variant)
+    if variant_config is not None and model_name != "lgbm_emos":
+        msg = "External variant configs are only supported for lgbm_emos."
+        raise ValueError(msg)
+    if variant_config is None:
+        require_supported_variant(model_name, variant)
     if seed is not None:
         set_global_seed(seed)
 
@@ -261,9 +300,16 @@ def train_model(
         model = TunedEnsembleModel(features, split_policy=split_policy, variant=resolved_variant.name)
         model.fit(fit_frame)
     elif model_name == "lgbm_emos":
-        resolved_variant = resolve_lgbm_emos_variant(variant)
-        model = LgbmEMOSModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        resolved_variant_name, resolved_variant = _resolve_lgbm_training_variant(variant, variant_config)
+        model = LgbmEMOSModel(
+            features,
+            split_policy=split_policy,
+            variant=resolved_variant_name,
+            variant_config=resolved_variant,
+        )
         model.fit(fit_frame)
+        if variant_config is not None or variant is not None:
+            variant = resolved_variant.name
     else:
         msg = f"Unsupported trainable model: {model_name}"
         raise ValueError(msg)

@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from pmtmax.examples import example_market_specs
+from pmtmax.modeling.autoresearch import LgbmAutoresearchSpec
 from pmtmax.modeling.predict import load_model, predict_market
 from pmtmax.modeling.train import default_feature_names, train_model
 
@@ -168,3 +169,44 @@ def test_train_model_v2_persists_calibrator_and_predict_uses_calibrated_probs(tm
     assert forecast.outcome_probabilities_calibrated
     assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
     assert forecast.feature_availability["model_daily_max"] is True
+
+
+def test_train_model_accepts_external_lgbm_variant_config(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": [f"m{i:03d}" for i in range(48)],
+            "station_id": ["AAA"] * 48,
+            "target_date": [pd.Timestamp("2026-01-01") + pd.Timedelta(days=i) for i in range(48)],
+            "decision_horizon": ["morning_of"] * 48,
+            "decision_time_utc": [pd.Timestamp("2026-01-01T00:00:00Z") + pd.Timedelta(days=i) for i in range(48)],
+            "realized_daily_max": np.linspace(8.0, 12.0, 48),
+            "lead_hours": np.linspace(6.0, 18.0, 48),
+            "model_daily_max": np.linspace(8.2, 11.8, 48),
+            "ecmwf_ifs025_model_daily_max": np.linspace(8.1, 11.9, 48),
+        }
+    )
+    spec = LgbmAutoresearchSpec.model_validate(
+        {
+            "run_tag": "20260404-lgbm",
+            "candidate_name": "candidate_beta",
+            "model_name": "lgbm_emos",
+            "base_variant": "recency_neighbor_oof",
+            "params": {
+                "num_leaves": 79,
+                "learning_rate": 0.025,
+            },
+        }
+    )
+
+    artifact = train_model(
+        "lgbm_emos",
+        frame,
+        tmp_path,
+        variant=spec.candidate_name,
+        variant_config=spec.build_variant_config(),
+    )
+    model = load_model(Path(artifact.path))
+
+    assert artifact.variant == "candidate_beta"
+    assert "candidate_beta" in Path(artifact.path).name
+    assert model.variant == "candidate_beta"
