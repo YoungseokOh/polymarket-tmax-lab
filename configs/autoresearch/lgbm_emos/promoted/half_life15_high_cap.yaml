@@ -1,0 +1,13 @@
+run_tag: 20260406-lgbm-half-life-search
+candidate_name: half_life15_high_cap
+model_name: lgbm_emos
+base_variant: recency_neighbor_oof
+description: 'Combine shorter half-life (15d, midpoint between winning 20d and new
+  10d) with slightly higher capacity (100 leaves). Previous leaves79 failed alone,
+  but combined with a shorter half-life the capacity increase may fit the tighter
+  recency window better.
+
+  '
+params:
+  num_leaves: 100
+  recency_half_life_days: 15.0

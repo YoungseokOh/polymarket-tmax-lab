@@ -71,8 +71,15 @@ def build_revenue_gate_report(
     aggregate_policy_quote_proxy_metrics: Mapping[str, Any] = {}
     aggregate_panel_coverage: Mapping[str, Any] = {}
     if benchmark_summary is not None:
-        benchmark_decision = str(benchmark_summary.get("decision", benchmark_decision))
-        benchmark_reason = str(benchmark_summary.get("decision_reason", benchmark_reason))
+        if "decision" in benchmark_summary or "decision_reason" in benchmark_summary:
+            benchmark_decision = str(benchmark_summary.get("decision", benchmark_decision))
+            benchmark_reason = str(benchmark_summary.get("decision_reason", benchmark_reason))
+        elif bool(benchmark_summary.get("trading_champion_published")):
+            benchmark_decision = "GO"
+            benchmark_reason = "published_trading_champion_alias"
+        elif bool(benchmark_summary.get("champion_published")):
+            benchmark_decision = "INCONCLUSIVE"
+            benchmark_reason = "published_research_champion_only"
         aggregate_policy_real_history_metrics = dict(
             benchmark_summary.get("aggregate_policy_real_history_metrics", {})
         )

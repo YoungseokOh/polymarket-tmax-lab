@@ -154,5 +154,49 @@ def test_summarize_opportunity_history_counts_positive_raw_and_edge(tmp_path: Pa
     assert summary["raw_gap_positive_count"] == 2
     assert summary["after_cost_edge_positive_count"] == 1
     assert summary["tradable_count"] == 1
+    assert summary["by_reason"]["tradable"]["tradable_count"] == 1
+    assert summary["by_city_reason"]["Seoul"]["no_positive_edge"] == 1
+    assert summary["by_horizon_reason"]["morning_of"]["tradable"] == 1
+    assert summary["top_fee_killed_markets"] == []
+    assert summary["top_policy_filtered_markets"] == []
     assert summary["by_horizon"]["morning_of"]["gate_decision"] == "INCONCLUSIVE"
     assert summary["gate_decision"] == "INCONCLUSIVE"
+
+
+def test_summarize_opportunity_history_exposes_near_miss_lists(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.jsonl"
+    rows = [
+        OpportunityObservation(
+            observed_at=datetime(2026, 3, 23, 3, 0, tzinfo=UTC),
+            market_id="m1",
+            city="Seoul",
+            question="q1",
+            target_local_date=datetime(2026, 3, 23, tzinfo=UTC).date(),
+            decision_horizon="morning_of",
+            reason="fee_killed_edge",
+            outcome_label="11°C",
+            raw_gap=0.03,
+            after_cost_edge=-0.002,
+            spread=0.02,
+            visible_liquidity=100.0,
+        ),
+        OpportunityObservation(
+            observed_at=datetime(2026, 3, 23, 3, 1, tzinfo=UTC),
+            market_id="m2",
+            city="London",
+            question="q2",
+            target_local_date=datetime(2026, 3, 23, tzinfo=UTC).date(),
+            decision_horizon="previous_evening",
+            reason="policy_filtered",
+            outcome_label="14°C",
+        ),
+    ]
+    with history_path.open("a") as handle:
+        for row in rows:
+            handle.write(row.model_dump_json() + "\n")
+
+    summary = summarize_opportunity_history(history_path)
+
+    assert summary["top_near_miss_markets"][0]["market_id"] == "m1"
+    assert summary["top_fee_killed_markets"][0]["city"] == "Seoul"
+    assert summary["top_policy_filtered_markets"][0]["market_id"] == "m2"

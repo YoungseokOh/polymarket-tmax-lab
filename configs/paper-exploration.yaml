@@ -1,0 +1,25 @@
+market_scopes:
+  - default
+  - recent_core
+  - supported_wu_open_phase
+
+min_edges:
+  - 0.15
+  - 0.10
+  - 0.05
+
+max_spread_bps:
+  - 500
+  - 750
+  - 1000
+
+min_liquidity:
+  - 10.0
+  - 5.0
+  - 0.0
+
+horizon_policies:
+  - label: current_policy
+    path: configs/recent-core-horizon-policy.yaml
+  - label: all_supported_policy
+    path: configs/paper-all-supported-horizon-policy.yaml

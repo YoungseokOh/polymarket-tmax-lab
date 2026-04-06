@@ -20,11 +20,15 @@ from pmtmax.cli.main import (
     _run_quote_proxy_backtest,
     _run_real_history_backtest,
     backtest,
+    execution_watchlist_playbook,
+    execution_sensitivity_report,
     live_mm,
+    market_bottleneck_report,
     materialize_backtest_panel,
     open_phase_shadow,
     opportunity_report,
     opportunity_shadow,
+    paper_multimodel_report,
     revenue_gate_report,
     station_cycle,
     station_daemon,
@@ -758,16 +762,20 @@ def test_opportunity_report_marks_missing_books_explicitly(
         },
     )()
 
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(
         "pmtmax.cli.main._runtime",
-        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
     monkeypatch.setattr("pmtmax.cli.main.predict_market", lambda *args, **kwargs: _Forecast())
     monkeypatch.setattr(
-        "pmtmax.cli.main._load_snapshots",
+        "pmtmax.cli.main._load_scoped_snapshots",
         lambda **kwargs: [snapshot],
     )
     monkeypatch.setattr(
@@ -865,14 +873,18 @@ def test_opportunity_report_marks_policy_filtered_markets(
         },
     )()
 
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(
         "pmtmax.cli.main._runtime",
-        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
-    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr("pmtmax.cli.main._load_scoped_snapshots", lambda **kwargs: [snapshot])
     monkeypatch.setattr(
         "pmtmax.cli.main._load_recent_horizon_policy",
         lambda path=Path("configs/recent-core-horizon-policy.yaml"): {"London": ["previous_evening"]},
@@ -1052,14 +1064,18 @@ def test_opportunity_shadow_command_writes_outputs(
         },
     )()
 
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(
         "pmtmax.cli.main._runtime",
-        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
-    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr("pmtmax.cli.main._load_scoped_snapshots", lambda **kwargs: [snapshot])
     monkeypatch.setattr(
         "pmtmax.cli.main._resolve_model_path",
         lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
@@ -1147,13 +1163,17 @@ def test_open_phase_shadow_command_writes_outputs(
         },
     )()
 
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(
         "pmtmax.cli.main._runtime",
-        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
     )
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
-    monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr("pmtmax.cli.main._load_scoped_snapshots", lambda **kwargs: [snapshot])
     monkeypatch.setattr(
         "pmtmax.cli.main._resolve_model_path",
         lambda model_path, model_name: (tmp_path / "champion.pkl", "gaussian_emos"),
@@ -1218,6 +1238,209 @@ def test_open_phase_shadow_command_writes_outputs(
     assert len(history_lines) == 1
 
 
+def test_paper_multimodel_report_writes_summary_and_leaderboard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot("Seoul")
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.02})(),
+            "execution": type("_Exec", (), {"max_spread_bps": 500, "min_liquidity": 10.0})(),
+        },
+    )()
+
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr("pmtmax.cli.main._load_scoped_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr("pmtmax.cli.main._load_full_books_for_snapshot", lambda clob, snapshot: {})
+    monkeypatch.setattr("pmtmax.cli.main._load_recent_horizon_policy", lambda path=Path("configs/recent-core-horizon-policy.yaml"): {})
+    monkeypatch.setattr(
+        "pmtmax.cli.main._resolve_paper_multimodel_specs",
+        lambda **kwargs: [
+            {"label": "champion_alias", "model_path": tmp_path / "champion.pkl", "model_name": "lgbm_emos"},
+            {"label": "challenger", "model_path": tmp_path / "challenger.pkl", "model_name": "lgbm_emos"},
+        ],
+    )
+
+    def _fake_eval(*, model_path, **kwargs):
+        if Path(model_path).stem == "champion":
+            return (
+                [
+                    {
+                        "market_id": "m1",
+                        "city": "Seoul",
+                        "decision_horizon": "previous_evening",
+                        "reason": "raw_gap_non_positive",
+                    }
+                ],
+                10_000.0,
+            )
+        return (
+            [
+                {
+                    "market_id": "m1",
+                    "city": "Seoul",
+                    "decision_horizon": "previous_evening",
+                    "reason": "fee_killed_edge",
+                    "raw_gap": 0.02,
+                    "after_cost_edge": -0.001,
+                }
+            ],
+            9_999.0,
+        )
+
+    monkeypatch.setattr("pmtmax.cli.main._run_paper_model_evaluation", _fake_eval)
+
+    output_dir = tmp_path / "paper_multi"
+    paper_multimodel_report(output_dir=output_dir)
+
+    summary = json.loads((output_dir / "summary.json").read_text())
+    leaderboard = pd.read_csv(output_dir / "leaderboard.csv")
+
+    assert set(summary["models"]) == {"champion_alias", "challenger"}
+    assert leaderboard.shape[0] == 2
+    assert (output_dir / "champion_alias.json").exists()
+    assert (output_dir / "challenger.json").exists()
+
+
+def test_execution_sensitivity_report_writes_combo_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _future_snapshot("Seoul")
+
+    class _FakeBuilder:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "polymarket": type("_Poly", (), {"clob_base_url": "https://clob"})(),
+            "weather": type("_Weather", (), {"models": []})(),
+            "backtest": type("_Backtest", (), {"default_edge_threshold": 0.15})(),
+            "execution": type("_Exec", (), {"max_spread_bps": 500, "min_liquidity": 10.0})(),
+        },
+    )()
+
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
+    )
+    monkeypatch.setattr("pmtmax.cli.main._resolve_model_path", lambda model_path, model_name: (tmp_path / "champion.pkl", "lgbm_emos"))
+    monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
+    monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)
+    monkeypatch.setattr(
+        "pmtmax.cli.main._load_paper_exploration_preset",
+        lambda path=Path("configs/paper-exploration.yaml"): {
+            "market_scopes": ["default"],
+            "min_edges": [0.15, 0.05],
+            "max_spread_bps": [500],
+            "min_liquidity": [10.0],
+            "horizon_policies": [{"label": "current_policy", "path": "configs/recent-core-horizon-policy.yaml"}],
+        },
+    )
+    monkeypatch.setattr("pmtmax.cli.main._load_recent_horizon_policy", lambda path=Path("configs/recent-core-horizon-policy.yaml"): {})
+    monkeypatch.setattr("pmtmax.cli.main._load_scoped_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr("pmtmax.cli.main._load_full_books_for_snapshot", lambda clob, snapshot: {})
+
+    def _fake_eval(*, edge_threshold, **kwargs):
+        tradable = edge_threshold <= 0.05
+        return (
+            [
+                {
+                    "market_id": "m1",
+                    "city": "Seoul",
+                    "decision_horizon": "previous_evening",
+                    "reason": "tradable" if tradable else "fee_killed_edge",
+                    "raw_gap": 0.02,
+                    "after_cost_edge": 0.01 if tradable else -0.001,
+                    "fill": {"price": 0.50, "size": 1.0} if tradable else None,
+                }
+            ],
+            9_999.0,
+        )
+
+    monkeypatch.setattr("pmtmax.cli.main._run_paper_model_evaluation", _fake_eval)
+
+    output_dir = tmp_path / "sensitivity"
+    execution_sensitivity_report(output_dir=output_dir)
+
+    summary = json.loads((output_dir / "summary.json").read_text())
+    leaderboard = pd.read_csv(output_dir / "leaderboard.csv")
+
+    assert len(summary["combinations"]) == 2
+    assert leaderboard["fills"].max() == 1
+    assert (output_dir / "combos").exists()
+
+
+def test_market_bottleneck_report_includes_shadow_context(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "paper_rows.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                {
+                    "market_id": "m1",
+                    "city": "Seoul",
+                    "decision_horizon": "previous_evening",
+                    "reason": "fee_killed_edge",
+                    "raw_gap": 0.03,
+                    "after_cost_edge": -0.001,
+                },
+                {
+                    "market_id": "m2",
+                    "city": "London",
+                    "decision_horizon": "market_open",
+                    "reason": "policy_filtered",
+                },
+            ]
+        )
+    )
+    opportunity_summary_path = tmp_path / "opportunity_summary.json"
+    opportunity_summary_path.write_text(json.dumps({"gate_decision": "INCONCLUSIVE"}))
+    observation_summary_path = tmp_path / "observation_summary.json"
+    observation_summary_path.write_text(json.dumps({"gate_reason": "no_observations"}))
+
+    output = tmp_path / "bottlenecks.json"
+    market_bottleneck_report(
+        input_path=input_path,
+        opportunity_summary_path=opportunity_summary_path,
+        observation_summary_path=observation_summary_path,
+        output=output,
+    )
+
+    payload = json.loads(output.read_text())
+
+    assert payload["summary"]["reason_counts"]["fee_killed_edge"] == 1
+    assert payload["summary"]["policy_blocked_watchlist"][0]["city"] == "London"
+    assert payload["shadow_context"]["opportunity"]["gate_decision"] == "INCONCLUSIVE"
+
+
 def test_revenue_gate_report_writes_combined_summary(tmp_path: Path) -> None:
     benchmark_path = tmp_path / "benchmark.json"
     benchmark_path.write_text(
@@ -1276,17 +1499,20 @@ def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
     open_phase_path = tmp_path / "open_phase.json"
     open_phase_summary_path = tmp_path / "open_phase_summary.json"
     revenue_gate_path = tmp_path / "revenue_gate.json"
+    watchlist_playbook_path = tmp_path / "execution_watchlist_playbook.json"
 
     opportunity_path.write_text(
         json.dumps(
             [
                 {
+                    "market_id": "m-seoul-1",
                     "city": "Seoul",
                     "target_local_date": "2026-04-05",
                     "decision_horizon": "morning_of",
                     "outcome_label": "11°C",
                     "edge": 0.02,
                     "reason": "tradable",
+                    "best_ask": 0.89,
                 }
             ]
         )
@@ -1360,6 +1586,29 @@ def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
             }
         )
     )
+    watchlist_playbook_path.write_text(
+        json.dumps(
+            {
+                "playbook": [
+                    {
+                        "tier": "A",
+                        "name": "fee_sensitive_watchlist",
+                        "cities": ["Seoul"],
+                        "evidence": [
+                            {
+                                "city": "Seoul",
+                                "market_id": "m-seoul-1",
+                                "target_local_date": "2026-04-05",
+                                "decision_horizon": "morning_of",
+                                "outcome_label": "11°C",
+                                "watch_rule_threshold_ask": 0.901,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
 
     json_output = tmp_path / "station_dashboard.json"
     html_output = tmp_path / "station_dashboard.html"
@@ -1371,6 +1620,7 @@ def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
         open_phase_latest_path=open_phase_path,
         open_phase_summary_path=open_phase_summary_path,
         revenue_gate_summary_path=revenue_gate_path,
+        watchlist_playbook_path=watchlist_playbook_path,
         json_output=json_output,
         html_output=html_output,
         state_path=tmp_path / "station_dashboard_state.json",
@@ -1378,33 +1628,201 @@ def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
 
     payload = json.loads(json_output.read_text())
     assert payload["overview"]["revenue_gate_decision"] == "GO"
+    assert payload["overview"]["watchlist_alert_count"] == 1
     assert payload["observation_panel"]["source_family_breakdown"][0]["name"] == "official_intraday"
     assert "PMTMAX Station Dashboard" in html_output.read_text()
 
 
+def test_execution_watchlist_playbook_writes_outputs(tmp_path: Path) -> None:
+    champion_bottleneck_path = tmp_path / "market_bottleneck_report__champion_alias.json"
+    challenger_bottleneck_path = tmp_path / "market_bottleneck_report__mega_neighbor_oof.json"
+    fee_summary_path = tmp_path / "fee_watchlist" / "summary.json"
+    policy_summary_path = tmp_path / "policy_watchlist" / "summary.json"
+    sensitivity_summary_path = tmp_path / "execution_sensitivity" / "summary.json"
+    fee_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    sensitivity_summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    champion_bottleneck_path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "reason_counts": {
+                        "raw_gap_non_positive": 113,
+                        "policy_filtered": 4,
+                        "fee_killed_edge": 3,
+                    }
+                }
+            }
+        )
+    )
+    challenger_bottleneck_path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "fee_sensitive_watchlist": [
+                        {"city": "Taipei", "fee_killed_edge": 3},
+                        {"city": "Chongqing", "fee_killed_edge": 2},
+                    ],
+                    "policy_blocked_watchlist": [
+                        {"city": "London", "policy_filtered": 3},
+                        {"city": "NYC", "policy_filtered": 1},
+                    ],
+                    "raw_edge_desert_watchlist": [
+                        {"city": "Hong Kong", "raw_gap_non_positive": 4},
+                        {"city": "Paris", "raw_gap_non_positive": 4},
+                    ],
+                }
+            }
+        )
+    )
+    fee_summary_path.write_text(
+        json.dumps(
+            {
+                "leaderboard": [
+                    {
+                        "model": "mega_neighbor_oof",
+                        "fee_killed_edge": 5,
+                        "raw_gap_positive_count": 5,
+                        "raw_gap_non_positive": 1,
+                    }
+                ]
+            }
+        )
+    )
+    (fee_summary_path.parent / "mega_neighbor_oof.json").write_text(
+        json.dumps(
+            [
+                {
+                    "market_id": "m1",
+                    "city": "Taipei",
+                    "target_local_date": "2026-04-05",
+                    "decision_horizon": "morning_of",
+                    "outcome_label": "27°C",
+                    "reason": "fee_killed_edge",
+                    "best_ask": 0.999,
+                    "raw_gap": 0.001,
+                    "after_cost_edge": -0.0989,
+                    "fee_estimate": 0.0999,
+                    "spread": 0.999,
+                },
+                {
+                    "market_id": "m2",
+                    "city": "Chongqing",
+                    "target_local_date": "2026-04-06",
+                    "decision_horizon": "market_open",
+                    "outcome_label": "23°C",
+                    "reason": "fee_killed_edge",
+                    "best_ask": 0.99,
+                    "raw_gap": 0.01,
+                    "after_cost_edge": -0.089,
+                    "fee_estimate": 0.099,
+                    "spread": 0.98,
+                },
+            ]
+        )
+    )
+    policy_summary_path.write_text(
+        json.dumps(
+            {
+                "leaderboard": [
+                    {
+                        "model": "neighbor_oof_half_life20",
+                        "fee_killed_edge": 1,
+                        "raw_gap_positive_count": 1,
+                        "raw_gap_non_positive": 7,
+                    }
+                ]
+            }
+        )
+    )
+    (policy_summary_path.parent / "neighbor_oof_half_life20.json").write_text(
+        json.dumps(
+            [
+                {
+                    "market_id": "m-nyc",
+                    "city": "NYC",
+                    "target_local_date": "2026-04-05",
+                    "decision_horizon": "morning_of",
+                    "outcome_label": "68-69°F",
+                    "reason": "fee_killed_edge",
+                    "best_ask": 0.999,
+                    "after_cost_edge": -0.0989,
+                }
+            ]
+        )
+    )
+    sensitivity_summary_path.write_text(
+        json.dumps(
+            {
+                "combinations": [
+                    {"fills": 0, "raw_gap_non_positive": 4},
+                    {"fills": 0, "raw_gap_non_positive": 6},
+                ]
+            }
+        )
+    )
+
+    output = tmp_path / "execution_watchlist_playbook.json"
+    markdown_output = tmp_path / "execution_watchlist_playbook.md"
+    execution_watchlist_playbook(
+        champion_bottleneck_path=champion_bottleneck_path,
+        challenger_bottleneck_path=challenger_bottleneck_path,
+        fee_watchlist_summary_path=fee_summary_path,
+        policy_watchlist_summary_path=policy_summary_path,
+        sensitivity_summary_path=sensitivity_summary_path,
+        output=output,
+        markdown_output=markdown_output,
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["headline"]["fee_watchlist_model"] == "mega_neighbor_oof"
+    assert payload["playbook"][0]["cities"] == ["Taipei", "Chongqing"]
+    thresholds = sorted(row["watch_rule_threshold_ask"] for row in payload["playbook"][0]["evidence"])
+    assert thresholds == pytest.approx([0.9001, 0.901])
+    assert "Tier A" in markdown_output.read_text()
+
+
 def test_station_cycle_command_writes_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "pmtmax.cli.main._run_station_cycle",
-        lambda **kwargs: {
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_station_cycle(**kwargs):
+        calls.append(kwargs)
+        return {
             "generated_at": "2026-04-05T00:00:00+00:00",
             "revenue_gate_decision": "GO",
             "queue_size": 2,
             "observation_tradable_count": 1,
             "opportunity_tradable_count": 1,
             "open_phase_count": 3,
-            "dashboard_json_output": str(tmp_path / "station_dashboard.json"),
-            "dashboard_html_output": str(tmp_path / "station_dashboard.html"),
-        },
+            "dashboard_json_output": str(kwargs["dashboard_json_output"]),
+            "dashboard_html_output": str(kwargs["dashboard_html_output"]),
+        }
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._run_station_cycle",
+        _fake_run_station_cycle,
     )
 
     state_path = tmp_path / "station_cycle_state.json"
+    benchmark_summary_path = tmp_path / "benchmark_summary.json"
+    benchmark_summary_path.write_text(json.dumps({"decision": "GO"}))
+    dashboard_json_output = tmp_path / "station_dashboard_custom.json"
+    dashboard_html_output = tmp_path / "station_dashboard_custom.html"
+    dashboard_state_path = tmp_path / "station_dashboard_custom_state.json"
     station_cycle(
-        dashboard_json_output=tmp_path / "station_dashboard.json",
-        dashboard_html_output=tmp_path / "station_dashboard.html",
-        dashboard_state_path=tmp_path / "station_dashboard_state.json",
+        benchmark_summary_path=benchmark_summary_path,
+        dashboard_json_output=dashboard_json_output,
+        dashboard_html_output=dashboard_html_output,
+        dashboard_state_path=dashboard_state_path,
         state_path=state_path,
     )
 
+    assert len(calls) == 1
+    assert calls[0]["benchmark_summary_path"] == benchmark_summary_path
+    assert calls[0]["dashboard_json_output"] == dashboard_json_output
+    assert calls[0]["dashboard_html_output"] == dashboard_html_output
+    assert calls[0]["dashboard_state_path"] == dashboard_state_path
     payload = json.loads(state_path.read_text())
     assert payload["revenue_gate_decision"] == "GO"
     assert payload["queue_size"] == 2
@@ -1422,23 +1840,33 @@ def test_station_daemon_runs_single_cycle_and_writes_state(tmp_path: Path, monke
             "observation_tradable_count": 0,
             "opportunity_tradable_count": 0,
             "open_phase_count": 0,
-            "dashboard_json_output": str(tmp_path / "station_dashboard.json"),
-            "dashboard_html_output": str(tmp_path / "station_dashboard.html"),
+            "dashboard_json_output": str(kwargs["dashboard_json_output"]),
+            "dashboard_html_output": str(kwargs["dashboard_html_output"]),
         }
 
     monkeypatch.setattr("pmtmax.cli.main._run_station_cycle", _fake_run_station_cycle)
 
     state_path = tmp_path / "station_cycle_state.json"
+    benchmark_summary_path = tmp_path / "benchmark_summary.json"
+    benchmark_summary_path.write_text(json.dumps({"decision": "GO"}))
+    dashboard_json_output = tmp_path / "station_dashboard_custom.json"
+    dashboard_html_output = tmp_path / "station_dashboard_custom.html"
+    dashboard_state_path = tmp_path / "station_dashboard_custom_state.json"
     station_daemon(
+        benchmark_summary_path=benchmark_summary_path,
         max_cycles=1,
         interval=1,
-        dashboard_json_output=tmp_path / "station_dashboard.json",
-        dashboard_html_output=tmp_path / "station_dashboard.html",
-        dashboard_state_path=tmp_path / "station_dashboard_state.json",
+        dashboard_json_output=dashboard_json_output,
+        dashboard_html_output=dashboard_html_output,
+        dashboard_state_path=dashboard_state_path,
         state_path=state_path,
     )
 
     assert len(calls) == 1
+    assert calls[0]["benchmark_summary_path"] == benchmark_summary_path
+    assert calls[0]["dashboard_json_output"] == dashboard_json_output
+    assert calls[0]["dashboard_html_output"] == dashboard_html_output
+    assert calls[0]["dashboard_state_path"] == dashboard_state_path
     payload = json.loads(state_path.read_text())
     assert payload["cycle"] == 1
     assert payload["revenue_gate_decision"] == "INCONCLUSIVE"
@@ -1509,9 +1937,13 @@ def test_live_mm_uses_inventory_mapping_for_quoter(
         ]
 
     monkeypatch.chdir(tmp_path)
+    class _FakeHttp:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(
         "pmtmax.cli.main._runtime",
-        lambda include_stores=False: (config, EnvSettings(), object(), None, None, object()),
+        lambda include_stores=False: (config, EnvSettings(), _FakeHttp(), None, None, object()),
     )
     monkeypatch.setattr("pmtmax.cli.main.ClobReadClient", lambda http, base_url: object())
     monkeypatch.setattr("pmtmax.cli.main.DatasetBuilder", _FakeBuilder)

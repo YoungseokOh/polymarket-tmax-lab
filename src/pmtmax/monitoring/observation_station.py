@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import signal
 import time
-from collections.abc import Callable
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +32,20 @@ def summarize_observation_history(history_path: Path) -> dict[str, Any]:
                 line = line.strip()
                 if line:
                     rows.append(ObservationOpportunity.model_validate_json(line))
+
+    def _nested_reason_counts(
+        items: list[ObservationOpportunity],
+        *,
+        key_fn: Callable[[ObservationOpportunity], str],
+    ) -> dict[str, dict[str, int]]:
+        nested: dict[str, Counter[str]] = {}
+        for item in items:
+            key = key_fn(item)
+            nested.setdefault(key, Counter())[item.reason] += 1
+        return {
+            group: dict(sorted(counter.items()))
+            for group, counter in sorted(nested.items())
+        }
 
     def _summary(items: list[ObservationOpportunity]) -> dict[str, Any]:
         reason_counts = Counter(item.reason for item in items)
@@ -88,11 +102,12 @@ def summarize_observation_history(history_path: Path) -> dict[str, Any]:
         limit: int,
         metric: str,
         metric_key: Callable[[ObservationOpportunity], float | None],
+        reasons: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         ranked = [
             item
             for item in items
-            if metric_key(item) is not None
+            if metric_key(item) is not None and (reasons is None or item.reason in reasons)
         ]
         ranked.sort(
             key=lambda item: (
@@ -131,6 +146,9 @@ def summarize_observation_history(history_path: Path) -> dict[str, Any]:
         "by_truth_track": _group_summary(rows, lambda item: item.truth_track or "unknown"),
         "by_source_family": _group_summary(rows, lambda item: item.source_family or "unknown"),
         "by_observation_source": _group_summary(rows, lambda item: item.observation_source or "unknown"),
+        "by_reason": _group_summary(rows, lambda item: item.reason),
+        "by_city_reason": _nested_reason_counts(rows, key_fn=lambda item: item.city),
+        "by_horizon_reason": _nested_reason_counts(rows, key_fn=lambda item: item.decision_horizon),
         "top_after_cost_edges": _top_candidates(
             rows,
             limit=5,
@@ -142,6 +160,41 @@ def summarize_observation_history(history_path: Path) -> dict[str, Any]:
             limit=5,
             metric="price_vs_observation_gap",
             metric_key=lambda item: item.price_vs_observation_gap,
+        ),
+        "top_near_miss_markets": _top_candidates(
+            rows,
+            limit=10,
+            metric="after_cost_edge",
+            metric_key=lambda item: item.after_cost_edge,
+            reasons={
+                "fee_killed_edge",
+                "slippage_killed_edge",
+                "after_cost_positive_but_spread_too_wide",
+                "after_cost_positive_but_liquidity_too_low",
+                "after_cost_positive_but_below_threshold",
+                "insufficient_depth",
+            },
+        ),
+        "top_fee_killed_markets": _top_candidates(
+            rows,
+            limit=10,
+            metric="price_vs_observation_gap",
+            metric_key=lambda item: item.price_vs_observation_gap,
+            reasons={"fee_killed_edge"},
+        ),
+        "top_spread_blocked_markets": _top_candidates(
+            rows,
+            limit=10,
+            metric="spread",
+            metric_key=lambda item: item.spread,
+            reasons={"after_cost_positive_but_spread_too_wide", "slippage_killed_edge", "insufficient_depth"},
+        ),
+        "top_policy_filtered_markets": _top_candidates(
+            rows,
+            limit=10,
+            metric="price_vs_observation_gap",
+            metric_key=lambda item: item.price_vs_observation_gap if item.price_vs_observation_gap is not None else 0.0,
+            reasons={"policy_filtered"},
         ),
     }
     gate = classify_path_viability(summary)

@@ -101,3 +101,28 @@ def test_build_revenue_gate_report_accepts_observation_shadow_as_live_confirmati
     assert report["decision"] == "GO"
     assert report["observation_shadow_gate"]["decision"] == "GO"
     assert report["observation_source_breakdown"]["official_intraday"]["markets_evaluated"] == 3
+
+
+def test_build_revenue_gate_report_accepts_published_trading_champion_summary_shape() -> None:
+    report = build_revenue_gate_report(
+        benchmark_summary={
+            "trading_champion_published": True,
+            "trading_champion_model_name": "lgbm_emos",
+        },
+        opportunity_summary={
+            "cycles": 3,
+            "markets_evaluated": 5,
+            "raw_gap_positive_count": 2,
+            "after_cost_edge_positive_count": 2,
+        },
+        open_phase_summary={
+            "cycles": 3,
+            "markets_evaluated": 5,
+            "raw_gap_positive_count": 0,
+            "after_cost_edge_positive_count": 0,
+        },
+    )
+
+    assert report["benchmark_gate"]["decision"] == "GO"
+    assert report["benchmark_gate"]["decision_reason"] == "published_trading_champion_alias"
+    assert report["decision"] == "GO"

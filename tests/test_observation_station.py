@@ -189,7 +189,57 @@ def test_summarize_observation_history_counts_tiers_and_price_mass(tmp_path: Pat
     assert summary["best_impossible_price_mass"] == 0.21
     assert summary["by_candidate_tier"]["research_public_live"]["manual_review_count"] == 1
     assert summary["by_horizon"]["market_open"]["manual_review_count"] == 1
+    assert summary["by_reason"]["tradable"]["tradable_count"] == 1
+    assert summary["by_city_reason"]["London"]["after_cost_positive_but_spread_too_wide"] == 1
+    assert summary["by_horizon_reason"]["market_open"]["after_cost_positive_but_spread_too_wide"] == 1
     assert summary["by_source_family"]["official_intraday"]["after_cost_edge_positive_count"] == 1
     assert summary["by_observation_source"]["aviationweather_metar"]["manual_review_count"] == 1
     assert summary["top_after_cost_edges"][0]["observation_source"] == "cwa_codis_report_month"
     assert summary["gate_decision"] == "GO"
+
+
+def test_summarize_observation_history_exposes_blocker_top_lists(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.jsonl"
+    rows = [
+        ObservationOpportunity(
+            observed_at=datetime(2026, 3, 23, 3, 0, tzinfo=UTC),
+            market_id="m1",
+            city="Seoul",
+            question="q1",
+            target_local_date=datetime(2026, 3, 23, tzinfo=UTC).date(),
+            decision_horizon="morning_of",
+            reason="fee_killed_edge",
+            queue_state="blocked",
+            source_family="official_intraday",
+            observation_source="air_calp",
+            truth_track="research_public",
+            candidate_tier="research_public_live",
+            price_vs_observation_gap=0.11,
+            spread=0.03,
+            raw_gap=0.02,
+            after_cost_edge=-0.002,
+        ),
+        ObservationOpportunity(
+            observed_at=datetime(2026, 3, 23, 3, 1, tzinfo=UTC),
+            market_id="m2",
+            city="Hong Kong",
+            question="q2",
+            target_local_date=datetime(2026, 3, 23, tzinfo=UTC).date(),
+            decision_horizon="market_open",
+            reason="policy_filtered",
+            queue_state="blocked",
+            source_family="official_intraday",
+            observation_source="hko_text_readings",
+            truth_track="exact_public",
+            candidate_tier="exact_public_live",
+        ),
+    ]
+    with history_path.open("a") as handle:
+        for row in rows:
+            handle.write(row.model_dump_json() + "\n")
+
+    summary = summarize_observation_history(history_path)
+
+    assert summary["top_near_miss_markets"][0]["market_id"] == "m1"
+    assert summary["top_fee_killed_markets"][0]["city"] == "Seoul"
+    assert summary["top_policy_filtered_markets"][0]["market_id"] == "m2"

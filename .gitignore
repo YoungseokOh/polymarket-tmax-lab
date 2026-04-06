@@ -22,3 +22,7 @@ artifacts/
 .ipynb_checkpoints/
 logs/
 results.tsv
+
+# Large snapshot files (exceed GitHub 100MB limit)
+configs/market_inventory/historical_temperature_snapshots.json
+configs/market_inventory/synthetic_historical_snapshots.json

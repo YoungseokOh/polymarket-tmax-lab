@@ -16,12 +16,14 @@ export PATH="/home/seok436/.local/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# Ensure log directory exists (cron will abort if missing)
-mkdir -p logs artifacts/signals/v2
-
 MODEL="trading_champion"
 SCAN_EDGE_OUTPUT="artifacts/signals/v2/scan_edge_latest.json"
 SCAN_EDGE_HISTORY="artifacts/signals/v2/scan_edge_history.jsonl"
+PAPER_SIGNALS_DIR="artifacts/signals/v2/paper_snapshots"
+PAPER_SIGNALS_LATEST="artifacts/signals/v2/paper_signals_latest.json"
+
+# Ensure log directory exists (cron will abort if missing)
+mkdir -p logs artifacts/signals/v2 "${PAPER_SIGNALS_DIR}"
 LOG_PREFIX="[daily_experiment $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
 
 echo "${LOG_PREFIX} starting"
@@ -69,7 +71,19 @@ print(f'Appended {len(signals)} signals to history.')
 "
 fi
 
-# 5. Track outcomes for forward paper trades
+# 5. Run paper-trader (Kelly-sized positions, gamma prices, min 10% market price)
+PAPER_DATE=$(date -u '+%Y-%m-%d')
+PAPER_SNAPSHOT="${PAPER_SIGNALS_DIR}/paper_signals_${PAPER_DATE}.json"
+echo "${LOG_PREFIX} paper-trader (bankroll=100, min-market-price=0.10)..."
+uv run pmtmax paper-trader \
+    --bankroll 100 \
+    --price-source gamma \
+    --min-market-price 0.10 \
+    --output "${PAPER_SNAPSHOT}"
+# Also keep a "latest" pointer
+cp "${PAPER_SNAPSHOT}" "${PAPER_SIGNALS_LATEST}"
+
+# 6. Track outcomes for forward paper trades
 echo "${LOG_PREFIX} tracking paper trade outcomes..."
 uv run python scripts/track_paper_trade_outcomes.py
 

@@ -5,6 +5,10 @@
 - `train-baseline`, `train-advanced`
 - `backtest`
 - `paper-trader`
+- `paper-multimodel-report`
+- `execution-sensitivity-report`
+- `market-bottleneck-report`
+- `execution-watchlist-playbook`
 - `opportunity-report`
 - `opportunity-shadow`
 - `observation-report`
@@ -117,9 +121,34 @@ scripts/run_opportunity_shadow_watch.sh --max-cycles 1
 `opportunity-shadow` default to `--horizon policy`. The policy lives in
 `configs/recent-core-horizon-policy.yaml` and filtered rows are emitted as
 `reason=policy_filtered`.
+paper-only sweeps can override that with
+`--horizon-policy-path configs/paper-all-supported-horizon-policy.yaml`.
+The paper-only sweep grid lives in `configs/paper-exploration.yaml`.
 수익화 전용 루프에서는 `--core-recent-only`와 `--model-name trading_champion` 조합을 기본으로 쓴다.
 recent-core 바깥의 fresh listing 탐색은 `--market-scope supported_wu_open_phase`
 또는 전용 wrapper인 `hope-hunt-report` / `hope-hunt-daemon`을 쓴다.
+
+zero-fill 진단은 다음 셋으로 돌린다.
+
+```bash
+uv run pmtmax paper-multimodel-report --markets-path artifacts/discovered_markets.json
+uv run pmtmax execution-sensitivity-report --markets-path artifacts/discovered_markets.json
+uv run pmtmax market-bottleneck-report \
+    --input-path artifacts/signals/v2/paper_signals.json \
+    --opportunity-summary-path artifacts/signals/v2/opportunity_shadow_summary.json \
+    --observation-summary-path artifacts/signals/v2/observation_shadow_summary.json
+uv run pmtmax execution-watchlist-playbook \
+    --champion-bottleneck-path artifacts/signals/v2/market_bottleneck_report__champion_alias.json \
+    --challenger-bottleneck-path artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
+    --fee-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
+    --policy-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
+    --sensitivity-summary-path artifacts/signals/v2/execution_sensitivity/<run_tag>/summary.json
+```
+
+- `paper-multimodel-report`는 챔피언과 현재 top challenger pool을 같은 snapshot/books에서 비교한다
+- `execution-sensitivity-report`는 paper-only threshold/policy sweep으로 fills가 생기는 조합을 찾는다
+- `market-bottleneck-report`는 row-level 결과를 `fee_sensitive_watchlist`, `raw_edge_desert_watchlist`, `policy_blocked_watchlist`로 요약한다
+- `execution-watchlist-playbook`는 위 진단 산출물을 `execution_watchlist_playbook.json/.md`로 묶고 Tier A fee-sensitive watch rule을 계산한다
 
 관측 기반 weather-station 루프는 다음 command를 쓴다.
 
@@ -137,11 +166,14 @@ uv run pmtmax station-daemon --model-name trading_champion
 - `observation-report` / `observation-shadow`는 target-day market에서 strongest lower-bound를 골라 이미 불가능해진 하단 outcome을 0으로 만들고 queue를 `tradable`, `manual_review`, `blocked`로 분리한다
 - source priority는 `exact_public intraday -> documented research intraday -> METAR fallback`이다. 현재 내장 exact/research intraday는 Hong Kong/HKO, Taipei/CWA, Seoul/AIR_CALP다
 - output은 `artifacts/signals/v2/observation_shadow_latest.json`, `observation_alerts_latest.json`, `live_pilot_queue.json`에 기록된다
-- `observation_shadow_summary.json`에는 `by_source_family`, `by_observation_source`, `top_after_cost_edges`, `top_price_vs_observation_gaps`가 들어가므로 어떤 소스 계층이 실제 edge를 만드는지 바로 비교할 수 있다
+- `opportunity_shadow_summary.json`과 `observation_shadow_summary.json`에는 `by_reason`, `by_city_reason`, `by_horizon_reason`, `top_near_miss_markets`, `top_fee_killed_markets`, `top_spread_blocked_markets`, `top_policy_filtered_markets`가 함께 들어간다
+- `observation_shadow_summary.json`에는 추가로 `by_source_family`, `by_observation_source`, `top_after_cost_edges`, `top_price_vs_observation_gaps`가 들어가므로 어떤 소스 계층이 실제 edge를 만드는지 바로 비교할 수 있다
 - `approve-live-candidate`는 queue token을 다시 검증하고 preview/post 전에 candidate가 여전히 살아 있는지 fail-closed로 확인한다
-- `station-dashboard`는 opportunity / observation / open-phase / revenue-gate 아티팩트를 한 화면용 JSON/HTML로 합쳐서 Discovery / Observation / Execution 패널을 만든다
+- `station-dashboard`는 opportunity / observation / open-phase / revenue-gate 아티팩트와 `execution_watchlist_playbook.json`을 한 화면용 JSON/HTML로 합쳐서 Discovery / Observation / Execution / Watchlist 패널을 만든다
+- dashboard의 watchlist alert는 Tier A rule과 현재 `best_ask`를 비교해서만 올리며, live spread/edge guardrail을 자동으로 바꾸지 않는다
 - `station-cycle`은 opportunity-report, opportunity-shadow, observation-report, open-phase-shadow, revenue-gate-report, station-dashboard를 순서대로 갱신하는 one-shot orchestrator다
 - `station-daemon`은 같은 전체 cycle을 interval 기반으로 반복한다
+- `revenue-gate-report`와 `station-cycle`의 기본 benchmark 입력은 `artifacts/benchmarks/v2/benchmark_summary.json`이다. recent-core 전용 richer summary가 있으면 `--benchmark-summary-path`로 덮어쓴다
 
 ## Real Historical Workflow
 ```bash
@@ -180,6 +212,7 @@ uv run python scripts/build_active_weather_watchlist.py
 - shadow validation outputs: `artifacts/signals/v2/opportunity_shadow.jsonl`, `artifacts/signals/v2/opportunity_shadow_latest.json`, `artifacts/signals/v2/opportunity_shadow_summary.json`
 - observation-station outputs: `artifacts/signals/v2/observation_shadow.jsonl`, `artifacts/signals/v2/observation_shadow_latest.json`, `artifacts/signals/v2/observation_shadow_summary.json`, `artifacts/signals/v2/observation_alerts_latest.json`, `artifacts/signals/v2/live_pilot_queue.json`
 - station dashboard outputs: `artifacts/signals/v2/station_dashboard.json`, `artifacts/signals/v2/station_dashboard.html`, `artifacts/signals/v2/station_dashboard_state.json`
+- execution watchlist playbook: `artifacts/signals/v2/execution_watchlist_playbook.json`, `artifacts/signals/v2/execution_watchlist_playbook.md`
 - station orchestrator state: `artifacts/signals/v2/station_cycle_state.json`
 - open-phase validation outputs: `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`, `artifacts/signals/v2/open_phase_shadow_summary.json`
 - hope-hunt outputs: `artifacts/signals/v2/hope_hunt_history.jsonl`, `artifacts/signals/v2/hope_hunt_latest.json`, `artifacts/signals/v2/hope_hunt_summary.json`

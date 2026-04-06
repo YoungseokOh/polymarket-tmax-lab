@@ -24,9 +24,13 @@ Use this skill for the research and trading simulation loop.
 - Model training: `train-advanced --model-name lgbm_emos --variant <variant>`.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
 - observation weather-station loop: `observation-report`, `observation-shadow`, `observation-daemon`, `approve-live-candidate`.
+- zero-fill paper diagnostics: `paper-multimodel-report`, `execution-sensitivity-report`, `market-bottleneck-report`.
+- zero-fill playbook promotion: `execution-watchlist-playbook`.
 - observation source priority: `exact_public intraday -> documented research intraday -> METAR fallback`, target-day only.
 - station dashboard loop: `station-dashboard`, `station-dashboard-daemon`.
+- station dashboard consumes `artifacts/signals/v2/execution_watchlist_playbook.json` when present and raises Tier A ask-threshold alerts without changing live guardrails.
 - station orchestrator loop: `station-cycle`, `station-daemon`.
+- revenue gate / station cycle default benchmark input: `artifacts/benchmarks/v2/benchmark_summary.json`
 - Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
 - Previous fast variants (ultra_high_neighbor_fast 등) had σ=0.5 collapse — scale clip floor raised to 2.0.
 - Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
@@ -41,3 +45,6 @@ Use this skill for the research and trading simulation loop.
 - cron log: `logs/daily_experiment.log`
 - 2-hour cron wrapper: `scripts/run_price_check.sh`
 - 2-hour price check log: `logs/price_check.log`
+- paper exploration preset: `configs/paper-exploration.yaml`
+- paper all-supported horizon policy: `configs/paper-all-supported-horizon-policy.yaml`
+- execution watchlist playbook: `artifacts/signals/v2/execution_watchlist_playbook.json`

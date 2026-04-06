@@ -102,6 +102,32 @@ Markets outside the recommended horizon set are reported explicitly as
 `policy_filtered`. Add `--core-recent-only` when you want the revenue workflow
 to stay on `Seoul / NYC / London`.
 
+Paper-only diagnostics can override that policy without touching the live path:
+
+```bash
+uv run pmtmax paper-trader \
+    --model-name trading_champion \
+    --market-scope default \
+    --horizon-policy-path configs/paper-all-supported-horizon-policy.yaml
+uv run pmtmax paper-multimodel-report --markets-path artifacts/discovered_markets.json
+uv run pmtmax execution-sensitivity-report --markets-path artifacts/discovered_markets.json
+uv run pmtmax market-bottleneck-report \
+    --input-path artifacts/signals/v2/paper_signals.json \
+    --opportunity-summary-path artifacts/signals/v2/opportunity_shadow_summary.json \
+    --observation-summary-path artifacts/signals/v2/observation_shadow_summary.json
+uv run pmtmax execution-watchlist-playbook \
+    --champion-bottleneck-path artifacts/signals/v2/market_bottleneck_report__champion_alias.json \
+    --challenger-bottleneck-path artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
+    --fee-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
+    --policy-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
+    --sensitivity-summary-path artifacts/signals/v2/execution_sensitivity/<run_tag>/summary.json
+```
+
+- `paper-multimodel-report` compares the active champion against the current top challenger pool and writes per-model JSON, `summary.json`, and `leaderboard.csv` under `artifacts/signals/v2/paper_multimodel/`
+- `execution-sensitivity-report` sweeps paper-only `min_edge / max_spread_bps / min_liquidity / market_scope / horizon_policy` combinations from `configs/paper-exploration.yaml`
+- `market-bottleneck-report` rolls one row-oriented report up into `fee_sensitive_watchlist`, `raw_edge_desert_watchlist`, and `policy_blocked_watchlist`
+- `execution-watchlist-playbook` converts those reports into `artifacts/signals/v2/execution_watchlist_playbook.json` plus a Markdown playbook and computes Tier A ask-threshold rules for the dashboard
+
 7. Audit active markets for executable opportunities with explicit book status:
 
 ```bash
@@ -109,7 +135,11 @@ uv run pmtmax opportunity-report --core-recent-only --model-name trading_champio
 ```
 
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
-use the same policy-aware horizon selection where applicable.
+use the same policy-aware horizon selection where applicable. `opportunity-report`,
+`opportunity-shadow`, `observation-report`, and `observation-shadow` now also
+accept `--horizon-policy-path` so paper-only diagnostics can compare the checked-in
+recent-core policy against `configs/paper-all-supported-horizon-policy.yaml`
+without changing the live defaults.
 
 If you want to run the observation-driven watcher that zeros out already-impossible
 lower bins using the strongest target-day lower bound, run:
@@ -131,12 +161,17 @@ The live source stack is layered and fail-closed:
 - research-public same-airport intraday where documented (`AMO AIR_CALP` for Seoul / RKSI)
 - `METAR` fallback after those source-specific paths
 `observation_shadow_summary.json` now includes `by_source_family`,
-`by_observation_source`, `top_after_cost_edges`, and `top_price_vs_observation_gaps`
-so you can see which source layer is actually generating after-cost candidates.
+`by_observation_source`, `top_after_cost_edges`, `top_price_vs_observation_gaps`,
+`by_reason`, `by_city_reason`, `by_horizon_reason`, and blocker top lists so you
+can see which source layer is actually generating after-cost candidates and which
+markets are dying on fee/spread/policy.
 `station-dashboard` reads the latest opportunity / observation / open-phase / revenue-gate
-artifacts and writes `artifacts/signals/v2/station_dashboard.json` plus
+artifacts plus `execution_watchlist_playbook.json` and writes `artifacts/signals/v2/station_dashboard.json` plus
 `artifacts/signals/v2/station_dashboard.html`. `station-dashboard-daemon` keeps the
 same outputs refreshed on one host for the Discovery / Observation / Execution view.
+When Tier A fee-sensitive rows revisit the same `market_id / outcome_label / horizon`
+with `best_ask <= watch_rule_threshold_ask`, the dashboard raises a watchlist alert
+instead of changing any live-trading guardrail.
 `station-cycle` is the one-shot orchestrator that refreshes opportunity, observation,
 open-phase, revenue-gate, and dashboard outputs in sequence. `station-daemon` repeats
 that full cycle on an interval.
@@ -181,7 +216,9 @@ uv run pmtmax revenue-gate-report
 
 The revenue gate now also reads `observation_shadow_summary.json` when present, so
 benchmark `GO` can be confirmed by the near-term opportunity path, the open-phase
-path, or the observation-station path.
+path, or the observation-station path. The default benchmark input is the checked-in
+`artifacts/benchmarks/v2/benchmark_summary.json`; if you have a richer recent-core
+benchmark summary, pass it explicitly with `--benchmark-summary-path`.
 
 To run the all-supported small live pilot preset with explicit manual approval,
 point `PMTMAX_CONFIG` at the checked-in preset and approve one queued candidate:

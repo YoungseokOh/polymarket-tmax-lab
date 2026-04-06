@@ -15,12 +15,14 @@ def test_build_station_dashboard_groups_panels_and_breakdowns() -> None:
     dashboard = build_station_dashboard(
         opportunity_rows=[
             {
+                "market_id": "m-seoul-1",
                 "city": "Seoul",
                 "target_local_date": "2026-04-05",
                 "decision_horizon": "morning_of",
                 "outcome_label": "11°C",
                 "edge": 0.023,
                 "reason": "tradable",
+                "best_ask": 0.89,
             }
         ],
         observation_rows=[
@@ -102,13 +104,35 @@ def test_build_station_dashboard_groups_panels_and_breakdowns() -> None:
             ],
         },
         open_phase_summary={"gate_decision": "INCONCLUSIVE", "gate_reason": "single_cycle_only"},
+        watchlist_playbook={
+            "playbook": [
+                {
+                    "tier": "A",
+                    "name": "fee_sensitive_watchlist",
+                    "cities": ["Seoul"],
+                    "evidence": [
+                        {
+                            "city": "Seoul",
+                            "market_id": "m-seoul-1",
+                            "target_local_date": "2026-04-05",
+                            "decision_horizon": "morning_of",
+                            "outcome_label": "11°C",
+                            "watch_rule_threshold_ask": 0.901,
+                        }
+                    ],
+                }
+            ],
+            "next_actions": ["Keep fee-sensitive cities on the dashboard."],
+        },
     )
 
     assert dashboard["overview"]["revenue_gate_decision"] == "GO"
     assert dashboard["overview"]["queue_size"] == 1
+    assert dashboard["overview"]["watchlist_alert_count"] == 1
     assert dashboard["discovery_panel"]["top_markets"][0]["city"] == "London"
     assert dashboard["observation_panel"]["source_family_breakdown"][0]["name"] == "official_intraday"
     assert dashboard["execution_panel"]["queue_preview"][0]["observation_source"] == "cwa_codis_report_month"
+    assert dashboard["watchlist_panel"]["triggered_alerts"][0]["city"] == "Seoul"
 
 
 def test_station_dashboard_runner_writes_json_html_and_state(tmp_path: Path) -> None:
@@ -127,6 +151,7 @@ def test_station_dashboard_runner_writes_json_html_and_state(tmp_path: Path) -> 
             "revenue_gate_summary": {"decision": "INCONCLUSIVE", "decision_reason": "missing_summary"},
             "observation_summary": None,
             "open_phase_summary": None,
+            "watchlist_playbook": None,
         },
     )
 
@@ -139,6 +164,7 @@ def test_station_dashboard_runner_writes_json_html_and_state(tmp_path: Path) -> 
     assert (tmp_path / "state.json").exists()
     payload = json.loads((tmp_path / "dashboard.json").read_text())
     assert payload["overview"]["queue_size"] == 0
+    assert payload["overview"]["watchlist_alert_count"] == 0
     html_output = (tmp_path / "dashboard.html").read_text()
     assert "PMTMAX Station Dashboard" in html_output
     assert "Discovery" in html_output
@@ -152,8 +178,10 @@ def test_render_station_dashboard_html_contains_panel_tables() -> None:
             "discovery_panel": {"gate_decision": "INCONCLUSIVE", "gate_reason": "x", "open_phase_count": 1, "top_markets": []},
             "observation_panel": {"gate_decision": "GO", "gate_reason": "x", "queue_counts": {"tradable": 1}, "source_family_breakdown": [], "observation_source_breakdown": [], "top_candidates": [], "top_after_cost_edges": [], "top_price_vs_observation_gaps": []},
             "execution_panel": {"required_model_alias": "trading_champion", "eligible_for_live_pilot": False, "queue_preview": [], "top_opportunities": [], "observation_source_breakdown": []},
+            "watchlist_panel": {"tier_a_cities": ["Taipei"], "tier_b_cities": [], "triggered_alert_count": 1, "triggered_alerts": [], "top_rules": []},
         }
     )
 
     assert "Observation Source Families" in html_output
     assert "Execution Opportunities" in html_output
+    assert "Watchlist Alerts" in html_output

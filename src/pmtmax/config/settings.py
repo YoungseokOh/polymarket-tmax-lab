@@ -129,6 +129,7 @@ class StationDashboardConfig(BaseModel):
     open_phase_latest_path: Path = Path("artifacts/signals/v2/open_phase_shadow_latest.json")
     open_phase_summary_path: Path = Path("artifacts/signals/v2/open_phase_shadow_summary.json")
     revenue_gate_summary_path: Path = Path("artifacts/signals/v2/revenue_gate_summary.json")
+    watchlist_playbook_path: Path = Path("artifacts/signals/v2/execution_watchlist_playbook.json")
     json_output_path: Path = Path("artifacts/signals/v2/station_dashboard.json")
     html_output_path: Path = Path("artifacts/signals/v2/station_dashboard.html")
     state_path: Path = Path("artifacts/signals/v2/station_dashboard_state.json")

@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+from collections import Counter
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -145,6 +147,13 @@ from pmtmax.weather.truth_sources.base import celsius_to_fahrenheit
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
 DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
+DEFAULT_PAPER_ALL_SUPPORTED_HORIZON_POLICY_PATH = Path("configs/paper-all-supported-horizon-policy.yaml")
+DEFAULT_PAPER_EXPLORATION_CONFIG_PATH = Path("configs/paper-exploration.yaml")
+DEFAULT_PAPER_MULTIMODEL_ROOT = Path("artifacts/signals/v2/paper_multimodel")
+DEFAULT_EXECUTION_SENSITIVITY_ROOT = Path("artifacts/signals/v2/execution_sensitivity")
+DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_PATH = Path("artifacts/signals/v2/execution_watchlist_playbook.json")
+DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_MD_PATH = Path("artifacts/signals/v2/execution_watchlist_playbook.md")
+DEFAULT_BENCHMARK_SUMMARY_PATH = Path("artifacts/benchmarks/v2/benchmark_summary.json")
 DEFAULT_MODEL_NAME = "champion"
 TRADING_MODEL_ALIAS = "trading_champion"
 PUBLIC_MODEL_ALIASES = {DEFAULT_MODEL_NAME, TRADING_MODEL_ALIAS}
@@ -503,6 +512,17 @@ def _load_recent_horizon_policy(path: Path = DEFAULT_RECENT_HORIZON_POLICY_PATH)
     return result
 
 
+def _load_paper_exploration_preset(
+    path: Path = DEFAULT_PAPER_EXPLORATION_CONFIG_PATH,
+) -> dict[str, object]:
+    """Load one paper-only sensitivity sweep preset from YAML."""
+
+    if not path.exists():
+        return {}
+    payload = load_yaml_with_extends(path.resolve())
+    return payload if isinstance(payload, dict) else {}
+
+
 def _resolve_recent_core_cities(
     cities: list[str] | None,
     *,
@@ -758,28 +778,75 @@ def _load_snapshots(
 ) -> list[MarketSnapshot]:
     config, _, http, _, _, _ = _runtime(include_stores=False)
     try:
-        if markets_path is not None:
-            if not markets_path.exists():
-                msg = f"Market snapshot file does not exist: {markets_path}"
-                raise FileNotFoundError(msg)
-            return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
-
-        if active is not None or closed is not None:
-            gamma = GammaClient(http, config.polymarket.gamma_base_url)
-            refs = discover_temperature_event_refs_from_gamma(
-                gamma,
-                supported_cities=cities or config.app.supported_cities,
-                active=active,
-                closed=closed,
-                max_pages=config.polymarket.max_pages,
-            )
-            fetches = fetch_temperature_event_pages(http, refs, use_cache=False)
-            snapshots = snapshots_from_temperature_event_fetches(fetches)
-            return _filter_snapshots_by_city(snapshots, cities)
-
-        return bundled_market_snapshots(cities)
+        return _load_snapshots_with_runtime(
+            config=config,
+            http=http,
+            markets_path=markets_path,
+            cities=cities,
+            active=active,
+            closed=closed,
+        )
     finally:
         http.close()
+
+
+def _load_snapshots_with_runtime(
+    *,
+    config: Any,
+    http: CachedHttpClient,
+    markets_path: Path | None,
+    cities: list[str] | None = None,
+    active: bool | None = None,
+    closed: bool | None = None,
+) -> list[MarketSnapshot]:
+    """Load snapshots using an already-open runtime instead of creating a new one."""
+
+    if markets_path is not None:
+        if not markets_path.exists():
+            msg = f"Market snapshot file does not exist: {markets_path}"
+            raise FileNotFoundError(msg)
+        return _filter_snapshots_by_city(load_market_snapshots(markets_path), cities)
+
+    if active is not None or closed is not None:
+        gamma = GammaClient(http, config.polymarket.gamma_base_url)
+        refs = discover_temperature_event_refs_from_gamma(
+            gamma,
+            supported_cities=cities or config.app.supported_cities,
+            active=active,
+            closed=closed,
+            max_pages=config.polymarket.max_pages,
+        )
+        fetches = fetch_temperature_event_pages(http, refs, use_cache=False)
+        snapshots = snapshots_from_temperature_event_fetches(fetches)
+        return _filter_snapshots_by_city(snapshots, cities)
+
+    return bundled_market_snapshots(cities)
+
+
+def _load_scoped_snapshots_with_runtime(
+    *,
+    config: Any,
+    http: CachedHttpClient,
+    markets_path: Path | None,
+    cities: list[str] | None = None,
+    market_scope: str = "default",
+    active: bool | None = None,
+    closed: bool | None = None,
+) -> list[MarketSnapshot]:
+    """Load snapshots with a shared runtime and apply one market-scope preset."""
+
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_snapshots_with_runtime(
+        config=config,
+        http=http,
+        markets_path=markets_path,
+        cities=scoped_cities,
+        active=active,
+        closed=closed,
+    )
+    if market_scope == "default":
+        return snapshots
+    return [snapshot for snapshot in snapshots if _snapshot_matches_market_scope(snapshot, market_scope=market_scope)]
 
 
 def _load_scoped_snapshots(
@@ -792,16 +859,19 @@ def _load_scoped_snapshots(
 ) -> list[MarketSnapshot]:
     """Load snapshots and apply one market-scope preset after parsing."""
 
-    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
-    snapshots = _load_snapshots(
-        markets_path=markets_path,
-        cities=scoped_cities,
-        active=active,
-        closed=closed,
-    )
-    if market_scope == "default":
-        return snapshots
-    return [snapshot for snapshot in snapshots if _snapshot_matches_market_scope(snapshot, market_scope=market_scope)]
+    config, _, http, _, _, _ = _runtime(include_stores=False)
+    try:
+        return _load_scoped_snapshots_with_runtime(
+            config=config,
+            http=http,
+            markets_path=markets_path,
+            cities=cities,
+            market_scope=market_scope,
+            active=active,
+            closed=closed,
+        )
+    finally:
+        http.close()
 
 
 def _bootstrap_snapshots(*, markets_path: Path | None, cities: list[str] | None) -> list[MarketSnapshot]:
@@ -971,7 +1041,7 @@ def _rank_execution_candidates(
     candidates: list[dict[str, object]] = []
     for outcome_label, fair_prob in forecast_probs.items():
         book = books.get(outcome_label)
-        if book is None or book.source != "clob" or not book.asks:
+        if book is None or book.source not in {"clob", "fixture", "gamma"} or not book.asks:
             continue
         best_bid = book.best_bid()
         best_ask = book.best_ask()
@@ -1935,6 +2005,591 @@ def _serialize_opportunity_observation(observation: OpportunityObservation) -> d
     if observation.best_ask is not None:
         row["executable_price"] = round(observation.best_ask, 6)
     return row
+
+
+def _safe_slug(value: str) -> str:
+    """Return a filesystem-safe slug for one diagnostic label."""
+
+    cleaned = [
+        char.lower() if char.isalnum() else "_"
+        for char in value.strip()
+    ]
+    slug = "".join(cleaned).strip("_")
+    return slug or "item"
+
+
+def _infer_model_name_from_artifact(path: Path) -> str:
+    """Best-effort model-name inference for a raw artifact path."""
+
+    stem = path.stem
+    if stem.startswith("gaussian_emos"):
+        return "gaussian_emos"
+    return "lgbm_emos"
+
+
+def _find_autoresearch_model_artifact(candidate_name: str) -> Path | None:
+    """Resolve one autoresearch candidate artifact from the local artifact tree."""
+
+    pattern = f"lgbm_emos__{candidate_name}.pkl"
+    matches = sorted(
+        DEFAULT_AUTORESEARCH_ROOT.glob(f"**/{pattern}"),
+        key=lambda path: (len(path.parts), str(path)),
+    )
+    for path in matches:
+        if "/models/gate/" not in str(path):
+            return path
+    return matches[0] if matches else None
+
+
+def _default_paper_multimodel_specs() -> list[dict[str, object]]:
+    """Return the default champion-vs-top-challenger comparison pool."""
+
+    champion_path, champion_model_name = _resolve_model_path(
+        Path("artifacts/models/v2/champion.pkl"),
+        DEFAULT_MODEL_NAME,
+    )
+    candidate_path = _find_autoresearch_model_artifact("neighbor_oof_half_life20")
+    if candidate_path is None:
+        msg = "Missing default autoresearch artifact: neighbor_oof_half_life20"
+        raise FileNotFoundError(msg)
+
+    specs = [
+        {
+            "label": "champion_alias",
+            "model_path": champion_path,
+            "model_name": champion_model_name,
+        },
+        {
+            "label": "neighbor_oof_half_life20",
+            "model_path": candidate_path,
+            "model_name": "lgbm_emos",
+        },
+        {
+            "label": "high_neighbor_oof",
+            "model_path": Path("artifacts/models/v2/lgbm_emos__high_neighbor_oof.pkl"),
+            "model_name": "lgbm_emos",
+        },
+        {
+            "label": "ultra_high_neighbor_oof",
+            "model_path": Path("artifacts/models/v2/lgbm_emos__ultra_high_neighbor_oof.pkl"),
+            "model_name": "lgbm_emos",
+        },
+        {
+            "label": "mega_neighbor_oof",
+            "model_path": Path("artifacts/models/v2/lgbm_emos__mega_neighbor_oof.pkl"),
+            "model_name": "lgbm_emos",
+        },
+        {
+            "label": "ultra_high_neighbor_fast",
+            "model_path": Path("artifacts/models/v2/lgbm_emos__ultra_high_neighbor_fast.pkl"),
+            "model_name": "lgbm_emos",
+        },
+    ]
+    missing = [str(spec["model_path"]) for spec in specs if not Path(str(spec["model_path"])).exists()]
+    if missing:
+        msg = f"Missing default paper-multimodel artifacts: {', '.join(missing)}"
+        raise FileNotFoundError(msg)
+    return specs
+
+
+def _resolve_paper_multimodel_specs(
+    *,
+    model_labels: list[str] | None,
+    model_paths: list[Path] | None,
+    model_names: list[str] | None,
+) -> list[dict[str, object]]:
+    """Resolve either a custom comparison pool or the built-in default pool."""
+
+    if not model_labels and not model_paths and not model_names:
+        return _default_paper_multimodel_specs()
+    labels = list(model_labels or [])
+    paths = list(model_paths or [])
+    names = list(model_names or [])
+    if not labels or not paths or len(labels) != len(paths):
+        msg = "--model-label and --model-path must be provided together with matching counts."
+        raise typer.BadParameter(msg)
+    if names and len(names) != len(labels):
+        msg = "--model-name count must match --model-label when provided."
+        raise typer.BadParameter(msg)
+    specs: list[dict[str, object]] = []
+    for index, (label, path) in enumerate(zip(labels, paths, strict=True)):
+        specs.append(
+            {
+                "label": label,
+                "model_path": path,
+                "model_name": names[index] if names else _infer_model_name_from_artifact(path),
+            }
+        )
+    return specs
+
+
+def _normalize_report_row(row: dict[str, object]) -> dict[str, object]:
+    """Normalize one paper/opportunity/observation row for generic diagnostics."""
+
+    normalized = dict(row)
+    if normalized.get("after_cost_edge") is None and normalized.get("edge") is not None:
+        normalized["after_cost_edge"] = normalized.get("edge")
+    if normalized.get("visible_liquidity") is None and normalized.get("liquidity") is not None:
+        normalized["visible_liquidity"] = normalized.get("liquidity")
+    return normalized
+
+
+def _row_float(row: dict[str, object], key: str) -> float | None:
+    """Best-effort float extraction for one report row."""
+
+    value = row.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _row_fill_notional(row: dict[str, object]) -> float | None:
+    """Return simulated fill notional when available."""
+
+    fill = row.get("fill")
+    if not isinstance(fill, dict):
+        return None
+    price = fill.get("price")
+    size = fill.get("size")
+    if not isinstance(price, (int, float)) or not isinstance(size, (int, float)):
+        return None
+    return float(price) * float(size)
+
+
+def _top_report_rows(
+    rows: list[dict[str, object]],
+    *,
+    limit: int,
+    reasons: set[str] | None = None,
+    sort_key: str = "after_cost_edge",
+) -> list[dict[str, object]]:
+    """Return the most diagnostic rows for one blocker bucket."""
+
+    filtered = [
+        _normalize_report_row(row)
+        for row in rows
+        if reasons is None or str(row.get("reason")) in reasons
+    ]
+    filtered = [
+        row
+        for row in filtered
+        if row.get("market_id") is not None
+    ]
+    filtered.sort(
+        key=lambda row: (
+            -(_row_float(row, sort_key) or -999.0),
+            -(_row_float(row, "raw_gap") or -999.0),
+            str(row.get("city", "")),
+            str(row.get("market_id", "")),
+        )
+    )
+    top_rows: list[dict[str, object]] = []
+    for row in filtered[:limit]:
+        top_rows.append(
+            {
+                "market_id": row.get("market_id"),
+                "city": row.get("city"),
+                "target_local_date": row.get("target_local_date"),
+                "decision_horizon": row.get("decision_horizon"),
+                "reason": row.get("reason"),
+                "outcome_label": row.get("outcome_label"),
+                "raw_gap": _row_float(row, "raw_gap"),
+                "after_cost_edge": _row_float(row, "after_cost_edge"),
+                "spread": _row_float(row, "spread"),
+                "visible_liquidity": _row_float(row, "visible_liquidity"),
+                "price_vs_observation_gap": _row_float(row, "price_vs_observation_gap"),
+            }
+        )
+    return top_rows
+
+
+def _group_report_rows(
+    rows: list[dict[str, object]],
+    *,
+    key: str,
+) -> dict[str, list[dict[str, object]]]:
+    """Group normalized report rows by one string key."""
+
+    groups: dict[str, list[dict[str, object]]] = {}
+    for raw_row in rows:
+        row = _normalize_report_row(raw_row)
+        group = str(row.get(key) or "unknown")
+        groups.setdefault(group, []).append(row)
+    return groups
+
+
+def _nested_reason_counts(
+    rows: list[dict[str, object]],
+    *,
+    key: str,
+) -> dict[str, dict[str, int]]:
+    """Return per-group reason counts for one result set."""
+
+    nested: dict[str, Counter[str]] = {}
+    for raw_row in rows:
+        row = _normalize_report_row(raw_row)
+        group = str(row.get(key) or "unknown")
+        reason = str(row.get("reason") or "unknown")
+        nested.setdefault(group, Counter())[reason] += 1
+    return {
+        group: dict(sorted(counter.items()))
+        for group, counter in sorted(nested.items())
+    }
+
+
+def _report_group_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Summarize one flat row set for diagnostic reporting."""
+
+    normalized = [_normalize_report_row(row) for row in rows]
+    reason_counts = Counter(str(row.get("reason") or "unknown") for row in normalized)
+    raw_values = [value for row in normalized if (value := _row_float(row, "raw_gap")) is not None]
+    edge_values = [value for row in normalized if (value := _row_float(row, "after_cost_edge")) is not None]
+    spread_values = [value for row in normalized if (value := _row_float(row, "spread")) is not None]
+    liquidity_values = [
+        value
+        for row in normalized
+        if (value := _row_float(row, "visible_liquidity")) is not None
+    ]
+    fill_values = [value for row in normalized if (value := _row_fill_notional(row)) is not None]
+    return {
+        "evaluation_rows": len(normalized),
+        "fills": len(fill_values),
+        "tradable_rows": reason_counts.get("tradable", 0),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "raw_gap_positive_count": sum(1 for value in raw_values if value > 0),
+        "after_cost_edge_positive_count": sum(1 for value in edge_values if value > 0),
+        "best_raw_gap": max(raw_values) if raw_values else None,
+        "best_after_cost_edge": max(edge_values) if edge_values else None,
+        "median_spread": float(pd.Series(spread_values).median()) if spread_values else None,
+        "median_visible_liquidity": float(pd.Series(liquidity_values).median()) if liquidity_values else None,
+        "filled_notional": round(sum(fill_values), 6),
+    }
+
+
+def _watchlist_from_group_summaries(
+    grouped: dict[str, dict[str, object]],
+    *,
+    reason_key: str,
+    label: str,
+    limit: int = 10,
+) -> list[dict[str, object]]:
+    """Build one ranked city watchlist from grouped blocker summaries."""
+
+    rows: list[dict[str, object]] = []
+    for group, summary in grouped.items():
+        reason_counts = summary.get("reason_counts", {})
+        if not isinstance(reason_counts, dict):
+            continue
+        blocker_count = int(reason_counts.get(reason_key, 0) or 0)
+        if blocker_count <= 0:
+            continue
+        total = int(summary.get("evaluation_rows", 0) or 0)
+        rows.append(
+            {
+                label: group,
+                reason_key: blocker_count,
+                "evaluation_rows": total,
+                "ratio": round(blocker_count / total, 6) if total > 0 else None,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -int(row.get(reason_key, 0) or 0),
+            -(float(row.get("ratio")) if row.get("ratio") is not None else -1.0),
+            str(row.get(label, "")),
+        )
+    )
+    return rows[:limit]
+
+
+def _summarize_result_rows(
+    rows: list[dict[str, object]],
+    *,
+    bankroll_remaining: float | None = None,
+) -> dict[str, object]:
+    """Summarize one flat row-oriented diagnostic result set."""
+
+    by_city_rows = _group_report_rows(rows, key="city")
+    by_horizon_rows = _group_report_rows(rows, key="decision_horizon")
+    by_city = {
+        city: _report_group_summary(city_rows)
+        for city, city_rows in sorted(by_city_rows.items())
+    }
+    by_horizon = {
+        horizon: _report_group_summary(horizon_rows)
+        for horizon, horizon_rows in sorted(by_horizon_rows.items())
+    }
+    summary = {
+        **_report_group_summary(rows),
+        "bankroll_remaining": round(bankroll_remaining, 6) if bankroll_remaining is not None else None,
+        "by_city": by_city,
+        "by_horizon": by_horizon,
+        "by_reason": {
+            reason: _report_group_summary(reason_rows)
+            for reason, reason_rows in sorted(_group_report_rows(rows, key="reason").items())
+        },
+        "by_city_reason": _nested_reason_counts(rows, key="city"),
+        "by_horizon_reason": _nested_reason_counts(rows, key="decision_horizon"),
+        "top_near_miss_markets": _top_report_rows(
+            rows,
+            limit=10,
+            reasons={
+                "fee_killed_edge",
+                "slippage_killed_edge",
+                "after_cost_positive_but_spread_too_wide",
+                "after_cost_positive_but_liquidity_too_low",
+                "after_cost_positive_but_below_threshold",
+                "insufficient_depth",
+            },
+        ),
+        "top_fee_killed_markets": _top_report_rows(
+            rows,
+            limit=10,
+            reasons={"fee_killed_edge"},
+            sort_key="raw_gap",
+        ),
+        "top_spread_blocked_markets": _top_report_rows(
+            rows,
+            limit=10,
+            reasons={"after_cost_positive_but_spread_too_wide", "slippage_killed_edge", "insufficient_depth"},
+            sort_key="spread",
+        ),
+        "top_policy_filtered_markets": _top_report_rows(
+            rows,
+            limit=10,
+            reasons={"policy_filtered"},
+            sort_key="raw_gap",
+        ),
+        "fee_sensitive_watchlist": _watchlist_from_group_summaries(
+            by_city,
+            reason_key="fee_killed_edge",
+            label="city",
+        ),
+        "raw_edge_desert_watchlist": _watchlist_from_group_summaries(
+            by_city,
+            reason_key="raw_gap_non_positive",
+            label="city",
+        ),
+        "policy_blocked_watchlist": _watchlist_from_group_summaries(
+            by_city,
+            reason_key="policy_filtered",
+            label="city",
+        ),
+    }
+    return summary
+
+
+def _load_full_books_for_snapshot(
+    clob: ClobReadClient,
+    snapshot: MarketSnapshot,
+) -> dict[str, BookSnapshot]:
+    """Fetch all visible outcome books for one parsed market snapshot."""
+
+    spec = snapshot.spec
+    if spec is None:
+        return {}
+    return _load_books_for_forecast(
+        clob,
+        snapshot,
+        dict.fromkeys(spec.outcome_labels(), 0.0),
+    )
+
+
+def _build_gamma_books_for_forecast(
+    snapshot: MarketSnapshot,
+    forecast_probs: dict[str, float],
+) -> dict[str, BookSnapshot]:
+    """Build synthetic books from Gamma mid-prices instead of fetching from CLOB."""
+
+    spec = snapshot.spec
+    if spec is None:
+        return {}
+    books: dict[str, BookSnapshot] = {}
+    for outcome_label in forecast_probs:
+        idx = spec.outcome_labels().index(outcome_label) if outcome_label in spec.outcome_labels() else -1
+        if idx < 0 or idx >= len(spec.token_ids):
+            continue
+        token_id = spec.token_ids[idx]
+        books[outcome_label] = _synthetic_book(snapshot, outcome_label, token_id)
+    return books
+
+
+def _run_paper_model_evaluation(
+    *,
+    snapshots: list[MarketSnapshot],
+    builder: DatasetBuilder,
+    clob: ClobReadClient,
+    config: Any,
+    model_path: Path,
+    model_name: str,
+    horizon: str,
+    horizon_policy: dict[str, list[str]],
+    bankroll: float,
+    edge_threshold: float,
+    max_spread_bps: int,
+    min_liquidity: float,
+    book_cache: dict[str, dict[str, BookSnapshot]] | None = None,
+    price_source: str = "gamma",
+    min_market_price: float = 0.0,
+) -> tuple[list[dict[str, object]], float]:
+    """Evaluate one model over active markets with paper-broker accounting."""
+
+    broker = PaperBroker(bankroll=bankroll)
+    current_exposure_by_city: dict[str, float] = {}
+    results: list[dict[str, object]] = []
+
+    for snapshot in snapshots:
+        spec = snapshot.spec
+        if spec is None:
+            continue
+        now_utc = datetime.now(tz=UTC)
+        if spec.target_local_date < now_utc.date():
+            continue
+        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+            spec,
+            now_utc=now_utc,
+            horizon=horizon,
+            horizon_policy=horizon_policy,
+        )
+        base_row: dict[str, object] = {
+            "market_id": spec.market_id,
+            "city": spec.city,
+            "question": spec.question,
+            "target_local_date": spec.target_local_date.isoformat(),
+            "market_url": _market_url_for_spec(spec),
+            "decision_horizon": decision_horizon,
+        }
+        if horizon_reason == "policy_filtered":
+            results.append({**base_row, "reason": "policy_filtered"})
+            continue
+        if decision_horizon is None:
+            continue
+        try:
+            feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
+            forecast = predict_market(model_path, model_name, spec, feature_frame)
+        except Exception as exc:  # noqa: BLE001
+            results.append({**base_row, "reason": "forecast_failed", "error": str(exc)})
+            continue
+        if not forecast_fresh(forecast.generated_at, config.execution.stale_forecast_minutes):
+            results.append(
+                {
+                    **base_row,
+                    "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                    "probability_source": getattr(forecast, "probability_source", "raw"),
+                    "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+                    "reason": "stale_forecast",
+                }
+            )
+            continue
+        forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
+        if forecast_rejection_reason is not None:
+            results.append(
+                {
+                    **base_row,
+                    "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                    "probability_source": getattr(forecast, "probability_source", "raw"),
+                    "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+                    "reason": forecast_rejection_reason,
+                }
+            )
+            continue
+
+        if book_cache is not None:
+            books = dict(book_cache.get(spec.market_id, {}))
+        elif price_source == "gamma":
+            books = _build_gamma_books_for_forecast(snapshot, forecast.outcome_probabilities)
+        else:
+            books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
+        # Gamma-price mode: bypass spread/liquidity guards — they are based on a synthetic
+        # book, not a live CLOB, so they carry no real execution risk signal.
+        effective_max_spread_bps = 1_000_000 if price_source == "gamma" else max_spread_bps
+        effective_min_liquidity = 0.0 if price_source == "gamma" else min_liquidity
+        evaluation = _evaluate_market_signal(
+            snapshot,
+            forecast.outcome_probabilities,
+            books,
+            mode="paper",
+            clob=clob,
+            default_fee_bps=_default_fee_bps(config),
+            edge_threshold=edge_threshold,
+            max_spread_bps=effective_max_spread_bps,
+            min_liquidity=effective_min_liquidity,
+            forecast_contract_version=getattr(forecast, "contract_version", "v2"),
+            probability_source=getattr(forecast, "probability_source", "raw"),
+            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
+            decision_horizon=decision_horizon,
+        )
+        signal = evaluation["signal"]
+        book = evaluation["book"]
+        reason = str(evaluation["reason"])
+        candidate = evaluation.get("candidate")
+        fill_payload: dict[str, object] | None = None
+        size_notional: float | None = None
+        if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot) and min_market_price > 0 and signal.executable_price < min_market_price:
+            reason = "market_price_below_threshold"
+        if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot):
+            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
+            size = size_notional / max(signal.executable_price, 1e-6)
+            current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
+            if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
+                reason = "city_exposure_limit"
+            elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
+                reason = "global_exposure_limit"
+            else:
+                fill = broker.simulate_fill(signal, book=book, size=size)
+                if fill is None:
+                    reason = "broker_rejected"
+                else:
+                    current_exposure_by_city[spec.city] = current_city_exposure + size_notional
+                    fill_payload = fill.model_dump(mode="json")
+        results.append(
+            {
+                **base_row,
+                "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+                "probability_source": getattr(forecast, "probability_source", "raw"),
+                "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+                "outcome_label": candidate.get("outcome_label") if isinstance(candidate, dict) else None,
+                "token_id": candidate.get("token_id") if isinstance(candidate, dict) else None,
+                "fair_probability": candidate.get("fair_probability") if isinstance(candidate, dict) else None,
+                "best_bid": candidate.get("best_bid") if isinstance(candidate, dict) else None,
+                "best_ask": candidate.get("best_ask") if isinstance(candidate, dict) else None,
+                "executable_price": candidate.get("best_ask") if isinstance(candidate, dict) else None,
+                "spread": candidate.get("spread") if isinstance(candidate, dict) else None,
+                "visible_liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
+                "liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
+                "fee_estimate": candidate.get("fee_estimate") if isinstance(candidate, dict) else None,
+                "slippage_estimate": candidate.get("slippage_estimate") if isinstance(candidate, dict) else None,
+                "raw_gap": candidate.get("raw_gap") if isinstance(candidate, dict) else None,
+                "after_cost_edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
+                "edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
+                "book_source": candidate.get("book_source") if isinstance(candidate, dict) else None,
+                "book_source_counts": evaluation["book_source_counts"],
+                "size_notional": size_notional,
+                "reason": reason,
+                "fill": fill_payload,
+            }
+        )
+    # Normalize: if total Kelly notional exceeds bankroll, scale all positions down
+    # proportionally so the portfolio fits within the bankroll (simultaneous Kelly).
+    total_notional = sum(
+        float(r["size_notional"])
+        for r in results
+        if r.get("reason") == "tradable" and r.get("size_notional") is not None
+    )
+    if total_notional > bankroll:
+        scale = bankroll / total_notional
+        for r in results:
+            if r.get("reason") == "tradable" and r.get("size_notional") is not None:
+                r["size_notional"] = float(r["size_notional"]) * scale
+                if isinstance(r.get("fill"), dict) and r["fill"].get("size_notional") is not None:
+                    r["fill"]["size_notional"] = float(r["fill"]["size_notional"]) * scale
+                    r["fill"]["size"] = float(r["fill"].get("size", 0)) * scale
+    return results, broker.bankroll
 
 
 def _open_phase_observation_from_opportunity(
@@ -5188,7 +5843,7 @@ def _path_or_default(value: Path | None, default: Path) -> Path:
 @app.command("revenue-gate-report")
 def revenue_gate_report(
     benchmark_summary_path: Path = typer.Option(
-        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        DEFAULT_BENCHMARK_SUMMARY_PATH,
         help="Recent-core benchmark summary JSON",
     ),
     opportunity_summary_path: Path = typer.Option(
@@ -5218,10 +5873,7 @@ def revenue_gate_report(
 ) -> None:
     """Combine recent-core benchmark and shadow validations into one revenue gate report."""
 
-    benchmark_summary_path = _resolve_option_value(
-        benchmark_summary_path,
-        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
-    )
+    benchmark_summary_path = _resolve_option_value(benchmark_summary_path, DEFAULT_BENCHMARK_SUMMARY_PATH)
     opportunity_summary_path = _resolve_option_value(
         opportunity_summary_path,
         Path("artifacts/signals/v2/shadow_summary.json"),
@@ -5268,6 +5920,7 @@ def _build_station_dashboard_runner(
     open_phase_latest_path: Path,
     open_phase_summary_path: Path,
     revenue_gate_summary_path: Path,
+    watchlist_playbook_path: Path,
     interval_seconds: int,
     max_cycles: int,
     json_output_path: Path,
@@ -5287,6 +5940,7 @@ def _build_station_dashboard_runner(
             "revenue_gate_summary": _load_optional_json(revenue_gate_summary_path),
             "observation_summary": _load_optional_json(observation_summary_path),
             "open_phase_summary": _load_optional_json(open_phase_summary_path),
+            "watchlist_playbook": _load_optional_json(watchlist_playbook_path),
         }
 
     return StationDashboardRunner(
@@ -5321,99 +5975,305 @@ def _run_station_cycle(
     open_phase_latest_path: Path,
     open_phase_summary_path: Path,
     revenue_gate_summary_path: Path,
+    watchlist_playbook_path: Path,
     dashboard_json_output: Path,
     dashboard_html_output: Path,
     dashboard_state_path: Path,
 ) -> dict[str, Any]:
     """Run one end-to-end station cycle and return a compact summary."""
+    config, _env, http, _duckdb, _parquet, openmeteo = _runtime(include_stores=False)
+    shadow_config = config.opportunity_shadow
+    observation_config = config.observation_station
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    metar = MetarClient(http, config.metar.base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    horizon_policy = _load_recent_horizon_policy(DEFAULT_RECENT_HORIZON_POLICY_PATH)
+    opportunity_shadow_history_path = _default_signal_output(shadow_config.history_output_path.name)
+    opportunity_shadow_latest_path = _default_signal_output(shadow_config.latest_output_path.name)
+    opportunity_shadow_state_path = _default_signal_output(shadow_config.state_path.name)
+    observation_history_path = _default_signal_output(observation_config.history_output_path.name)
+    observation_state_path = _default_signal_output(observation_config.state_path.name)
+    open_phase_history_path = _default_signal_output("open_phase_shadow.jsonl")
+    open_phase_state_path = _default_signal_output("open_phase_shadow_state.json")
 
-    opportunity_report(
-        model_path=model_path,
-        model_name=model_name,
-        cities=cities,
-        core_recent_only=core_recent_only,
-        market_scope=market_scope,
-        markets_path=markets_path,
-        horizon=horizon,
-        min_edge=min_edge,
-        output=opportunity_report_path,
-    )
-    opportunity_shadow(
-        model_path=model_path,
-        model_name=model_name,
-        cities=cities,
-        core_recent_only=core_recent_only,
-        market_scope=market_scope,
-        markets_path=markets_path,
-        interval=1,
-        max_cycles=1,
-        near_term_days=None,
-        output=None,
-        latest_output=None,
-        summary_output=opportunity_shadow_summary_path,
-        state_path=None,
-    )
-    observation_report(
-        model_path=model_path,
-        model_name=model_name,
-        cities=cities,
-        core_recent_only=core_recent_only,
-        market_scope=market_scope,
-        markets_path=markets_path,
-        horizon=horizon,
-        min_edge=min_edge,
-        output=observation_latest_path,
-        summary_output=observation_summary_path,
-        alerts_output=observation_alerts_path,
-        queue_output=queue_path,
-    )
-    open_phase_shadow(
-        model_path=model_path,
-        model_name=model_name,
-        cities=cities,
-        core_recent_only=core_recent_only,
-        market_scope=market_scope,
-        markets_path=markets_path,
-        interval=1,
-        max_cycles=1,
-        open_window_hours=open_window_hours,
-        horizon="market_open",
-        min_edge=min_edge,
-        output=_default_signal_output("open_phase_shadow.jsonl"),
-        latest_output=open_phase_latest_path,
-        summary_output=open_phase_summary_path,
-        state_path=_default_signal_output("open_phase_shadow_state.json"),
-    )
-    revenue_gate_report(
-        benchmark_summary_path=benchmark_summary_path,
-        opportunity_summary_path=opportunity_shadow_summary_path,
-        open_phase_summary_path=open_phase_summary_path,
-        observation_summary_path=observation_summary_path,
-        output=revenue_gate_summary_path,
-        trading_alias_name=TRADING_MODEL_ALIAS,
-        market_scope=market_scope,
-    )
-    station_dashboard(
-        opportunity_report_path=opportunity_report_path,
-        observation_latest_path=observation_latest_path,
-        observation_summary_path=observation_summary_path,
-        queue_path=queue_path,
-        open_phase_latest_path=open_phase_latest_path,
-        open_phase_summary_path=open_phase_summary_path,
-        revenue_gate_summary_path=revenue_gate_summary_path,
-        json_output=dashboard_json_output,
-        html_output=dashboard_html_output,
-        state_path=dashboard_state_path,
-    )
-    dashboard_payload = _load_optional_json(dashboard_json_output) or {}
-    overview = dict(dashboard_payload.get("overview", {}))
+    try:
+        snapshots = _load_scoped_snapshots_with_runtime(
+            config=config,
+            http=http,
+            markets_path=markets_path,
+            cities=scoped_cities,
+            market_scope=market_scope,
+            active=True,
+            closed=False,
+        )
+
+        def _opportunity_report_rows(*, observed_at: datetime) -> list[dict[str, object]]:
+            observations: list[OpportunityObservation] = []
+            for snapshot in snapshots:
+                spec = snapshot.spec
+                if spec is None or spec.target_local_date < observed_at.date():
+                    continue
+                decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                    spec,
+                    now_utc=observed_at,
+                    horizon=horizon,
+                    horizon_policy=horizon_policy,
+                )
+                if horizon_reason == "policy_filtered":
+                    observations.append(
+                        _empty_opportunity_observation(
+                            snapshot,
+                            observed_at=observed_at,
+                            decision_horizon=decision_horizon or "policy",
+                            reason="policy_filtered",
+                        )
+                    )
+                    continue
+                if decision_horizon is None:
+                    continue
+                observation = _evaluate_opportunity_snapshot(
+                    snapshot,
+                    builder=builder,
+                    clob=clob,
+                    model_path=model_path,
+                    model_name=resolved_model_name,
+                    config=config,
+                    observed_at=observed_at,
+                    decision_horizon=decision_horizon,
+                    edge_threshold=edge_threshold,
+                )
+                if observation is not None:
+                    observations.append(observation)
+            rows = [_serialize_opportunity_observation(observation) for observation in observations]
+            rows.sort(
+                key=lambda row: (
+                    row.get("reason") != "tradable",
+                    -(float(row.get("edge", -999.0)) if row.get("edge") is not None else -999.0),
+                )
+            )
+            dump_json(opportunity_report_path, rows)
+            return rows
+
+        def _opportunity_shadow_evaluator(
+            _cycle_snapshots: list[MarketSnapshot],
+            observed_at: datetime,
+        ) -> list[OpportunityObservation]:
+            observations: list[OpportunityObservation] = []
+            for snapshot in _cycle_snapshots:
+                spec = snapshot.spec
+                if spec is None:
+                    continue
+                decision_horizon = _resolve_opportunity_shadow_horizon(
+                    spec,
+                    now_utc=observed_at,
+                    near_term_days=shadow_config.near_term_days,
+                )
+                if decision_horizon is None:
+                    continue
+                if not _policy_allows_horizon(spec, decision_horizon=decision_horizon, horizon_policy=horizon_policy):
+                    observations.append(
+                        _empty_opportunity_observation(
+                            snapshot,
+                            observed_at=observed_at,
+                            decision_horizon=decision_horizon,
+                            reason="policy_filtered",
+                        )
+                    )
+                    continue
+                observation = _evaluate_opportunity_snapshot(
+                    snapshot,
+                    builder=builder,
+                    clob=clob,
+                    model_path=model_path,
+                    model_name=resolved_model_name,
+                    config=config,
+                    observed_at=observed_at,
+                    decision_horizon=decision_horizon,
+                    edge_threshold=config.backtest.default_edge_threshold,
+                )
+                if observation is not None:
+                    observations.append(observation)
+            return observations
+
+        def _observation_evaluator(
+            _cycle_snapshots: list[MarketSnapshot],
+            observed_at: datetime,
+        ) -> list[ObservationOpportunity]:
+            observations: list[ObservationOpportunity] = []
+            for snapshot in _cycle_snapshots:
+                spec = snapshot.spec
+                if spec is None:
+                    continue
+                decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                    spec,
+                    now_utc=observed_at,
+                    horizon=horizon,
+                    horizon_policy=horizon_policy,
+                )
+                if horizon_reason == "policy_filtered":
+                    observations.append(
+                        _empty_observation_opportunity(
+                            snapshot,
+                            observed_at=observed_at,
+                            decision_horizon=decision_horizon or "policy",
+                            reason="policy_filtered",
+                            source_family="aviation",
+                            observation_source="aviationweather_metar",
+                            station_id=spec.station_id,
+                            risk_flags=["policy_filtered"],
+                        )
+                    )
+                    continue
+                if decision_horizon is None:
+                    continue
+                observation = _evaluate_observation_snapshot(
+                    snapshot,
+                    builder=builder,
+                    clob=clob,
+                    http=http,
+                    metar=metar,
+                    model_path=model_path,
+                    model_name=resolved_model_name,
+                    config=config,
+                    observed_at=observed_at,
+                    decision_horizon=decision_horizon,
+                    edge_threshold=edge_threshold,
+                )
+                if observation is not None:
+                    observations.append(observation)
+            return observations
+
+        def _open_phase_evaluator(
+            _cycle_snapshots: list[MarketSnapshot],
+            observed_at: datetime,
+        ) -> list[OpenPhaseObservation]:
+            observations: list[OpenPhaseObservation] = []
+            candidates = select_open_phase_candidates(
+                _cycle_snapshots,
+                observed_at=observed_at,
+                open_window_hours=open_window_hours,
+            )
+            for candidate in candidates:
+                observation = _evaluate_opportunity_snapshot(
+                    candidate.snapshot,
+                    builder=builder,
+                    clob=clob,
+                    model_path=model_path,
+                    model_name=resolved_model_name,
+                    config=config,
+                    observed_at=observed_at,
+                    decision_horizon="market_open",
+                    edge_threshold=edge_threshold,
+                )
+                if observation is None:
+                    continue
+                observations.append(
+                    _open_phase_observation_from_opportunity(
+                        observation,
+                        market_created_at=candidate.market_created_at,
+                        market_deploying_at=candidate.market_deploying_at,
+                        market_accepting_orders_at=candidate.market_accepting_orders_at,
+                        market_opened_at=candidate.market_opened_at,
+                        open_phase_age_hours=candidate.open_phase_age_hours,
+                    )
+                )
+            return observations
+
+        _opportunity_report_rows(observed_at=datetime.now(tz=UTC))
+
+        opportunity_shadow_runner = OpportunityShadowRunner(
+            config=config,
+            interval_seconds=shadow_config.interval_seconds,
+            max_cycles=1,
+            state_path=opportunity_shadow_state_path,
+            latest_output_path=opportunity_shadow_latest_path,
+            history_output_path=opportunity_shadow_history_path,
+            summary_output_path=opportunity_shadow_summary_path,
+            snapshot_fetcher=lambda: snapshots,
+            evaluator=_opportunity_shadow_evaluator,
+        )
+        opportunity_shadow_runner.run_once()
+
+        observation_runner = ObservationShadowRunner(
+            config=config,
+            interval_seconds=observation_config.interval_seconds,
+            max_cycles=1,
+            state_path=observation_state_path,
+            latest_output_path=observation_latest_path,
+            history_output_path=observation_history_path,
+            summary_output_path=observation_summary_path,
+            alerts_output_path=observation_alerts_path,
+            queue_output_path=queue_path,
+            snapshot_fetcher=lambda: snapshots,
+            evaluator=_observation_evaluator,
+        )
+        observation_runner.run_once()
+
+        open_phase_runner = OpenPhaseShadowRunner(
+            config=config,
+            interval_seconds=shadow_config.interval_seconds,
+            max_cycles=1,
+            state_path=open_phase_state_path,
+            latest_output_path=open_phase_latest_path,
+            history_output_path=open_phase_history_path,
+            summary_output_path=open_phase_summary_path,
+            snapshot_fetcher=lambda: snapshots,
+            evaluator=_open_phase_evaluator,
+        )
+        open_phase_runner.run_once()
+
+        report = build_revenue_gate_report(
+            benchmark_summary=_load_optional_json(benchmark_summary_path),
+            opportunity_summary=_load_optional_json(opportunity_shadow_summary_path),
+            open_phase_summary=_load_optional_json(open_phase_summary_path),
+            observation_summary=_load_optional_json(observation_summary_path),
+            trading_alias_name=TRADING_MODEL_ALIAS,
+            pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
+            market_scope=market_scope,
+        )
+        dump_json(revenue_gate_summary_path, report)
+
+        dashboard_runner = StationDashboardRunner(
+            config=config,
+            interval_seconds=config.station_dashboard.interval_seconds,
+            max_cycles=1,
+            state_path=dashboard_state_path,
+            json_output_path=dashboard_json_output,
+            html_output_path=dashboard_html_output,
+            data_loader=lambda: {
+                "opportunity_rows": _load_optional_rows(opportunity_report_path),
+                "observation_rows": _load_optional_rows(observation_latest_path),
+                "queue_rows": _load_optional_rows(queue_path),
+                "open_phase_rows": _load_optional_rows(open_phase_latest_path),
+                "revenue_gate_summary": report,
+                "observation_summary": _load_optional_json(observation_summary_path),
+                "open_phase_summary": _load_optional_json(open_phase_summary_path),
+                "watchlist_playbook": _load_optional_json(watchlist_playbook_path),
+            },
+        )
+        dashboard_summary = dashboard_runner.run_once()
+    finally:
+        http.close()
+
     return {
         "generated_at": datetime.now(tz=UTC),
-        "revenue_gate_decision": overview.get("revenue_gate_decision", "INCONCLUSIVE"),
-        "queue_size": int(overview.get("queue_size", 0) or 0),
-        "observation_tradable_count": int(overview.get("observation_tradable_count", 0) or 0),
-        "opportunity_tradable_count": int(overview.get("opportunity_tradable_count", 0) or 0),
-        "open_phase_count": int(overview.get("open_phase_count", 0) or 0),
+        "revenue_gate_decision": dashboard_summary.get("revenue_gate_decision", "INCONCLUSIVE"),
+        "queue_size": int(dashboard_summary.get("queue_size", 0) or 0),
+        "observation_tradable_count": int(dashboard_summary.get("observation_tradable_count", 0) or 0),
+        "opportunity_tradable_count": int(dashboard_summary.get("opportunity_tradable_count", 0) or 0),
+        "open_phase_count": int(dashboard_summary.get("open_phase_count", 0) or 0),
+        "watchlist_alert_count": int(dashboard_summary.get("watchlist_alert_count", 0) or 0),
         "dashboard_json_output": str(dashboard_json_output),
         "dashboard_html_output": str(dashboard_html_output),
     }
@@ -5428,6 +6288,7 @@ def station_dashboard(
     open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest JSON path"),
     open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary JSON path"),
     revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary JSON path"),
+    watchlist_playbook_path: Path | None = typer.Option(None, help="Execution watchlist playbook JSON path"),
     json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
     html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
     state_path: Path | None = typer.Option(None, help="Dashboard state path"),
@@ -5453,6 +6314,10 @@ def station_dashboard(
             revenue_gate_summary_path,
             dashboard_config.revenue_gate_summary_path,
         ),
+        watchlist_playbook_path=_path_or_default(
+            watchlist_playbook_path,
+            dashboard_config.watchlist_playbook_path,
+        ),
         interval_seconds=dashboard_config.interval_seconds,
         max_cycles=1,
         json_output_path=_path_or_default(json_output, dashboard_config.json_output_path),
@@ -5470,6 +6335,7 @@ def station_dashboard(
         "observation_tradable_count",
         "opportunity_tradable_count",
         "open_phase_count",
+        "watchlist_alert_count",
     ]:
         table.add_row(key, str(summary.get(key, "")))
     console.print(table)
@@ -5486,6 +6352,7 @@ def station_dashboard_daemon(
     open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest JSON path"),
     open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary JSON path"),
     revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary JSON path"),
+    watchlist_playbook_path: Path | None = typer.Option(None, help="Execution watchlist playbook JSON path"),
     interval: int | None = typer.Option(None, help="Seconds between dashboard refresh cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
     json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
@@ -5512,6 +6379,10 @@ def station_dashboard_daemon(
         revenue_gate_summary_path=_path_or_default(
             revenue_gate_summary_path,
             dashboard_config.revenue_gate_summary_path,
+        ),
+        watchlist_playbook_path=_path_or_default(
+            watchlist_playbook_path,
+            dashboard_config.watchlist_playbook_path,
         ),
         interval_seconds=_resolve_option_value(interval, dashboard_config.interval_seconds),
         max_cycles=_resolve_option_value(max_cycles, dashboard_config.max_cycles) or 0,
@@ -5541,7 +6412,7 @@ def station_cycle(
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     open_window_hours: float = typer.Option(24.0, help="Open-phase window in hours"),
     benchmark_summary_path: Path = typer.Option(
-        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        DEFAULT_BENCHMARK_SUMMARY_PATH,
         help="Recent-core benchmark summary JSON",
     ),
     opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report output path"),
@@ -5553,6 +6424,7 @@ def station_cycle(
     open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest output path"),
     open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary path"),
     revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary output path"),
+    watchlist_playbook_path: Path | None = typer.Option(None, help="Execution watchlist playbook JSON path"),
     dashboard_json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
     dashboard_html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
     dashboard_state_path: Path | None = typer.Option(None, help="Dashboard state path"),
@@ -5574,10 +6446,7 @@ def station_cycle(
         horizon=_resolve_option_value(horizon, "policy"),
         min_edge=_resolve_option_value(min_edge),
         open_window_hours=float(_resolve_option_value(open_window_hours, 24.0)),
-        benchmark_summary_path=_resolve_option_value(
-            benchmark_summary_path,
-            Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
-        ),
+        benchmark_summary_path=_resolve_option_value(benchmark_summary_path, DEFAULT_BENCHMARK_SUMMARY_PATH),
         opportunity_report_path=_path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path),
         opportunity_shadow_summary_path=_path_or_default(
             opportunity_shadow_summary_path,
@@ -5592,6 +6461,10 @@ def station_cycle(
         revenue_gate_summary_path=_path_or_default(
             revenue_gate_summary_path,
             dashboard_config.revenue_gate_summary_path,
+        ),
+        watchlist_playbook_path=_path_or_default(
+            watchlist_playbook_path,
+            dashboard_config.watchlist_playbook_path,
         ),
         dashboard_json_output=_path_or_default(dashboard_json_output, dashboard_config.json_output_path),
         dashboard_html_output=_path_or_default(dashboard_html_output, dashboard_config.html_output_path),
@@ -5614,7 +6487,7 @@ def station_daemon(
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     open_window_hours: float = typer.Option(24.0, help="Open-phase window in hours"),
     benchmark_summary_path: Path = typer.Option(
-        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
+        DEFAULT_BENCHMARK_SUMMARY_PATH,
         help="Recent-core benchmark summary JSON",
     ),
     opportunity_report_path: Path | None = typer.Option(None, help="Opportunity report output path"),
@@ -5626,6 +6499,7 @@ def station_daemon(
     open_phase_latest_path: Path | None = typer.Option(None, help="Open-phase latest output path"),
     open_phase_summary_path: Path | None = typer.Option(None, help="Open-phase summary path"),
     revenue_gate_summary_path: Path | None = typer.Option(None, help="Revenue gate summary output path"),
+    watchlist_playbook_path: Path | None = typer.Option(None, help="Execution watchlist playbook JSON path"),
     dashboard_json_output: Path | None = typer.Option(None, help="Dashboard JSON output path"),
     dashboard_html_output: Path | None = typer.Option(None, help="Dashboard HTML output path"),
     dashboard_state_path: Path | None = typer.Option(None, help="Dashboard state path"),
@@ -5657,10 +6531,7 @@ def station_daemon(
     resolved_horizon = _resolve_option_value(horizon, "policy")
     resolved_min_edge = _resolve_option_value(min_edge)
     resolved_open_window_hours = float(_resolve_option_value(open_window_hours, 24.0))
-    resolved_benchmark_summary_path = _resolve_option_value(
-        benchmark_summary_path,
-        Path("artifacts/recent_core_benchmark/recent_core_benchmark_summary.json"),
-    )
+    resolved_benchmark_summary_path = _resolve_option_value(benchmark_summary_path, DEFAULT_BENCHMARK_SUMMARY_PATH)
     resolved_opportunity_report_path = _path_or_default(opportunity_report_path, dashboard_config.opportunity_report_path)
     resolved_opportunity_shadow_summary_path = _path_or_default(
         opportunity_shadow_summary_path,
@@ -5675,6 +6546,10 @@ def station_daemon(
     resolved_revenue_gate_summary_path = _path_or_default(
         revenue_gate_summary_path,
         dashboard_config.revenue_gate_summary_path,
+    )
+    resolved_watchlist_playbook_path = _path_or_default(
+        watchlist_playbook_path,
+        dashboard_config.watchlist_playbook_path,
     )
     resolved_dashboard_json_output = _path_or_default(dashboard_json_output, dashboard_config.json_output_path)
     resolved_dashboard_html_output = _path_or_default(dashboard_html_output, dashboard_config.html_output_path)
@@ -5713,13 +6588,14 @@ def station_daemon(
             observation_summary_path=resolved_observation_summary_path,
             observation_alerts_path=resolved_observation_alerts_path,
             queue_path=resolved_queue_path,
-            open_phase_latest_path=resolved_open_phase_latest_path,
-            open_phase_summary_path=resolved_open_phase_summary_path,
-            revenue_gate_summary_path=resolved_revenue_gate_summary_path,
-            dashboard_json_output=resolved_dashboard_json_output,
-            dashboard_html_output=resolved_dashboard_html_output,
-            dashboard_state_path=resolved_dashboard_state_path,
-        )
+                open_phase_latest_path=resolved_open_phase_latest_path,
+                open_phase_summary_path=resolved_open_phase_summary_path,
+                revenue_gate_summary_path=resolved_revenue_gate_summary_path,
+                watchlist_playbook_path=resolved_watchlist_playbook_path,
+                dashboard_json_output=resolved_dashboard_json_output,
+                dashboard_html_output=resolved_dashboard_html_output,
+                dashboard_state_path=resolved_dashboard_state_path,
+            )
         cycle += 1
         payload = {
             "cycle": cycle,
@@ -5749,6 +6625,7 @@ def _build_observation_station_runner(
     queue_output: Path,
     state_path: Path,
     horizon: str,
+    horizon_policy_path: Path,
     edge_threshold: float | None,
 ) -> tuple[ObservationShadowRunner, CachedHttpClient]:
     """Build one reusable observation-station runner."""
@@ -5766,7 +6643,7 @@ def _build_observation_station_runner(
         fixture_dir=None,
         models=config.weather.models or None,
     )
-    horizon_policy = _load_recent_horizon_policy()
+    horizon_policy = _load_recent_horizon_policy(horizon_policy_path)
     effective_edge_threshold = edge_threshold if edge_threshold is not None else config.backtest.default_edge_threshold
     scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
 
@@ -5849,6 +6726,10 @@ def observation_report(
     market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     output: Path | None = typer.Option(None, help="Latest observation report JSON output"),
     summary_output: Path | None = typer.Option(None, help="Observation summary JSON output"),
@@ -5864,6 +6745,7 @@ def observation_report(
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     markets_path = _resolve_option_value(markets_path)
     horizon = _resolve_option_value(horizon, "policy")
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     min_edge = _resolve_option_value(min_edge)
     config, _env = load_settings()
     latest_output = _resolve_option_value(
@@ -5897,6 +6779,7 @@ def observation_report(
         queue_output=queue_output_path,
         state_path=_default_signal_output(config.observation_station.state_path.name),
         horizon=horizon,
+        horizon_policy_path=horizon_policy_path,
         edge_threshold=min_edge,
     )
     try:
@@ -5983,6 +6866,10 @@ def observation_shadow(
     interval: int | None = typer.Option(None, help="Seconds between observation cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     output: Path | None = typer.Option(None, help="Append-only JSONL output"),
     latest_output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
@@ -6002,6 +6889,7 @@ def observation_shadow(
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
     horizon = _resolve_option_value(horizon, "policy")
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     min_edge = _resolve_option_value(min_edge)
     output = _resolve_option_value(output)
     latest_output = _resolve_option_value(latest_output)
@@ -6025,6 +6913,7 @@ def observation_shadow(
         queue_output=queue_output or _default_signal_output(config.observation_station.queue_output_path.name),
         state_path=state_path or _default_signal_output(config.observation_station.state_path.name),
         horizon=horizon,
+        horizon_policy_path=horizon_policy_path,
         edge_threshold=min_edge,
     )
     try:
@@ -6237,9 +7126,18 @@ def paper_trader(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
     horizon: str = "policy",
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
     bankroll: float = 10_000.0,
     min_edge: float | None = None,
+    max_spread_bps: int | None = typer.Option(None, help="Maximum spread override"),
+    min_liquidity: float | None = typer.Option(None, help="Minimum liquidity override"),
+    price_source: str = typer.Option("gamma", help="Price source for edge calculation: 'gamma' (Gamma mid-prices) or 'clob' (live order book)"),
+    min_market_price: float = typer.Option(0.0, help="Skip outcomes where Gamma mid-price is below this threshold (e.g. 0.10 to exclude <10% bins)"),
     output: Path = Path("artifacts/signals/v2/paper_signals.json"),
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
@@ -6249,13 +7147,18 @@ def paper_trader(
     markets_path = _resolve_option_value(markets_path)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     horizon = _resolve_option_value(horizon, "policy")
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     bankroll = float(_resolve_option_value(bankroll, 10_000.0))
     min_edge = _resolve_option_value(min_edge)
+    max_spread_bps = _resolve_option_value(max_spread_bps)
+    min_liquidity = _resolve_option_value(min_liquidity)
+    price_source = str(_resolve_option_value(price_source, "gamma"))
+    min_market_price = float(_resolve_option_value(min_market_price, 0.0))
     output = _resolve_option_value(output, Path("artifacts/signals/v2/paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
-    broker = PaperBroker(bankroll=bankroll)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
         http=http,
@@ -6266,113 +7169,864 @@ def paper_trader(
         fixture_dir=None,
         models=config.weather.models or None,
     )
-    cities = _resolve_recent_core_cities(cities, core_recent_only=core_recent_only)
-    snapshots = _load_snapshots(markets_path=markets_path, cities=cities, active=True, closed=False)
+    cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_scoped_snapshots(
+        markets_path=markets_path,
+        cities=cities,
+        market_scope=market_scope,
+        active=True,
+        closed=False,
+    )
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
-    horizon_policy = _load_recent_horizon_policy()
-
-    current_exposure_by_city: dict[str, float] = {}
-    results: list[dict[str, object]] = []
-    for snapshot in snapshots:
-        spec = snapshot.spec
-        if spec is None:
-            continue
-        now_utc = datetime.now(tz=UTC)
-        if spec.target_local_date < now_utc.date():
-            continue
-        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
-            spec,
-            now_utc=now_utc,
-            horizon=horizon,
-            horizon_policy=horizon_policy,
-        )
-        if horizon_reason == "policy_filtered":
-            results.append(
-                {
-                    "market_id": spec.market_id,
-                    "city": spec.city,
-                    "question": spec.question,
-                    "decision_horizon": decision_horizon,
-                    "reason": "policy_filtered",
-                }
-            )
-            continue
-        if decision_horizon is None:
-            continue
-        feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
-        forecast = predict_market(model_path, resolved_model_name, spec, feature_frame)
-        if not forecast_fresh(forecast.generated_at.replace(tzinfo=None), config.execution.stale_forecast_minutes):
-            continue
-        forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
-        if forecast_rejection_reason is not None:
-            results.append(
-                {
-                    "market_id": spec.market_id,
-                    "city": spec.city,
-                    "question": spec.question,
-                    "decision_horizon": decision_horizon,
-                    "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
-                    "probability_source": getattr(forecast, "probability_source", "raw"),
-                    "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
-                    "reason": forecast_rejection_reason,
-                }
-            )
-            continue
-        books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
-        evaluation = _evaluate_market_signal(
-            snapshot,
-            forecast.outcome_probabilities,
-            books,
-            mode="paper",
-            clob=clob,
-            default_fee_bps=_default_fee_bps(config),
-            edge_threshold=edge_threshold,
-            max_spread_bps=config.execution.max_spread_bps,
-            min_liquidity=config.execution.min_liquidity,
-            forecast_contract_version=getattr(forecast, "contract_version", "v2"),
-            probability_source=getattr(forecast, "probability_source", "raw"),
-            distribution_family=getattr(forecast, "distribution_family", "gaussian"),
-            decision_horizon=decision_horizon,
-        )
-        signal = evaluation["signal"]
-        book = evaluation["book"]
-        reason = str(evaluation["reason"])
-        fill_payload: dict[str, object] | None = None
-        if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot):
-            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
-            size = size_notional / max(signal.executable_price, 1e-6)
-            current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
-            if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
-                reason = "city_exposure_limit"
-            elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
-                reason = "global_exposure_limit"
-            else:
-                fill = broker.simulate_fill(signal, book=book, size=size)
-                if fill is None:
-                    reason = "broker_rejected"
-                else:
-                    current_exposure_by_city[spec.city] = current_city_exposure + size_notional
-                    fill_payload = fill.model_dump(mode="json")
-        results.append(
-            {
-                "market_id": spec.market_id,
-                "city": spec.city,
-                "question": spec.question,
-                "decision_horizon": decision_horizon,
-                "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
-                "probability_source": getattr(forecast, "probability_source", "raw"),
-                "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
-                "outcome_label": signal.outcome_label if isinstance(signal, TradeSignal) else None,
-                "fair_probability": signal.fair_probability if isinstance(signal, TradeSignal) else None,
-                "executable_price": signal.executable_price if isinstance(signal, TradeSignal) else None,
-                "edge": signal.edge if isinstance(signal, TradeSignal) else None,
-                "book_source_counts": evaluation["book_source_counts"],
-                "reason": reason,
-                "fill": fill_payload,
-            }
-        )
+    horizon_policy = _load_recent_horizon_policy(horizon_policy_path)
+    results, _bankroll_remaining = _run_paper_model_evaluation(
+        snapshots=snapshots,
+        builder=builder,
+        clob=clob,
+        config=config,
+        model_path=model_path,
+        model_name=resolved_model_name,
+        horizon=horizon,
+        horizon_policy=horizon_policy,
+        bankroll=bankroll,
+        edge_threshold=edge_threshold,
+        max_spread_bps=int(max_spread_bps if max_spread_bps is not None else config.execution.max_spread_bps),
+        min_liquidity=float(min_liquidity if min_liquidity is not None else config.execution.min_liquidity),
+        price_source=price_source,
+        min_market_price=min_market_price,
+    )
     dump_json(output, results)
     console.print_json(data=results)
+
+
+@app.command("paper-multimodel-report")
+def paper_multimodel_report(
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    market_scope: str = typer.Option("default", help="Market scope preset"),
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
+    bankroll: float = typer.Option(10_000.0, help="Paper bankroll"),
+    min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
+    max_spread_bps: int | None = typer.Option(None, help="Maximum spread override"),
+    min_liquidity: float | None = typer.Option(None, help="Minimum liquidity override"),
+    output_dir: Path | None = typer.Option(None, help="Output directory for per-model JSON and summary"),
+    model_labels: Annotated[list[str] | None, typer.Option("--model-label")] = None,
+    model_paths: Annotated[list[Path] | None, typer.Option("--model-path")] = None,
+    model_names: Annotated[list[str] | None, typer.Option("--model-name")] = None,
+) -> None:
+    """Compare the active champion against a top-challenger pool on one paper snapshot."""
+
+    markets_path = _resolve_option_value(markets_path)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
+    horizon = _resolve_option_value(horizon, "policy")
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
+    bankroll = float(_resolve_option_value(bankroll, 10_000.0))
+    min_edge = _resolve_option_value(min_edge)
+    max_spread_bps = _resolve_option_value(max_spread_bps)
+    min_liquidity = _resolve_option_value(min_liquidity)
+    output_dir = _resolve_option_value(output_dir)
+    model_labels = _resolve_option_value(model_labels)
+    model_paths = _resolve_option_value(model_paths)
+    model_names = _resolve_option_value(model_names)
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_scoped_snapshots(
+        markets_path=markets_path,
+        cities=scoped_cities,
+        market_scope=market_scope,
+        active=True,
+        closed=False,
+    )
+    specs = _resolve_paper_multimodel_specs(
+        model_labels=model_labels,
+        model_paths=model_paths,
+        model_names=model_names,
+    )
+    edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
+    spread_limit = int(max_spread_bps if max_spread_bps is not None else config.execution.max_spread_bps)
+    liquidity_floor = float(min_liquidity if min_liquidity is not None else config.execution.min_liquidity)
+    horizon_policy = _load_recent_horizon_policy(horizon_policy_path)
+    books_by_market = {
+        snapshot.spec.market_id: _load_full_books_for_snapshot(clob, snapshot)
+        for snapshot in snapshots
+        if snapshot.spec is not None
+    }
+    run_dir = Path(output_dir) if output_dir is not None else (
+        DEFAULT_PAPER_MULTIMODEL_ROOT / datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    model_summaries: dict[str, dict[str, object]] = {}
+    leaderboard_rows: list[dict[str, object]] = []
+    try:
+        for spec in specs:
+            label = str(spec["label"])
+            rows, bankroll_remaining = _run_paper_model_evaluation(
+                snapshots=snapshots,
+                builder=builder,
+                clob=clob,
+                config=config,
+                model_path=Path(str(spec["model_path"])),
+                model_name=str(spec["model_name"]),
+                horizon=horizon,
+                horizon_policy=horizon_policy,
+                bankroll=bankroll,
+                edge_threshold=edge_threshold,
+                max_spread_bps=spread_limit,
+                min_liquidity=liquidity_floor,
+                book_cache=books_by_market,
+            )
+            dump_json(run_dir / f"{_safe_slug(label)}.json", rows)
+            summary = _summarize_result_rows(rows, bankroll_remaining=bankroll_remaining)
+            model_summaries[label] = summary
+            leaderboard_rows.append(
+                {
+                    "model": label,
+                    "fills": int(summary.get("fills", 0) or 0),
+                    "tradable_rows": int(summary.get("tradable_rows", 0) or 0),
+                    "raw_gap_positive_count": int(summary.get("raw_gap_positive_count", 0) or 0),
+                    "after_cost_edge_positive_count": int(summary.get("after_cost_edge_positive_count", 0) or 0),
+                    "fee_killed_edge": int(dict(summary.get("reason_counts", {})).get("fee_killed_edge", 0) or 0),
+                    "raw_gap_non_positive": int(dict(summary.get("reason_counts", {})).get("raw_gap_non_positive", 0) or 0),
+                    "policy_filtered": int(dict(summary.get("reason_counts", {})).get("policy_filtered", 0) or 0),
+                    "bankroll_remaining": summary.get("bankroll_remaining"),
+                }
+            )
+    finally:
+        with suppress(Exception):
+            http.close()
+
+    leaderboard_rows.sort(
+        key=lambda row: (
+            -int(row["fills"]),
+            -int(row["tradable_rows"]),
+            -int(row["after_cost_edge_positive_count"]),
+            -int(row["raw_gap_positive_count"]),
+            int(row["raw_gap_non_positive"]),
+            str(row["model"]),
+        )
+    )
+    summary_payload = {
+        "generated_at": datetime.now(tz=UTC),
+        "market_scope": market_scope,
+        "horizon": horizon,
+        "horizon_policy_path": str(horizon_policy_path),
+        "bankroll": bankroll,
+        "min_edge": edge_threshold,
+        "max_spread_bps": spread_limit,
+        "min_liquidity": liquidity_floor,
+        "markets_evaluated": len(snapshots),
+        "models": model_summaries,
+        "leaderboard": leaderboard_rows,
+    }
+    dump_json(run_dir / "summary.json", summary_payload)
+    pd.DataFrame(leaderboard_rows).to_csv(run_dir / "leaderboard.csv", index=False)
+
+    table = Table(title="Paper Multimodel Report")
+    table.add_column("Model")
+    table.add_column("Fills")
+    table.add_column("Tradable")
+    table.add_column("Raw+")
+    table.add_column("Edge+")
+    table.add_column("Fee Killed")
+    table.add_column("Raw<=0")
+    table.add_column("Policy")
+    for row in leaderboard_rows:
+        table.add_row(
+            str(row["model"]),
+            str(row["fills"]),
+            str(row["tradable_rows"]),
+            str(row["raw_gap_positive_count"]),
+            str(row["after_cost_edge_positive_count"]),
+            str(row["fee_killed_edge"]),
+            str(row["raw_gap_non_positive"]),
+            str(row["policy_filtered"]),
+        )
+    console.print(table)
+    console.print(f"Wrote {run_dir / 'summary.json'}")
+    console.print(f"Wrote {run_dir / 'leaderboard.csv'}")
+
+
+@app.command("execution-sensitivity-report")
+def execution_sensitivity_report(
+    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
+    markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
+    preset_path: Path = typer.Option(
+        DEFAULT_PAPER_EXPLORATION_CONFIG_PATH,
+        help="Paper exploration YAML preset",
+    ),
+    market_scopes: Annotated[list[str] | None, typer.Option("--market-scope")] = None,
+    min_edges: Annotated[list[float] | None, typer.Option("--min-edge")] = None,
+    max_spread_bps_values: Annotated[list[int] | None, typer.Option("--max-spread-bps")] = None,
+    min_liquidity_values: Annotated[list[float] | None, typer.Option("--min-liquidity")] = None,
+    horizon_policy_paths: Annotated[list[Path] | None, typer.Option("--horizon-policy-path")] = None,
+    horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    bankroll: float = typer.Option(10_000.0, help="Paper bankroll"),
+    output_dir: Path | None = typer.Option(None, help="Output directory for sweep results"),
+) -> None:
+    """Sweep paper-only execution thresholds and horizon policies without touching live guards."""
+
+    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
+    markets_path = _resolve_option_value(markets_path)
+    cities = _resolve_option_value(cities)
+    core_recent_only = bool(_resolve_option_value(core_recent_only, False))
+    preset_path = _resolve_option_value(preset_path, DEFAULT_PAPER_EXPLORATION_CONFIG_PATH)
+    market_scopes = _resolve_option_value(market_scopes)
+    min_edges = _resolve_option_value(min_edges)
+    max_spread_bps_values = _resolve_option_value(max_spread_bps_values)
+    min_liquidity_values = _resolve_option_value(min_liquidity_values)
+    horizon_policy_paths = _resolve_option_value(horizon_policy_paths)
+    horizon = _resolve_option_value(horizon, "policy")
+    bankroll = float(_resolve_option_value(bankroll, 10_000.0))
+    output_dir = _resolve_option_value(output_dir)
+
+    config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
+    clob = ClobReadClient(http, config.polymarket.clob_base_url)
+    builder = DatasetBuilder(
+        http=http,
+        openmeteo=openmeteo,
+        duckdb_store=None,
+        parquet_store=None,
+        snapshot_dir=None,
+        fixture_dir=None,
+        models=config.weather.models or None,
+    )
+    preset = _load_paper_exploration_preset(preset_path)
+    scope_values = list(market_scopes or preset.get("market_scopes") or ["default", "recent_core", "supported_wu_open_phase"])
+    edge_values = list(min_edges or preset.get("min_edges") or [config.backtest.default_edge_threshold, 0.1, 0.05])
+    spread_values = list(
+        max_spread_bps_values
+        or preset.get("max_spread_bps")
+        or [config.execution.max_spread_bps, max(config.execution.max_spread_bps + 250, config.execution.max_spread_bps), 1000]
+    )
+    liquidity_values = list(
+        min_liquidity_values
+        or preset.get("min_liquidity")
+        or [config.execution.min_liquidity, max(config.execution.min_liquidity / 2.0, 1.0), 0.0]
+    )
+    policy_entries: list[dict[str, object]] = []
+    if horizon_policy_paths:
+        policy_entries = [
+            {"label": Path(path).stem, "path": Path(path)}
+            for path in horizon_policy_paths
+        ]
+    else:
+        raw_entries = preset.get("horizon_policies")
+        if isinstance(raw_entries, list):
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    continue
+                path_value = entry.get("path")
+                if path_value is None:
+                    continue
+                policy_entries.append(
+                    {
+                        "label": str(entry.get("label") or Path(str(path_value)).stem),
+                        "path": Path(str(path_value)),
+                    }
+                )
+    if not policy_entries:
+        policy_entries = [
+            {"label": "current_policy", "path": DEFAULT_RECENT_HORIZON_POLICY_PATH},
+            {"label": "all_supported_policy", "path": DEFAULT_PAPER_ALL_SUPPORTED_HORIZON_POLICY_PATH},
+        ]
+
+    run_dir = Path(output_dir) if output_dir is not None else (
+        DEFAULT_EXECUTION_SENSITIVITY_ROOT / datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    )
+    combos_dir = run_dir / "combos"
+    combos_dir.mkdir(parents=True, exist_ok=True)
+
+    snapshots_by_scope: dict[str, list[MarketSnapshot]] = {}
+    books_by_scope: dict[str, dict[str, dict[str, BookSnapshot]]] = {}
+    combo_rows: list[dict[str, object]] = []
+    try:
+        for scope in scope_values:
+            resolved_scope = _resolve_market_scope(str(scope), core_recent_only=core_recent_only)
+            scoped_cities = _resolve_scoped_cities(cities, market_scope=resolved_scope)
+            snapshots = _load_scoped_snapshots(
+                markets_path=markets_path,
+                cities=scoped_cities,
+                market_scope=resolved_scope,
+                active=True,
+                closed=False,
+            )
+            snapshots_by_scope[resolved_scope] = snapshots
+            books_by_scope[resolved_scope] = {
+                snapshot.spec.market_id: _load_full_books_for_snapshot(clob, snapshot)
+                for snapshot in snapshots
+                if snapshot.spec is not None
+            }
+            for policy_entry in policy_entries:
+                policy_label = str(policy_entry["label"])
+                policy_path = Path(str(policy_entry["path"]))
+                horizon_policy = _load_recent_horizon_policy(policy_path)
+                for edge_threshold in edge_values:
+                    for spread_limit in spread_values:
+                        for liquidity_floor in liquidity_values:
+                            combo_slug = _safe_slug(
+                                f"{resolved_scope}_{policy_label}_edge_{edge_threshold}_spread_{spread_limit}_liq_{liquidity_floor}"
+                            )
+                            rows, bankroll_remaining = _run_paper_model_evaluation(
+                                snapshots=snapshots,
+                                builder=builder,
+                                clob=clob,
+                                config=config,
+                                model_path=model_path,
+                                model_name=resolved_model_name,
+                                horizon=horizon,
+                                horizon_policy=horizon_policy,
+                                bankroll=bankroll,
+                                edge_threshold=float(edge_threshold),
+                                max_spread_bps=int(spread_limit),
+                                min_liquidity=float(liquidity_floor),
+                                book_cache=books_by_scope[resolved_scope],
+                            )
+                            rows_path = combos_dir / f"{combo_slug}.json"
+                            dump_json(rows_path, rows)
+                            summary = _summarize_result_rows(rows, bankroll_remaining=bankroll_remaining)
+                            combo_rows.append(
+                                {
+                                    "combo": combo_slug,
+                                    "market_scope": resolved_scope,
+                                    "horizon_policy": policy_label,
+                                    "horizon_policy_path": str(policy_path),
+                                    "min_edge": float(edge_threshold),
+                                    "max_spread_bps": int(spread_limit),
+                                    "min_liquidity": float(liquidity_floor),
+                                    "fills": int(summary.get("fills", 0) or 0),
+                                    "tradable_rows": int(summary.get("tradable_rows", 0) or 0),
+                                    "raw_gap_positive_count": int(summary.get("raw_gap_positive_count", 0) or 0),
+                                    "after_cost_edge_positive_count": int(summary.get("after_cost_edge_positive_count", 0) or 0),
+                                    "fee_killed_edge": int(dict(summary.get("reason_counts", {})).get("fee_killed_edge", 0) or 0),
+                                    "raw_gap_non_positive": int(dict(summary.get("reason_counts", {})).get("raw_gap_non_positive", 0) or 0),
+                                    "policy_filtered": int(dict(summary.get("reason_counts", {})).get("policy_filtered", 0) or 0),
+                                    "rows_path": str(rows_path),
+                                    }
+                                )
+    finally:
+        with suppress(Exception):
+            http.close()
+
+    combo_rows.sort(
+        key=lambda row: (
+            -int(row["fills"]),
+            -int(row["tradable_rows"]),
+            -int(row["after_cost_edge_positive_count"]),
+            -int(row["raw_gap_positive_count"]),
+            int(row["raw_gap_non_positive"]),
+            int(row["policy_filtered"]),
+            str(row["combo"]),
+        )
+    )
+    summary_payload = {
+        "generated_at": datetime.now(tz=UTC),
+        "model_path": str(model_path),
+        "model_name": resolved_model_name,
+        "preset_path": str(preset_path),
+        "bankroll": bankroll,
+        "horizon": horizon,
+        "combinations": combo_rows,
+        "top_combinations": combo_rows[:10],
+    }
+    dump_json(run_dir / "summary.json", summary_payload)
+    pd.DataFrame(combo_rows).to_csv(run_dir / "leaderboard.csv", index=False)
+
+    table = Table(title="Execution Sensitivity Report")
+    table.add_column("Scope")
+    table.add_column("Policy")
+    table.add_column("Edge")
+    table.add_column("Spread")
+    table.add_column("Liquidity")
+    table.add_column("Fills")
+    table.add_column("Tradable")
+    table.add_column("Fee Killed")
+    table.add_column("Raw<=0")
+    for row in combo_rows[:10]:
+        table.add_row(
+            str(row["market_scope"]),
+            str(row["horizon_policy"]),
+            f"{float(row['min_edge']):.3f}",
+            str(row["max_spread_bps"]),
+            f"{float(row['min_liquidity']):.1f}",
+            str(row["fills"]),
+            str(row["tradable_rows"]),
+            str(row["fee_killed_edge"]),
+            str(row["raw_gap_non_positive"]),
+        )
+    console.print(table)
+    console.print(f"Wrote {run_dir / 'summary.json'}")
+    console.print(f"Wrote {run_dir / 'leaderboard.csv'}")
+
+
+def _load_report_rows(path: Path) -> list[dict[str, object]]:
+    """Load one row-oriented report from JSON or JSONL."""
+
+    if not path.exists():
+        msg = f"Report input does not exist: {path}"
+        raise FileNotFoundError(msg)
+    if path.suffix == ".jsonl":
+        rows: list[dict[str, object]] = []
+        with path.open() as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    payload = json.loads(line)
+                    if isinstance(payload, dict):
+                        rows.append(payload)
+        return rows
+    payload = load_json(path)
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        nested_rows = payload.get("rows")
+        if isinstance(nested_rows, list):
+            return [row for row in nested_rows if isinstance(row, dict)]
+    msg = f"Unsupported report payload shape in {path}"
+    raise ValueError(msg)
+
+
+def _leaderboard_rows(summary: Mapping[str, object]) -> list[dict[str, object]]:
+    rows = summary.get("leaderboard", [])
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _summary_model_rows(summary_path: Path, model_label: str) -> list[dict[str, object]]:
+    """Load one per-model JSON emitted next to a paper multimodel summary."""
+
+    model_path = summary_path.parent / f"{_safe_slug(model_label)}.json"
+    return _load_report_rows(model_path)
+
+
+def _best_ask_from_row(row: dict[str, object]) -> float | None:
+    return _row_float(row, "best_ask") or _row_float(row, "executable_price")
+
+
+def _break_even_threshold_ask(row: dict[str, object]) -> float | None:
+    best_ask = _best_ask_from_row(row)
+    after_cost_edge = _row_float(row, "after_cost_edge")
+    if best_ask is None or after_cost_edge is None:
+        return None
+    return round(max(best_ask + after_cost_edge, 0.0), 6)
+
+
+def _choose_fee_watchlist_model(summary: Mapping[str, object]) -> str | None:
+    leaderboard = _leaderboard_rows(summary)
+    if not leaderboard:
+        return None
+    ranked = sorted(
+        leaderboard,
+        key=lambda row: (
+            -int(row.get("fee_killed_edge", 0) or 0),
+            -int(row.get("raw_gap_positive_count", 0) or 0),
+            int(row.get("raw_gap_non_positive", 0) or 0),
+            str(row.get("model", "")),
+        ),
+    )
+    model = ranked[0].get("model")
+    return str(model) if model else None
+
+
+def _top_watchlist_examples(
+    rows: list[dict[str, object]],
+    *,
+    cities: set[str],
+    limit: int,
+    include_model: str | None = None,
+) -> list[dict[str, object]]:
+    examples: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_row in rows:
+        row = _normalize_report_row(raw_row)
+        city = str(row.get("city") or "")
+        if cities and city not in cities:
+            continue
+        if str(row.get("reason") or "") != "fee_killed_edge":
+            continue
+        threshold = _break_even_threshold_ask(row)
+        best_ask = _best_ask_from_row(row)
+        if threshold is None or best_ask is None:
+            continue
+        key = (
+            str(row.get("market_id") or ""),
+            str(row.get("outcome_label") or ""),
+            str(row.get("decision_horizon") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        payload = {
+            "city": city,
+            "market_id": row.get("market_id"),
+            "target_local_date": row.get("target_local_date"),
+            "decision_horizon": row.get("decision_horizon"),
+            "outcome_label": row.get("outcome_label"),
+            "best_ask": round(best_ask, 6),
+            "raw_gap": _row_float(row, "raw_gap"),
+            "after_cost_edge": _row_float(row, "after_cost_edge"),
+            "fee_estimate": _row_float(row, "fee_estimate"),
+            "spread": _row_float(row, "spread"),
+            "watch_rule_threshold_ask": threshold,
+        }
+        if include_model is not None:
+            payload["model"] = include_model
+        examples.append(payload)
+    examples.sort(
+        key=lambda item: (
+            str(item.get("city", "")),
+            str(item.get("target_local_date", "")),
+            str(item.get("decision_horizon", "")),
+            str(item.get("outcome_label", "")),
+        )
+    )
+    return examples[:limit]
+
+
+def _bottleneck_cities(
+    payload: Mapping[str, object],
+    *,
+    key: str,
+    limit: int,
+) -> list[str]:
+    summary = payload.get("summary", {})
+    if not isinstance(summary, Mapping):
+        return []
+    rows = summary.get(key, [])
+    if not isinstance(rows, list):
+        return []
+    cities: list[str] = []
+    for row in rows[:limit]:
+        if not isinstance(row, Mapping):
+            continue
+        city = row.get("city")
+        if city:
+            cities.append(str(city))
+    return cities
+
+
+def _execution_sensitivity_headline(summary: Mapping[str, object]) -> dict[str, object]:
+    combinations = summary.get("combinations", [])
+    if not isinstance(combinations, list):
+        combinations = []
+    max_fills = max((int(item.get("fills", 0) or 0) for item in combinations if isinstance(item, Mapping)), default=0)
+    min_raw_gap_non_positive = min(
+        (
+            int(item.get("raw_gap_non_positive", 0) or 0)
+            for item in combinations
+            if isinstance(item, Mapping)
+        ),
+        default=0,
+    )
+    return {
+        "max_fills": max_fills,
+        "min_raw_gap_non_positive": min_raw_gap_non_positive,
+    }
+
+
+def _build_execution_watchlist_playbook(
+    *,
+    champion_bottleneck: Mapping[str, object],
+    challenger_bottleneck: Mapping[str, object],
+    fee_watchlist_summary_path: Path,
+    policy_watchlist_summary_path: Path | None,
+    sensitivity_summary: Mapping[str, object] | None,
+) -> dict[str, object]:
+    fee_watchlist_summary = load_json(fee_watchlist_summary_path)
+    if not isinstance(fee_watchlist_summary, dict):
+        msg = f"Unsupported fee watchlist summary payload: {fee_watchlist_summary_path}"
+        raise ValueError(msg)
+    policy_watchlist_summary = _load_optional_json(policy_watchlist_summary_path) if policy_watchlist_summary_path else None
+
+    tier_a_cities = _bottleneck_cities(challenger_bottleneck, key="fee_sensitive_watchlist", limit=5)
+    tier_b_cities = _bottleneck_cities(challenger_bottleneck, key="policy_blocked_watchlist", limit=5)
+    tier_c_cities = _bottleneck_cities(challenger_bottleneck, key="raw_edge_desert_watchlist", limit=10)
+
+    fee_model = _choose_fee_watchlist_model(fee_watchlist_summary)
+    if fee_model is None:
+        msg = f"No leaderboard rows found in {fee_watchlist_summary_path}"
+        raise ValueError(msg)
+    fee_model_rows = _summary_model_rows(fee_watchlist_summary_path, fee_model)
+    tier_a_evidence = _top_watchlist_examples(
+        fee_model_rows,
+        cities=set(tier_a_cities),
+        limit=10,
+    )
+
+    tier_b_evidence: list[dict[str, object]] = []
+    if isinstance(policy_watchlist_summary, Mapping):
+        for row in _leaderboard_rows(policy_watchlist_summary):
+            if int(row.get("fee_killed_edge", 0) or 0) <= 0:
+                continue
+            model_label = row.get("model")
+            if not model_label:
+                continue
+            tier_b_evidence.extend(
+                _top_watchlist_examples(
+                    _summary_model_rows(policy_watchlist_summary_path, str(model_label)),
+                    cities=set(tier_b_cities),
+                    limit=3,
+                    include_model=str(model_label),
+                )
+            )
+    sensitivity_headline = _execution_sensitivity_headline(sensitivity_summary or {})
+
+    champion_summary = champion_bottleneck.get("summary", {})
+    if not isinstance(champion_summary, Mapping):
+        champion_summary = {}
+
+    playbook = {
+        "generated_at": datetime.now(tz=UTC),
+        "objective": "convert zero-fill diagnostics into a concrete monitoring playbook",
+        "headline": {
+            "champion_dominant_blocker": dict(champion_summary.get("reason_counts", {})),
+            "fee_sensitive_subset_leaderboard": _leaderboard_rows(fee_watchlist_summary),
+            "policy_subset_leaderboard": _leaderboard_rows(policy_watchlist_summary or {}),
+            "sensitivity_max_fills": sensitivity_headline["max_fills"],
+            "sensitivity_min_raw_gap_non_positive": sensitivity_headline["min_raw_gap_non_positive"],
+            "fee_watchlist_model": fee_model,
+        },
+        "playbook": [
+            {
+                "tier": "A",
+                "name": "fee_sensitive_watchlist",
+                "cities": tier_a_cities,
+                "why": "raw gap exists, but the book is pinned near 0.99 and fees kill the edge",
+                "rule": "do not trade these unless the best ask falls to roughly 0.90 or lower on the target outcome; current 0.99 anchors are not close",
+                "evidence": tier_a_evidence,
+            },
+            {
+                "tier": "B",
+                "name": "policy_blocked_watchlist",
+                "cities": tier_b_cities,
+                "why": "current recent-core policy hides some horizons, but lifting the policy still does not create fills",
+                "rule": "keep the live policy as-is; use all-supported policy only for paper observation on these cities",
+                "evidence": tier_b_evidence[:10],
+            },
+            {
+                "tier": "C",
+                "name": "raw_edge_desert",
+                "cities": tier_c_cities,
+                "why": "even before fees, the market is not mispriced often enough",
+                "rule": "deprioritize these cities for manual monitoring until observation-driven dislocation or a fresh listing appears",
+            },
+            {
+                "tier": "D",
+                "name": "threshold_relaxation_result",
+                "cities": [],
+                "why": "paper-only threshold and policy sweeps still produced zero tradable rows at the tested scope",
+                "rule": "do not loosen live thresholds in response to zero fills; the issue is missing raw edge, not guardrails",
+            },
+        ],
+        "next_actions": [
+            "Run observation-shadow long enough to replace the current no_observations state with source-family counts.",
+            "Keep fee-sensitive cities on the station dashboard, but only alert when best ask drops below the watch_rule_threshold_ask.",
+            "Do not widen live spread or lower live edge thresholds until a paper subset produces non-zero tradable rows.",
+        ],
+    }
+    return playbook
+
+
+def _render_execution_watchlist_playbook_markdown(playbook: Mapping[str, object]) -> str:
+    lines = [
+        "# Execution Watchlist Playbook",
+        "",
+        f"Generated: {playbook.get('generated_at', '')}",
+        "",
+        "## Headline",
+        "",
+    ]
+    headline = playbook.get("headline", {})
+    if isinstance(headline, Mapping):
+        lines.append(f"- Champion blockers: {dict(headline.get('champion_dominant_blocker', {}))}")
+        lines.append(f"- Sensitivity max fills: {headline.get('sensitivity_max_fills', 0)}")
+        lines.append(
+            f"- Sensitivity min raw<=0: {headline.get('sensitivity_min_raw_gap_non_positive', 0)}"
+        )
+        lines.append(f"- Fee-watch model: {headline.get('fee_watchlist_model', '')}")
+    lines.append("")
+
+    entries = playbook.get("playbook", [])
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            lines.append(f"## Tier {entry.get('tier', '?')}: {entry.get('name', '')}")
+            lines.append("")
+            cities = entry.get("cities", [])
+            if isinstance(cities, list) and cities:
+                lines.append(f"- Cities: {', '.join(str(city) for city in cities)}")
+            lines.append(f"- Rule: {entry.get('rule', '')}")
+            evidence = entry.get("evidence", [])
+            if isinstance(evidence, list) and evidence:
+                lines.append("")
+                lines.append("Top examples:")
+                for row in evidence[:5]:
+                    if not isinstance(row, Mapping):
+                        continue
+                    alert_threshold = row.get("watch_rule_threshold_ask")
+                    current_ask = row.get("best_ask")
+                    lines.append(
+                        "- "
+                        f"{row.get('city', '')} {row.get('target_local_date', '')} {row.get('outcome_label', '')}: "
+                        f"ask={current_ask}, after_cost_edge={row.get('after_cost_edge')}, "
+                        f"alert only if ask<={alert_threshold}"
+                    )
+            lines.append("")
+
+    next_actions = playbook.get("next_actions", [])
+    if isinstance(next_actions, list) and next_actions:
+        lines.append("## Next Actions")
+        lines.append("")
+        for item in next_actions:
+            lines.append(f"- {item}")
+    return "\n".join(lines).strip() + "\n"
+
+
+@app.command("market-bottleneck-report")
+def market_bottleneck_report(
+    input_path: Path = typer.Option(Path("artifacts/signals/v2/paper_signals.json"), help="Row-oriented report JSON or JSONL"),
+    opportunity_summary_path: Path | None = typer.Option(None, help="Opportunity shadow summary JSON"),
+    observation_summary_path: Path | None = typer.Option(None, help="Observation shadow summary JSON"),
+    output: Path = typer.Option(Path("artifacts/signals/v2/market_bottleneck_report.json"), help="Output JSON"),
+) -> None:
+    """Summarize the dominant blockers for one paper/opportunity/observation result set."""
+
+    input_path = _resolve_option_value(input_path, Path("artifacts/signals/v2/paper_signals.json"))
+    opportunity_summary_path = _resolve_option_value(opportunity_summary_path)
+    observation_summary_path = _resolve_option_value(observation_summary_path)
+    output = _resolve_option_value(output, Path("artifacts/signals/v2/market_bottleneck_report.json"))
+
+    rows = _load_report_rows(input_path)
+    summary = _summarize_result_rows(rows)
+    payload = {
+        "generated_at": datetime.now(tz=UTC),
+        "input_path": str(input_path),
+        "summary": summary,
+        "shadow_context": {
+            "opportunity": _load_optional_json(opportunity_summary_path) if opportunity_summary_path else None,
+            "observation": _load_optional_json(observation_summary_path) if observation_summary_path else None,
+        },
+    }
+    dump_json(output, payload)
+
+    table = Table(title="Market Bottleneck Report")
+    table.add_column("Bucket")
+    table.add_column("Count")
+    reason_counts = dict(summary.get("reason_counts", {}))
+    for reason, count in sorted(reason_counts.items(), key=lambda item: (-int(item[1]), item[0])):
+        table.add_row(str(reason), str(count))
+    console.print(table)
+    console.print(f"Wrote {output}")
+
+
+@app.command("execution-watchlist-playbook")
+def execution_watchlist_playbook(
+    champion_bottleneck_path: Path = typer.Option(
+        Path("artifacts/signals/v2/market_bottleneck_report__champion_alias.json"),
+        help="Champion market-bottleneck-report JSON",
+    ),
+    challenger_bottleneck_path: Path = typer.Option(
+        Path("artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json"),
+        help="Challenger market-bottleneck-report JSON",
+    ),
+    fee_watchlist_summary_path: Path = typer.Option(
+        ...,
+        help="paper-multimodel summary.json for the fee-sensitive city subset",
+    ),
+    policy_watchlist_summary_path: Path | None = typer.Option(
+        None,
+        help="Optional paper-multimodel summary.json for the policy-blocked city subset",
+    ),
+    sensitivity_summary_path: Path | None = typer.Option(
+        None,
+        help="Optional execution-sensitivity summary.json for the guardrail sweep subset",
+    ),
+    output: Path = typer.Option(
+        DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_PATH,
+        help="Watchlist playbook JSON output",
+    ),
+    markdown_output: Path = typer.Option(
+        DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_MD_PATH,
+        help="Watchlist playbook Markdown output",
+    ),
+) -> None:
+    """Convert zero-fill diagnostics into one execution watchlist playbook."""
+
+    champion_bottleneck_path = _resolve_option_value(
+        champion_bottleneck_path,
+        Path("artifacts/signals/v2/market_bottleneck_report__champion_alias.json"),
+    )
+    challenger_bottleneck_path = _resolve_option_value(
+        challenger_bottleneck_path,
+        Path("artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json"),
+    )
+    fee_watchlist_summary_path = _resolve_option_value(fee_watchlist_summary_path)
+    policy_watchlist_summary_path = _resolve_option_value(policy_watchlist_summary_path)
+    sensitivity_summary_path = _resolve_option_value(sensitivity_summary_path)
+    output = _resolve_option_value(output, DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_PATH)
+    markdown_output = _resolve_option_value(markdown_output, DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_MD_PATH)
+
+    champion_bottleneck = load_json(champion_bottleneck_path)
+    challenger_bottleneck = load_json(challenger_bottleneck_path)
+    if not isinstance(champion_bottleneck, dict) or not isinstance(challenger_bottleneck, dict):
+        msg = "Bottleneck reports must be JSON objects."
+        raise typer.BadParameter(msg)
+    sensitivity_summary = _load_optional_json(sensitivity_summary_path) if sensitivity_summary_path else None
+    playbook = _build_execution_watchlist_playbook(
+        champion_bottleneck=champion_bottleneck,
+        challenger_bottleneck=challenger_bottleneck,
+        fee_watchlist_summary_path=fee_watchlist_summary_path,
+        policy_watchlist_summary_path=policy_watchlist_summary_path,
+        sensitivity_summary=sensitivity_summary,
+    )
+    dump_json(output, playbook)
+    markdown_output.parent.mkdir(parents=True, exist_ok=True)
+    markdown_output.write_text(_render_execution_watchlist_playbook_markdown(playbook))
+
+    tier_a_entry = next(
+        (
+            entry
+            for entry in list(playbook.get("playbook", []))
+            if isinstance(entry, dict) and entry.get("name") == "fee_sensitive_watchlist"
+        ),
+        {},
+    )
+    table = Table(title="Execution Watchlist Playbook")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("fee_watchlist_model", str(dict(playbook.get("headline", {})).get("fee_watchlist_model", "")))
+    table.add_row("tier_a_cities", ", ".join(str(city) for city in list(dict(tier_a_entry).get("cities", []))))
+    table.add_row("tier_a_examples", str(len(list(dict(tier_a_entry).get("evidence", [])))))
+    table.add_row("json_output", str(output))
+    table.add_row("markdown_output", str(markdown_output))
+    console.print(table)
+    console.print(f"Wrote {output}")
+    console.print(f"Wrote {markdown_output}")
 
 
 @app.command("live-trader")
@@ -6929,6 +8583,10 @@ def opportunity_report(
     market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("policy", help="Forecast horizon or 'policy'"),
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
     output: Path = typer.Option(Path("artifacts/signals/v2/opportunity_report.json"), help="Output JSON"),
 ) -> None:
@@ -6941,6 +8599,7 @@ def opportunity_report(
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
     markets_path = _resolve_option_value(markets_path)
     horizon = _resolve_option_value(horizon, "policy")
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     min_edge = _resolve_option_value(min_edge)
     output = _resolve_option_value(output, Path("artifacts/signals/v2/opportunity_report.json"))
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
@@ -6965,69 +8624,72 @@ def opportunity_report(
         closed=False,
     )
     edge_threshold = min_edge if min_edge is not None else config.backtest.default_edge_threshold
-    horizon_policy = _load_recent_horizon_policy()
+    horizon_policy = _load_recent_horizon_policy(horizon_policy_path)
 
-    observations: list[OpportunityObservation] = []
-    for snapshot in snapshots:
-        spec = snapshot.spec
-        now_utc = datetime.now(tz=UTC)
-        if spec is None or spec.target_local_date < now_utc.date():
-            continue
-        decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
-            spec,
-            now_utc=now_utc,
-            horizon=horizon,
-            horizon_policy=horizon_policy,
-        )
-        if horizon_reason == "policy_filtered":
-            observations.append(
-                _empty_opportunity_observation(
-                    snapshot,
-                    observed_at=now_utc,
-                    decision_horizon=decision_horizon or "policy",
-                    reason="policy_filtered",
-                )
+    try:
+        observations: list[OpportunityObservation] = []
+        for snapshot in snapshots:
+            spec = snapshot.spec
+            now_utc = datetime.now(tz=UTC)
+            if spec is None or spec.target_local_date < now_utc.date():
+                continue
+            decision_horizon, horizon_reason = _resolve_signal_horizon_with_reason(
+                spec,
+                now_utc=now_utc,
+                horizon=horizon,
+                horizon_policy=horizon_policy,
             )
-            continue
-        if decision_horizon is None:
-            continue
-        observation = _evaluate_opportunity_snapshot(
-            snapshot,
-            builder=builder,
-            clob=clob,
-            model_path=model_path,
-            model_name=resolved_model_name,
-            config=config,
-            observed_at=now_utc,
-            decision_horizon=decision_horizon,
-            edge_threshold=edge_threshold,
-        )
-        if observation is not None:
-            observations.append(observation)
+            if horizon_reason == "policy_filtered":
+                observations.append(
+                    _empty_opportunity_observation(
+                        snapshot,
+                        observed_at=now_utc,
+                        decision_horizon=decision_horizon or "policy",
+                        reason="policy_filtered",
+                    )
+                )
+                continue
+            if decision_horizon is None:
+                continue
+            observation = _evaluate_opportunity_snapshot(
+                snapshot,
+                builder=builder,
+                clob=clob,
+                model_path=model_path,
+                model_name=resolved_model_name,
+                config=config,
+                observed_at=now_utc,
+                decision_horizon=decision_horizon,
+                edge_threshold=edge_threshold,
+            )
+            if observation is not None:
+                observations.append(observation)
 
-    rows = [_serialize_opportunity_observation(observation) for observation in observations]
-    rows.sort(key=lambda row: (row.get("reason") != "tradable", -(float(row.get("edge", -999.0)) if row.get("edge") is not None else -999.0)))
-    dump_json(output, rows)
+        rows = [_serialize_opportunity_observation(observation) for observation in observations]
+        rows.sort(key=lambda row: (row.get("reason") != "tradable", -(float(row.get("edge", -999.0)) if row.get("edge") is not None else -999.0)))
+        dump_json(output, rows)
 
-    table = Table(title="Opportunity Report")
-    table.add_column("City")
-    table.add_column("Date")
-    table.add_column("Outcome")
-    table.add_column("Edge")
-    table.add_column("Book")
-    table.add_column("Reason")
-    for row in rows[:20]:
-        edge = row.get("edge")
-        table.add_row(
-            str(row.get("city", "")),
-            str(row.get("target_local_date", "")),
-            str(row.get("outcome_label", "—")),
-            f"{float(edge):+.4f}" if edge is not None else "—",
-            str(row.get("book_source", "—")),
-            str(row.get("reason", "")),
-        )
-    console.print(table)
-    console.print(f"Wrote {output}")
+        table = Table(title="Opportunity Report")
+        table.add_column("City")
+        table.add_column("Date")
+        table.add_column("Outcome")
+        table.add_column("Edge")
+        table.add_column("Book")
+        table.add_column("Reason")
+        for row in rows[:20]:
+            edge = row.get("edge")
+            table.add_row(
+                str(row.get("city", "")),
+                str(row.get("target_local_date", "")),
+                str(row.get("outcome_label", "—")),
+                f"{float(edge):+.4f}" if edge is not None else "—",
+                str(row.get("book_source", "—")),
+                str(row.get("reason", "")),
+            )
+        console.print(table)
+        console.print(f"Wrote {output}")
+    finally:
+        http.close()
 
 
 @app.command("opportunity-shadow")
@@ -7041,6 +8703,10 @@ def opportunity_shadow(
     interval: int | None = typer.Option(None, help="Seconds between shadow cycles"),
     max_cycles: int | None = typer.Option(None, help="Maximum cycles (0 = infinite)"),
     near_term_days: int | None = typer.Option(None, help="How many days ahead to include beyond local today"),
+    horizon_policy_path: Path = typer.Option(
+        DEFAULT_RECENT_HORIZON_POLICY_PATH,
+        help="City-level horizon policy YAML",
+    ),
     output: Path | None = typer.Option(None, help="Append-only JSONL output"),
     latest_output: Path | None = typer.Option(None, help="Latest cycle JSON output"),
     summary_output: Path | None = typer.Option(None, help="Summary JSON output"),
@@ -7057,6 +8723,7 @@ def opportunity_shadow(
     interval = _resolve_option_value(interval)
     max_cycles = _resolve_option_value(max_cycles)
     near_term_days = _resolve_option_value(near_term_days)
+    horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     output = _resolve_option_value(output)
     latest_output = _resolve_option_value(latest_output)
     summary_output = _resolve_option_value(summary_output)
@@ -7082,7 +8749,7 @@ def opportunity_shadow(
     summary_output_path = summary_output or _default_signal_output(shadow_config.summary_output_path.name)
     latest_output_path = latest_output or _default_signal_output(shadow_config.latest_output_path.name)
     effective_state_path = state_path or _default_signal_output(shadow_config.state_path.name)
-    horizon_policy = _load_recent_horizon_policy()
+    horizon_policy = _load_recent_horizon_policy(horizon_policy_path)
     edge_threshold = config.backtest.default_edge_threshold
     cities = _resolve_scoped_cities(cities, market_scope=market_scope)
 
@@ -7145,15 +8812,18 @@ def opportunity_shadow(
         evaluator=_evaluator,
     )
 
-    console.print(
-        "Opportunity shadow: "
-        f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
-        f"near_term_days={effective_near_term_days}"
-    )
-    runner.run_loop()
-    console.print(f"Wrote latest {latest_output_path}")
-    console.print(f"Wrote history {history_output_path}")
-    console.print(f"Wrote summary {summary_output_path}")
+    try:
+        console.print(
+            "Opportunity shadow: "
+            f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
+            f"near_term_days={effective_near_term_days}"
+        )
+        runner.run_loop()
+        console.print(f"Wrote latest {latest_output_path}")
+        console.print(f"Wrote history {history_output_path}")
+        console.print(f"Wrote summary {summary_output_path}")
+    finally:
+        http.close()
 
 
 @app.command("open-phase-shadow")
@@ -7263,35 +8933,38 @@ def open_phase_shadow(
         evaluator=_evaluator,
     )
 
-    console.print(
-        "Open-phase shadow: "
-        f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
-        f"open_window_hours={open_window_hours}, horizon={horizon}"
-    )
-    runner.run_loop()
-
-    rows = json.loads(latest_output.read_text()) if latest_output.exists() else []
-    table = Table(title="Open-Phase Shadow")
-    table.add_column("City")
-    table.add_column("Date")
-    table.add_column("Age(h)")
-    table.add_column("Outcome")
-    table.add_column("Edge")
-    table.add_column("Reason")
-    for row in rows[:20]:
-        edge = row.get("after_cost_edge")
-        table.add_row(
-            str(row.get("city", "")),
-            str(row.get("target_local_date", "")),
-            f"{float(row['open_phase_age_hours']):.2f}" if row.get("open_phase_age_hours") is not None else "—",
-            str(row.get("outcome_label", "—")),
-            f"{float(edge):+.4f}" if edge is not None else "—",
-            str(row.get("reason", "")),
+    try:
+        console.print(
+            "Open-phase shadow: "
+            f"interval={effective_interval}s, max_cycles={effective_max_cycles or 0}, "
+            f"open_window_hours={open_window_hours}, horizon={horizon}"
         )
-    console.print(table)
-    console.print(f"Wrote latest {latest_output}")
-    console.print(f"Wrote history {output}")
-    console.print(f"Wrote summary {summary_output}")
+        runner.run_loop()
+
+        rows = json.loads(latest_output.read_text()) if latest_output.exists() else []
+        table = Table(title="Open-Phase Shadow")
+        table.add_column("City")
+        table.add_column("Date")
+        table.add_column("Age(h)")
+        table.add_column("Outcome")
+        table.add_column("Edge")
+        table.add_column("Reason")
+        for row in rows[:20]:
+            edge = row.get("after_cost_edge")
+            table.add_row(
+                str(row.get("city", "")),
+                str(row.get("target_local_date", "")),
+                f"{float(row['open_phase_age_hours']):.2f}" if row.get("open_phase_age_hours") is not None else "—",
+                str(row.get("outcome_label", "—")),
+                f"{float(edge):+.4f}" if edge is not None else "—",
+                str(row.get("reason", "")),
+            )
+        console.print(table)
+        console.print(f"Wrote latest {latest_output}")
+        console.print(f"Wrote history {output}")
+        console.print(f"Wrote summary {summary_output}")
+    finally:
+        http.close()
 
 
 @app.command("hope-hunt-report")

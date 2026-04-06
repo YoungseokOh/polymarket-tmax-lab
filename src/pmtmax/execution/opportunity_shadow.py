@@ -6,11 +6,12 @@ import json
 import signal
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pmtmax.config.settings import RepoConfig
@@ -50,6 +51,58 @@ def summarize_opportunity_history(history_path: Path) -> dict[str, Any]:
                 line = line.strip()
                 if line:
                     rows.append(OpportunityObservation.model_validate_json(line))
+
+    def _nested_reason_counts(
+        items: list[OpportunityObservation],
+        *,
+        key_fn: Callable[[OpportunityObservation], str],
+    ) -> dict[str, dict[str, int]]:
+        nested: dict[str, Counter[str]] = {}
+        for item in items:
+            key = key_fn(item)
+            nested.setdefault(key, Counter())[item.reason] += 1
+        return {
+            group: dict(sorted(counter.items()))
+            for group, counter in sorted(nested.items())
+        }
+
+    def _top_candidates(
+        items: list[OpportunityObservation],
+        *,
+        limit: int,
+        reasons: set[str] | None = None,
+        sort_key: Callable[[OpportunityObservation], float],
+    ) -> list[dict[str, Any]]:
+        ranked = [
+            item
+            for item in items
+            if reasons is None or item.reason in reasons
+        ]
+        ranked.sort(
+            key=lambda item: (
+                -sort_key(item),
+                -(item.raw_gap if item.raw_gap is not None else -999.0),
+                item.observed_at,
+                item.market_id,
+            )
+        )
+        rows: list[dict[str, Any]] = []
+        for item in ranked[:limit]:
+            rows.append(
+                {
+                    "market_id": item.market_id,
+                    "city": item.city,
+                    "target_local_date": item.target_local_date.isoformat(),
+                    "decision_horizon": item.decision_horizon,
+                    "reason": item.reason,
+                    "outcome_label": item.outcome_label,
+                    "raw_gap": item.raw_gap,
+                    "after_cost_edge": item.after_cost_edge,
+                    "spread": item.spread,
+                    "visible_liquidity": item.visible_liquidity,
+                }
+            )
+        return rows
 
     def _summary(items: list[OpportunityObservation]) -> dict[str, Any]:
         reason_counts = Counter(item.reason for item in items)
@@ -98,6 +151,48 @@ def summarize_opportunity_history(history_path: Path) -> dict[str, Any]:
             key: _summary(group_rows)
             for key, group_rows in sorted(by_city_horizon.items())
         },
+        "by_reason": {
+            reason: _summary(reason_rows)
+            for reason, reason_rows in sorted(
+                {
+                    reason: [row for row in rows if row.reason == reason]
+                    for reason in sorted({row.reason for row in rows})
+                }.items()
+            )
+        },
+        "by_city_reason": _nested_reason_counts(rows, key_fn=lambda item: item.city),
+        "by_horizon_reason": _nested_reason_counts(rows, key_fn=lambda item: item.decision_horizon),
+        "top_near_miss_markets": _top_candidates(
+            rows,
+            limit=10,
+            reasons={
+                "fee_killed_edge",
+                "slippage_killed_edge",
+                "after_cost_positive_but_spread_too_wide",
+                "after_cost_positive_but_liquidity_too_low",
+                "after_cost_positive_but_below_threshold",
+                "insufficient_depth",
+            },
+            sort_key=lambda item: item.after_cost_edge if item.after_cost_edge is not None else -999.0,
+        ),
+        "top_fee_killed_markets": _top_candidates(
+            rows,
+            limit=10,
+            reasons={"fee_killed_edge"},
+            sort_key=lambda item: item.raw_gap if item.raw_gap is not None else -999.0,
+        ),
+        "top_spread_blocked_markets": _top_candidates(
+            rows,
+            limit=10,
+            reasons={"after_cost_positive_but_spread_too_wide", "slippage_killed_edge", "insufficient_depth"},
+            sort_key=lambda item: item.spread if item.spread is not None else -999.0,
+        ),
+        "top_policy_filtered_markets": _top_candidates(
+            rows,
+            limit=10,
+            reasons={"policy_filtered"},
+            sort_key=lambda item: item.raw_gap if item.raw_gap is not None else -999.0,
+        ),
     }
     gate = classify_path_viability(summary)
     summary["gate_decision"] = gate["decision"]

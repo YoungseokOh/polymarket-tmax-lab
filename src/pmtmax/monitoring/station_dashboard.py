@@ -28,6 +28,7 @@ def build_station_dashboard(
     revenue_gate_summary: Mapping[str, Any] | None,
     observation_summary: Mapping[str, Any] | None,
     open_phase_summary: Mapping[str, Any] | None,
+    watchlist_playbook: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one combined station dashboard snapshot."""
 
@@ -47,6 +48,12 @@ def build_station_dashboard(
     revenue_reason = str((revenue_gate_summary or {}).get("decision_reason", "missing_summary"))
     observation_source_breakdown = dict((observation_summary or {}).get("by_source_family", {}))
     observation_adapter_breakdown = dict((observation_summary or {}).get("by_observation_source", {}))
+    watchlist_panel = _build_watchlist_panel(
+        watchlist_playbook,
+        opportunity_rows=opportunity_rows,
+        observation_rows=observation_rows,
+        queue_rows=queue_rows,
+    )
 
     dashboard = {
         "generated_at": datetime.now(tz=UTC),
@@ -58,6 +65,7 @@ def build_station_dashboard(
             "queue_size": len(queue_rows),
             "open_phase_count": len(open_phase_rows),
             "manual_review_count": sum(1 for row in queue_rows if row.get("queue_state") == "manual_review"),
+            "watchlist_alert_count": int(watchlist_panel.get("triggered_alert_count", 0) or 0),
         },
         "discovery_panel": {
             "gate_decision": str((open_phase_summary or {}).get("gate_decision", "INCONCLUSIVE")),
@@ -90,6 +98,7 @@ def build_station_dashboard(
                 dict((revenue_gate_summary or {}).get("observation_source_breakdown", {}))
             ),
         },
+        "watchlist_panel": watchlist_panel,
     }
     return dashboard
 
@@ -101,6 +110,7 @@ def render_station_dashboard_html(dashboard: Mapping[str, Any]) -> str:
     discovery = dict(dashboard.get("discovery_panel", {}))
     observation = dict(dashboard.get("observation_panel", {}))
     execution = dict(dashboard.get("execution_panel", {}))
+    watchlist = dict(dashboard.get("watchlist_panel", {}))
 
     def _kv_rows(payload: Mapping[str, Any]) -> str:
         return "".join(
@@ -270,6 +280,7 @@ def render_station_dashboard_html(dashboard: Mapping[str, Any]) -> str:
     <article class="stat"><span class="label">Manual Queue</span><span class="value">{html.escape(_stringify_value(overview.get("manual_review_count", 0)))}</span></article>
     <article class="stat"><span class="label">Queue Size</span><span class="value">{html.escape(_stringify_value(overview.get("queue_size", 0)))}</span></article>
     <article class="stat"><span class="label">Open-Phase Count</span><span class="value">{html.escape(_stringify_value(overview.get("open_phase_count", 0)))}</span></article>
+    <article class="stat"><span class="label">Watchlist Alerts</span><span class="value">{html.escape(_stringify_value(overview.get("watchlist_alert_count", 0)))}</span></article>
   </section>
   <section class="grid">
     <section class="panel">
@@ -290,11 +301,19 @@ def render_station_dashboard_html(dashboard: Mapping[str, Any]) -> str:
         <table><tbody>{_kv_rows({"required_model_alias": execution.get("required_model_alias"), "eligible_for_live_pilot": execution.get("eligible_for_live_pilot"), "revenue_gate_reason": overview.get("revenue_gate_reason")})}</tbody></table>
       </div>
     </section>
+    <section class="panel">
+      <h2>Watchlist</h2>
+      <div class="panel-body">
+        <table><tbody>{_kv_rows({"tier_a_cities": watchlist.get("tier_a_cities", []), "tier_b_cities": watchlist.get("tier_b_cities", []), "triggered_alert_count": watchlist.get("triggered_alert_count", 0)})}</tbody></table>
+      </div>
+    </section>
   </section>
   <section class="tables">
     {_render_table("Discovery Top Markets", list(discovery.get("top_markets", [])), ["city", "target_local_date", "decision_horizon", "outcome_label", "edge", "open_phase_age_hours", "reason"])}
     {_render_table("Observation Queue", list(observation.get("top_candidates", [])), ["city", "target_local_date", "decision_horizon", "queue_state", "outcome_label", "edge", "source_family", "observation_source"])}
     {_render_table("Execution Opportunities", list(execution.get("top_opportunities", [])), ["city", "target_local_date", "decision_horizon", "outcome_label", "edge", "reason"])}
+    {_render_table("Watchlist Alerts", list(watchlist.get("triggered_alerts", [])), ["city", "target_local_date", "decision_horizon", "outcome_label", "current_best_ask", "threshold_ask", "gap_to_threshold"])}
+    {_render_table("Watchlist Rules", list(watchlist.get("top_rules", [])), ["tier", "city", "target_local_date", "decision_horizon", "outcome_label", "current_best_ask", "threshold_ask"])}
     {_render_breakdown("Observation Source Families", list(observation.get("source_family_breakdown", [])))}
     {_render_breakdown("Observation Adapters", list(observation.get("observation_source_breakdown", [])))}
   </section>
@@ -335,6 +354,7 @@ class StationDashboardRunner:
             "observation_tradable_count": int(overview.get("observation_tradable_count", 0) or 0),
             "opportunity_tradable_count": int(overview.get("opportunity_tradable_count", 0) or 0),
             "open_phase_count": int(overview.get("open_phase_count", 0) or 0),
+            "watchlist_alert_count": int(overview.get("watchlist_alert_count", 0) or 0),
         }
 
     def run_loop(self) -> None:
@@ -375,6 +395,7 @@ class StationDashboardRunner:
             "observation_tradable_count": int(overview.get("observation_tradable_count", 0) or 0),
             "opportunity_tradable_count": int(overview.get("opportunity_tradable_count", 0) or 0),
             "open_phase_count": int(overview.get("open_phase_count", 0) or 0),
+            "watchlist_alert_count": int(overview.get("watchlist_alert_count", 0) or 0),
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(state, indent=2, default=str))
@@ -425,6 +446,7 @@ def _compact_market_row(row: Mapping[str, Any], *, include_age: bool = False) ->
 
 def _compact_observation_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "market_id": row.get("market_id", ""),
         "city": row.get("city", ""),
         "target_local_date": row.get("target_local_date", ""),
         "decision_horizon": row.get("decision_horizon", ""),
@@ -434,6 +456,147 @@ def _compact_observation_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "source_family": row.get("source_family", ""),
         "observation_source": row.get("observation_source", ""),
     }
+
+
+def _build_watchlist_panel(
+    playbook: Mapping[str, Any] | None,
+    *,
+    opportunity_rows: list[dict[str, Any]],
+    observation_rows: list[dict[str, Any]],
+    queue_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tier_a = _playbook_entry(playbook, "fee_sensitive_watchlist")
+    tier_b = _playbook_entry(playbook, "policy_blocked_watchlist")
+    tier_c = _playbook_entry(playbook, "raw_edge_desert")
+    tier_a_rules = _playbook_rules(tier_a)
+    current_rows = _current_watchlist_rows(opportunity_rows, observation_rows, queue_rows)
+    triggered_alerts = _detect_watchlist_alerts(current_rows, tier_a_rules)
+    top_rules = [
+        _compact_watchlist_rule(rule, current_rows=current_rows)
+        for rule in tier_a_rules[:8]
+    ]
+    return {
+        "tier_a_cities": list(tier_a.get("cities", [])) if isinstance(tier_a, Mapping) else [],
+        "tier_b_cities": list(tier_b.get("cities", [])) if isinstance(tier_b, Mapping) else [],
+        "tier_c_cities": list(tier_c.get("cities", [])) if isinstance(tier_c, Mapping) else [],
+        "triggered_alert_count": len(triggered_alerts),
+        "triggered_alerts": triggered_alerts[:8],
+        "top_rules": top_rules,
+        "next_actions": list(playbook.get("next_actions", [])) if isinstance(playbook, Mapping) else [],
+    }
+
+
+def _playbook_entry(playbook: Mapping[str, Any] | None, name: str) -> Mapping[str, Any]:
+    entries = playbook.get("playbook", []) if isinstance(playbook, Mapping) else []
+    if not isinstance(entries, list):
+        return {}
+    for entry in entries:
+        if isinstance(entry, Mapping) and str(entry.get("name", "")) == name:
+            return entry
+    return {}
+
+
+def _playbook_rules(entry: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    evidence = entry.get("evidence", [])
+    if not isinstance(evidence, list):
+        return []
+    return [item for item in evidence if isinstance(item, Mapping)]
+
+
+def _current_watchlist_rows(*row_groups: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    current: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for rows in row_groups:
+        for row in rows:
+            market_id = str(row.get("market_id") or "")
+            outcome_label = str(row.get("outcome_label") or "")
+            decision_horizon = str(row.get("decision_horizon") or "")
+            if not market_id or not outcome_label or not decision_horizon:
+                continue
+            best_ask = _current_best_ask(row)
+            if best_ask is None:
+                continue
+            key = (market_id, outcome_label, decision_horizon)
+            existing = current.get(key)
+            if existing is None or best_ask < _float_value(existing.get("current_best_ask"), default=999.0):
+                current[key] = {
+                    "market_id": market_id,
+                    "city": row.get("city", ""),
+                    "target_local_date": row.get("target_local_date", ""),
+                    "decision_horizon": decision_horizon,
+                    "outcome_label": outcome_label,
+                    "current_best_ask": round(best_ask, 6),
+                }
+    return current
+
+
+def _detect_watchlist_alerts(
+    current_rows: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    rules: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    for rule in rules:
+        market_id = str(rule.get("market_id") or "")
+        outcome_label = str(rule.get("outcome_label") or "")
+        decision_horizon = str(rule.get("decision_horizon") or "")
+        threshold = _float_value(rule.get("watch_rule_threshold_ask"), default=-1.0)
+        if not market_id or not outcome_label or not decision_horizon or threshold < 0:
+            continue
+        matched = current_rows.get((market_id, outcome_label, decision_horizon))
+        if matched is None:
+            continue
+        current_best_ask = _float_value(matched.get("current_best_ask"), default=999.0)
+        if current_best_ask > threshold:
+            continue
+        alerts.append(
+            {
+                "city": matched.get("city", rule.get("city", "")),
+                "target_local_date": matched.get("target_local_date", rule.get("target_local_date", "")),
+                "decision_horizon": decision_horizon,
+                "outcome_label": outcome_label,
+                "current_best_ask": round(current_best_ask, 6),
+                "threshold_ask": round(threshold, 6),
+                "gap_to_threshold": round(threshold - current_best_ask, 6),
+            }
+        )
+    alerts.sort(
+        key=lambda row: (
+            -_float_value(row.get("gap_to_threshold")),
+            str(row.get("city", "")),
+            str(row.get("target_local_date", "")),
+        )
+    )
+    return alerts
+
+
+def _compact_watchlist_rule(
+    rule: Mapping[str, Any],
+    *,
+    current_rows: Mapping[tuple[str, str, str], Mapping[str, Any]],
+) -> dict[str, Any]:
+    market_id = str(rule.get("market_id") or "")
+    outcome_label = str(rule.get("outcome_label") or "")
+    decision_horizon = str(rule.get("decision_horizon") or "")
+    matched = current_rows.get((market_id, outcome_label, decision_horizon), {})
+    return {
+        "tier": "A",
+        "city": rule.get("city", ""),
+        "target_local_date": rule.get("target_local_date", ""),
+        "decision_horizon": decision_horizon,
+        "outcome_label": outcome_label,
+        "current_best_ask": _rounded(matched.get("current_best_ask")),
+        "threshold_ask": _rounded(rule.get("watch_rule_threshold_ask")),
+    }
+
+
+def _current_best_ask(row: Mapping[str, Any]) -> float | None:
+    for key in ("best_ask", "executable_price"):
+        value = row.get(key)
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _rounded(value: Any) -> float | str | None:
