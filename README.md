@@ -425,6 +425,10 @@ uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
 ```
 
+If you are topping off an existing warehouse and only want forecast keys that are
+absent from `bronze_forecast_requests`, add `--missing-only` to
+`backfill-forecasts`.
+
 Price-history note: the public CLOB `/prices-history` endpoint is retention-limited in practice. Once older official-history payloads have been captured into `data/raw/bronze`, `bronze_price_history_requests`, and `silver_price_timeseries`, prefer re-materializing `gold_backtest_panel` and `artifacts/price_history_coverage.json` from the archived warehouse. A late uncached refetch can return an empty history for markets that previously had archived points, which reduces request-level coverage without improving research fidelity.
 
 The checked-in starter source URLs live in `configs/market_inventory/historical_temperature_event_urls.json`, and the generated curated `MarketSnapshot[]` inventory lives in `configs/market_inventory/historical_temperature_snapshots.json`.

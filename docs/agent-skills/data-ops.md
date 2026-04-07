@@ -64,6 +64,18 @@ uv run pmtmax summarize-forecast-availability
 uv run pmtmax compact-warehouse
 ```
 
+기존 canonical warehouse를 이어서 채우는 incremental run이면
+`backfill-forecasts`에 `--missing-only`를 추가해서
+`bronze_forecast_requests`에 없는 key만 수집할 수 있다.
+
+`configs/market_inventory/historical_temperature_snapshots.json`은 canonical curated
+historical collection inventory다. 반면
+`configs/market_inventory/full_training_set_snapshots.json`은 checked-in training
+inventory라서 자동으로 sync되지 않는다. training inventory를 갱신해야 하면
+먼저 `historical_temperature_snapshots.json`을 refresh/build/validate한 뒤,
+의도적으로 `full_training_set_snapshots.json`을 다시 curate해서 같은 change에
+체크인한다.
+
 - source URL 목록: `configs/market_inventory/historical_temperature_event_urls.json`
 - curated snapshot inventory: `configs/market_inventory/historical_temperature_snapshots.json`
 - closed-event candidates: `data/manifests/historical_event_candidates.json`

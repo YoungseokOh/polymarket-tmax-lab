@@ -6,7 +6,7 @@ import datetime as dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -43,6 +43,23 @@ VARIABLE_FALLBACKS: list[list[str]] = [
     ["temperature_2m", "dew_point_2m", "relative_humidity_2m"],
     PROBE_HOURLY,
 ]
+
+
+class ForecastBackfillResult(TypedDict):
+    bronze_forecast_requests_count: int
+    silver_forecast_runs_hourly_count: int
+    bronze_forecast_requests: pd.DataFrame | None
+    silver_forecast_runs_hourly: pd.DataFrame | None
+
+
+ForecastRequestKey = tuple[str, str, str, str, str | None, str]
+
+
+class ForecastRequestState(TypedDict):
+    status: str
+    availability_status: str
+    query_signature: str | None
+    http_status: int | None
 
 
 def _convert_celsius_features(features: dict[str, float], unit: str) -> dict[str, float]:
@@ -262,6 +279,79 @@ class BackfillPipeline:
         self.warehouse.write_manifest()
         return {"bronze_market_snapshots": bronze, "silver_market_specs": silver}
 
+    @staticmethod
+    def _forecast_request_key(
+        *,
+        spec: MarketSpec,
+        model: str,
+        endpoint_kind: str,
+        request_kind: str,
+        decision_horizon: str | None,
+    ) -> ForecastRequestKey:
+        return (
+            spec.market_id,
+            model,
+            endpoint_kind,
+            request_kind,
+            decision_horizon,
+            spec.target_local_date.isoformat(),
+        )
+
+    def _load_existing_forecast_request_states(
+        self,
+        snapshots: list[MarketSnapshot],
+        *,
+        models: list[str],
+    ) -> tuple[pd.DataFrame, dict[ForecastRequestKey, ForecastRequestState]]:
+        if not self.warehouse.table_exists("bronze_forecast_requests"):
+            return pd.DataFrame(), {}
+        market_ids = sorted({snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None})
+        if not market_ids or not models:
+            return pd.DataFrame(), {}
+
+        market_placeholders = ",".join(["?"] * len(market_ids))
+        model_placeholders = ",".join(["?"] * len(models))
+        frame = self.warehouse.read_query(
+            f"""
+            select
+                market_id,
+                model_name,
+                endpoint_kind,
+                request_kind,
+                decision_horizon,
+                cast(target_local_date as date)::varchar as target_local_date,
+                status,
+                availability_status,
+                query_signature,
+                cast(http_status as bigint) as http_status
+            from bronze_forecast_requests
+            where market_id in ({market_placeholders})
+              and model_name in ({model_placeholders})
+            """,
+            parameters=[*market_ids, *models],
+        )
+        states: dict[ForecastRequestKey, ForecastRequestState] = {}
+        if frame.empty:
+            return frame, states
+        for row in frame.itertuples(index=False):
+            decision_horizon = str(row.decision_horizon) if pd.notna(row.decision_horizon) else None
+            http_status = int(row.http_status) if row.http_status is not None and not pd.isna(row.http_status) else None
+            key: ForecastRequestKey = (
+                str(row.market_id),
+                str(row.model_name),
+                str(row.endpoint_kind),
+                str(row.request_kind),
+                decision_horizon,
+                str(row.target_local_date),
+            )
+            states[key] = {
+                "status": str(row.status),
+                "availability_status": str(row.availability_status),
+                "query_signature": str(row.query_signature) if pd.notna(row.query_signature) else None,
+                "http_status": http_status,
+            }
+        return frame, states
+
     def backfill_forecasts(
         self,
         snapshots: list[MarketSnapshot],
@@ -270,11 +360,19 @@ class BackfillPipeline:
         allow_fixture_fallback: bool = False,
         strict_archive: bool = True,
         single_run_horizons: list[str] | None = None,
-    ) -> dict[str, pd.DataFrame]:
+        missing_only: bool = False,
+        return_tables: bool = False,
+    ) -> ForecastBackfillResult:
         """Persist raw forecast payloads and normalize hourly forecast rows."""
 
         selected_models = models or self.models
-        bronze_history = self.warehouse.read_table("bronze_forecast_requests")
+        bronze_history, existing_request_states = self._load_existing_forecast_request_states(
+            snapshots,
+            models=selected_models,
+        )
+        bronze_history = bronze_history.loc[
+            bronze_history["request_kind"].astype(str) == "probe"
+        ].copy() if not bronze_history.empty else pd.DataFrame()
         negative_cache = self._negative_cache_signatures(bronze_history)
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
@@ -282,21 +380,43 @@ class BackfillPipeline:
         source_rows: list[dict[str, object]] = []
         checkpoint_snapshots = 25
         processed_since_checkpoint = 0
-        bronze = bronze_history
-        silver: pd.DataFrame | None = None
+        bronze_count = self.warehouse.table_row_count("bronze_forecast_requests")
+        silver_count = self.warehouse.table_row_count("silver_forecast_runs_hourly")
 
         def flush_buffers(*, force: bool = False) -> None:
-            nonlocal bronze, silver
+            nonlocal bronze_count, silver_count
 
             should_flush = force or any((bronze_rows, silver_rows, model_rows, source_rows))
             if not should_flush:
                 return
-            bronze = self.warehouse.upsert_table("bronze_forecast_requests", pd.DataFrame(bronze_rows))
-            silver = self.warehouse.upsert_table("silver_forecast_runs_hourly", pd.DataFrame(silver_rows))
-            if model_rows:
-                self.warehouse.upsert_table("dim_model", pd.DataFrame(model_rows))
-            if source_rows:
-                self.warehouse.upsert_table("dim_source", pd.DataFrame(source_rows))
+            bronze_count = int(
+                self.warehouse.upsert_table(
+                    "bronze_forecast_requests",
+                    pd.DataFrame(bronze_rows),
+                    export_parquet=force,
+                    return_frame=False,
+                )
+            )
+            silver_count = int(
+                self.warehouse.upsert_table(
+                    "silver_forecast_runs_hourly",
+                    pd.DataFrame(silver_rows),
+                    export_parquet=force,
+                    return_frame=False,
+                )
+            )
+            self.warehouse.upsert_table(
+                "dim_model",
+                pd.DataFrame(model_rows),
+                export_parquet=force,
+                return_frame=False,
+            )
+            self.warehouse.upsert_table(
+                "dim_source",
+                pd.DataFrame(source_rows),
+                export_parquet=force,
+                return_frame=False,
+            )
             bronze_rows.clear()
             silver_rows.clear()
             model_rows.clear()
@@ -320,7 +440,24 @@ class BackfillPipeline:
                 )
                 fetched_at = dt.datetime.now(tz=dt.UTC)
                 endpoint_kind = self._forecast_endpoint_kind(spec)
+                full_key = self._forecast_request_key(
+                    spec=spec,
+                    model=model,
+                    endpoint_kind=endpoint_kind,
+                    request_kind="full",
+                    decision_horizon=None,
+                )
+                existing_full = existing_request_states.get(full_key) if missing_only else None
+                probe_ok = True
                 if endpoint_kind == "historical_forecast":
+                    probe_key = self._forecast_request_key(
+                        spec=spec,
+                        model=model,
+                        endpoint_kind=endpoint_kind,
+                        request_kind="probe",
+                        decision_horizon=None,
+                    )
+                    existing_probe = existing_request_states.get(probe_key) if missing_only else None
                     probe_signature = self._forecast_query_signature(
                         spec=spec,
                         model=model,
@@ -331,7 +468,9 @@ class BackfillPipeline:
                         latitude=latitude,
                         longitude=longitude,
                     )
-                    if probe_signature in negative_cache:
+                    if existing_probe is not None:
+                        probe_ok = existing_probe["availability_status"] == "available"
+                    elif probe_signature in negative_cache:
                         bronze_rows.append(
                             self._forecast_request_row(
                                 spec=spec,
@@ -351,40 +490,89 @@ class BackfillPipeline:
                             )
                         )
                         continue
-
-                    probe_ok, probe_row = self._probe_forecast_availability(
-                        spec=spec,
-                        model=model,
-                        latitude=latitude,
-                        longitude=longitude,
-                        timezone=timezone,
-                        endpoint_kind=endpoint_kind,
-                        fetched_at=fetched_at,
-                    )
-                    bronze_rows.append(probe_row)
-                    if not probe_ok:
-                        if probe_row.get("query_signature"):
-                            negative_cache.add(str(probe_row["query_signature"]))
-                        if strict_archive or not allow_fixture_fallback:
-                            bronze_rows.append(
-                                self._forecast_request_row(
-                                    spec=spec,
-                                    model=model,
-                                    endpoint_kind=endpoint_kind,
-                                    request_kind="full",
-                                    decision_horizon=None,
-                                    requested_at=fetched_at,
-                                    latitude=latitude,
-                                    longitude=longitude,
-                                    timezone=timezone,
-                                    forecast_days=1,
-                                    status="skipped_probe_failure",
-                                    availability_status="unavailable",
-                                    variables=DEFAULT_HOURLY,
-                                    error_message="Skipped full request after failed availability probe.",
+                    else:
+                        probe_ok, probe_row = self._probe_forecast_availability(
+                            spec=spec,
+                            model=model,
+                            latitude=latitude,
+                            longitude=longitude,
+                            timezone=timezone,
+                            endpoint_kind=endpoint_kind,
+                            fetched_at=fetched_at,
+                        )
+                        bronze_rows.append(probe_row)
+                        if missing_only:
+                            existing_request_states[probe_key] = {
+                                "status": str(probe_row.get("status", "")),
+                                "availability_status": str(probe_row.get("availability_status", "")),
+                                "query_signature": (
+                                    str(probe_row["query_signature"])
+                                    if probe_row.get("query_signature") is not None
+                                    else None
+                                ),
+                                "http_status": int(probe_row["http_status"]) if probe_row.get("http_status") is not None else None,
+                            }
+                        if not probe_ok:
+                            if probe_row.get("query_signature"):
+                                negative_cache.add(str(probe_row["query_signature"]))
+                            if strict_archive or not allow_fixture_fallback:
+                                bronze_rows.append(
+                                    self._forecast_request_row(
+                                        spec=spec,
+                                        model=model,
+                                        endpoint_kind=endpoint_kind,
+                                        request_kind="full",
+                                        decision_horizon=None,
+                                        requested_at=fetched_at,
+                                        latitude=latitude,
+                                        longitude=longitude,
+                                        timezone=timezone,
+                                        forecast_days=1,
+                                        status="skipped_probe_failure",
+                                        availability_status="unavailable",
+                                        variables=DEFAULT_HOURLY,
+                                        error_message="Skipped full request after failed availability probe.",
+                                    )
                                 )
+                                continue
+
+                    if existing_probe is not None and not probe_ok and existing_full is None and (strict_archive or not allow_fixture_fallback):
+                        bronze_rows.append(
+                            self._forecast_request_row(
+                                spec=spec,
+                                model=model,
+                                endpoint_kind=endpoint_kind,
+                                request_kind="full",
+                                decision_horizon=None,
+                                requested_at=fetched_at,
+                                latitude=latitude,
+                                longitude=longitude,
+                                timezone=timezone,
+                                forecast_days=1,
+                                status="skipped_probe_failure",
+                                availability_status="unavailable",
+                                variables=DEFAULT_HOURLY,
+                                error_message="Skipped full request after existing failed availability probe.",
                             )
-                            continue
+                        )
+                        continue
+
+                if existing_full is not None:
+                    if endpoint_kind == "historical_forecast" and single_run_horizons:
+                        single_run_bronze, single_run_silver = self._backfill_single_run_requests(
+                            spec=spec,
+                            model=model,
+                            latitude=latitude,
+                            longitude=longitude,
+                            timezone=timezone,
+                            horizons=single_run_horizons,
+                            strict_archive=strict_archive,
+                            missing_only=missing_only,
+                            existing_request_states=existing_request_states,
+                        )
+                        bronze_rows.extend(single_run_bronze)
+                        silver_rows.extend(single_run_silver)
+                    continue
 
                 try:
                     payload, variables = self._fetch_forecast_with_variable_fallback(
@@ -515,6 +703,8 @@ class BackfillPipeline:
                         timezone=timezone,
                         horizons=single_run_horizons,
                         strict_archive=strict_archive,
+                        missing_only=missing_only,
+                        existing_request_states=existing_request_states,
                     )
                     bronze_rows.extend(single_run_bronze)
                     silver_rows.extend(single_run_silver)
@@ -548,9 +738,14 @@ class BackfillPipeline:
 
         flush_buffers(force=True)
         self.warehouse.write_manifest()
-        if silver is None:
-            silver = self.warehouse.read_table("silver_forecast_runs_hourly")
-        return {"bronze_forecast_requests": bronze, "silver_forecast_runs_hourly": silver}
+        bronze = self.warehouse.read_table("bronze_forecast_requests") if return_tables else None
+        silver = self.warehouse.read_table("silver_forecast_runs_hourly") if return_tables else None
+        return {
+            "bronze_forecast_requests_count": bronze_count,
+            "silver_forecast_runs_hourly_count": silver_count,
+            "bronze_forecast_requests": bronze,
+            "silver_forecast_runs_hourly": silver,
+        }
 
     def backfill_truth(self, snapshots: list[MarketSnapshot]) -> dict[str, pd.DataFrame]:
         """Persist raw official truth payloads and normalized daily observations."""
@@ -1728,10 +1923,21 @@ class BackfillPipeline:
         timezone: str,
         horizons: list[str],
         strict_archive: bool,
+        missing_only: bool = False,
+        existing_request_states: dict[ForecastRequestKey, ForecastRequestState] | None = None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
         for horizon in horizons:
+            request_key = self._forecast_request_key(
+                spec=spec,
+                model=model,
+                endpoint_kind="single_run",
+                request_kind="single_run",
+                decision_horizon=horizon,
+            )
+            if missing_only and existing_request_states is not None and request_key in existing_request_states:
+                continue
             decision_point = self._decision_point(spec, horizon)
             requested_run_time = pd.Timestamp(decision_point["issue_time_utc"])
             fetched_at = dt.datetime.now(tz=dt.UTC)

@@ -17,6 +17,8 @@ Use this skill for the research and trading simulation loop.
 ## Critical rules
 - `build-dataset` MUST use `--markets-path configs/market_inventory/full_training_set_snapshots.json`.
   Running without it rebuilds with only 12 example rows (destroys training data).
+- `full_training_set_snapshots.json` is a checked-in training inventory. It is not the auto-refreshed canonical historical backlog.
+- If you need the latest collected historical markets, refresh `configs/market_inventory/historical_temperature_snapshots.json` first and then intentionally regenerate `full_training_set_snapshots.json` from that curated inventory.
 - canonical `historical_training_set*` / `historical_backtest_panel` overwrite requires `--allow-canonical-overwrite`.
 - overwrite is promotion-only; use variant `--output-name` values for experiments and rely on the automatic `artifacts/recovery/` backup when promoting canonical output.
 - `scan-edge` MUST include `--min-model-prob 0.05 --max-model-prob 0.95`.
@@ -34,6 +36,14 @@ Use this skill for the research and trading simulation loop.
 - Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
 - Previous fast variants (ultra_high_neighbor_fast 등) had σ=0.5 collapse — scale clip floor raised to 2.0.
 - Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
+
+## Common commands
+- Canonical training build with existing forecast coverage reuse:
+  `uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
+- Canonical historical forecast top-off before rebuild:
+  `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only`
+- If single-run horizons are part of the rebuild:
+  `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of`
 
 ## Focus
 - gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`

@@ -73,6 +73,14 @@ uv run pmtmax build-dataset \
 ⚠️ Running without `--markets-path` will rebuild with only example data (12 rows).
 The CLI now defaults to `full_training_set_snapshots.json` with a yellow warning,
 but explicit is safer. A shrinkage guard (50% threshold) will block silent overwrites.
+`full_training_set_snapshots.json` is a checked-in training inventory, not the
+auto-refreshed canonical historical backlog; if you need the latest curated
+historical collection, use `configs/market_inventory/historical_temperature_snapshots.json`.
+If you want to refresh `full_training_set_snapshots.json` itself, do it explicitly
+from the refreshed curated historical inventory in the same change; do not assume
+that canonical historical collection backfills will rewrite that file for you.
+When the warehouse already has most forecast payloads, add `--forecast-missing-only`
+to `build-dataset` to avoid refetching existing forecast request keys.
 Canonical `historical_training_set*` / `historical_backtest_panel` outputs are immutable
 unless you pass `--allow-canonical-overwrite`, and the writer now snapshots the existing
 parquet + manifest under `artifacts/recovery/` first.

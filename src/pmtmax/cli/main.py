@@ -859,19 +859,16 @@ def _load_scoped_snapshots(
 ) -> list[MarketSnapshot]:
     """Load snapshots and apply one market-scope preset after parsing."""
 
-    config, _, http, _, _, _ = _runtime(include_stores=False)
-    try:
-        return _load_scoped_snapshots_with_runtime(
-            config=config,
-            http=http,
-            markets_path=markets_path,
-            cities=cities,
-            market_scope=market_scope,
-            active=active,
-            closed=closed,
-        )
-    finally:
-        http.close()
+    scoped_cities = _resolve_scoped_cities(cities, market_scope=market_scope)
+    snapshots = _load_snapshots(
+        markets_path=markets_path,
+        cities=scoped_cities,
+        active=active,
+        closed=closed,
+    )
+    if market_scope == "default":
+        return snapshots
+    return [snapshot for snapshot in snapshots if _snapshot_matches_market_scope(snapshot, market_scope=market_scope)]
 
 
 def _bootstrap_snapshots(*, markets_path: Path | None, cities: list[str] | None) -> list[MarketSnapshot]:
@@ -3585,6 +3582,7 @@ def build_dataset(
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     decision_horizons: Annotated[list[str] | None, typer.Option("--decision-horizon")] = None,
     single_run_horizons: Annotated[list[str] | None, typer.Option("--single-run-horizon")] = None,
+    forecast_missing_only: Annotated[bool, typer.Option("--forecast-missing-only/--no-forecast-missing-only")] = False,
     contract: str = "both",
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
     allow_demo_fixture_fallback: bool = False,
@@ -3612,6 +3610,7 @@ def build_dataset(
             cities=cities,
             decision_horizons=decision_horizons,
             single_run_horizons=single_run_horizons,
+            forecast_missing_only=forecast_missing_only,
             contract=contract,
             strict_archive=strict_archive,
             allow_demo_fixture_fallback=allow_demo_fixture_fallback,
@@ -3629,6 +3628,7 @@ def build_dataset(
             strict_archive=strict_archive,
             allow_fixture_fallback=allow_demo_fixture_fallback,
             single_run_horizons=single_run_horizons or decision_horizons or config.backtest.decision_horizons or None,
+            missing_only=forecast_missing_only,
         )
         pipeline.backfill_truth(snapshots)
         frame = pipeline.materialize_training_set(
@@ -3717,6 +3717,7 @@ def backfill_forecasts(
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     models: Annotated[list[str] | None, typer.Option("--model")] = None,
     single_run_horizons: Annotated[list[str] | None, typer.Option("--single-run-horizon")] = None,
+    missing_only: Annotated[bool, typer.Option("--missing-only/--no-missing-only")] = False,
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
     allow_demo_fixture_fallback: bool = False,
 ) -> None:
@@ -3734,6 +3735,7 @@ def backfill_forecasts(
             cities=cities,
             models=models,
             single_run_horizons=single_run_horizons,
+            missing_only=missing_only,
             strict_archive=strict_archive,
             allow_demo_fixture_fallback=allow_demo_fixture_fallback,
         ),
@@ -3746,6 +3748,7 @@ def backfill_forecasts(
             strict_archive=strict_archive,
             allow_fixture_fallback=allow_demo_fixture_fallback,
             single_run_horizons=single_run_horizons,
+            missing_only=missing_only,
         )
         pipeline.warehouse.finish_run(run, status="completed")
     except Exception as exc:  # noqa: BLE001
@@ -3755,8 +3758,8 @@ def backfill_forecasts(
         pipeline.warehouse.close()
     console.print_json(
         data={
-            "bronze_forecast_requests": len(result["bronze_forecast_requests"]),
-            "silver_forecast_runs_hourly": len(result["silver_forecast_runs_hourly"]),
+            "bronze_forecast_requests": int(result["bronze_forecast_requests_count"]),
+            "silver_forecast_runs_hourly": int(result["silver_forecast_runs_hourly_count"]),
         }
     )
 

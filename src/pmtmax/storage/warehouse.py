@@ -81,6 +81,27 @@ PROTECTED_CANONICAL_GOLD_PATHS = frozenset(
     }
 )
 
+NUMERIC_DUCKDB_TYPE_PREFIXES = (
+    "BIGINT",
+    "DECIMAL",
+    "DOUBLE",
+    "FLOAT",
+    "HUGEINT",
+    "INTEGER",
+    "REAL",
+    "SMALLINT",
+    "TINYINT",
+    "UBIGINT",
+    "UHUGEINT",
+    "UINTEGER",
+    "USMALLINT",
+    "UTINYINT",
+)
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
 
 def parquet_relative_path(table_name: str) -> str:
     """Map a table to its canonical parquet mirror path."""
@@ -229,21 +250,28 @@ class DataWarehouse:
         self.upsert_table("bronze_ingest_runs", pd.DataFrame([updated.model_dump(mode="json")]))
         return updated
 
-    def upsert_table(self, table_name: str, frame: pd.DataFrame) -> pd.DataFrame:
-        """Upsert a DataFrame into a managed warehouse table and export a parquet mirror."""
+    def upsert_table(
+        self,
+        table_name: str,
+        frame: pd.DataFrame,
+        *,
+        export_parquet: bool = True,
+        return_frame: bool = True,
+    ) -> pd.DataFrame | int:
+        """Upsert a DataFrame into a managed warehouse table."""
 
         keys = TABLE_KEYS.get(table_name)
         if keys is None:
             msg = f"Unsupported warehouse table: {table_name}"
             raise ValueError(msg)
         if frame.empty:
-            existing = self.read_table(table_name)
-            if not existing.empty:
-                self.parquet_store.write_frame(parquet_relative_path(table_name), existing)
-            return existing
-        deduped = self.duckdb_store.upsert_frame(table_name, frame, subset=keys)
-        self.parquet_store.write_frame(parquet_relative_path(table_name), deduped)
-        return deduped
+            if export_parquet and self.table_exists(table_name):
+                self.export_table(table_name)
+            return self.read_table(table_name) if return_frame else self.table_row_count(table_name)
+        row_count = self.duckdb_store.upsert_frame(table_name, frame, subset=keys)
+        if export_parquet:
+            self.export_table(table_name)
+        return self.read_table(table_name) if return_frame else row_count
 
     def write_gold_table(
         self,
@@ -297,7 +325,7 @@ class DataWarehouse:
             _shutil.copy2(existing_path, str(existing_path) + ".bak")
 
         self.duckdb_store.write_frame(table_name, frame)
-        return self.parquet_store.write_frame(target, frame)
+        return self.duckdb_store.export_table(table_name, self.parquet_store.root / target)
 
     def _backup_protected_output(self, existing_path: Path, relative_path: str) -> None:
         recovery_dir = self._recovery_session_path()
@@ -328,6 +356,30 @@ class DataWarehouse:
             return pd.DataFrame()
         return self.duckdb_store.read_table(table_name)
 
+    def read_query(self, query: str, parameters: list[Any] | None = None) -> pd.DataFrame:
+        """Read an arbitrary DuckDB query as a DataFrame."""
+
+        return self.duckdb_store.read_frame(query, parameters)
+
+    def table_exists(self, table_name: str) -> bool:
+        """Return whether a warehouse table exists."""
+
+        return self.duckdb_store.table_exists(table_name)
+
+    def table_row_count(self, table_name: str) -> int:
+        """Return the row count for a warehouse table."""
+
+        if not self.table_exists(table_name):
+            return 0
+        return self.duckdb_store.row_count(table_name)
+
+    def export_table(self, table_name: str) -> Path | None:
+        """Rewrite a managed parquet mirror directly from DuckDB."""
+
+        if not self.table_exists(table_name):
+            return None
+        return self.duckdb_store.export_table(table_name, self.parquet_store.root / parquet_relative_path(table_name))
+
     def list_tables(self) -> list[str]:
         """List currently materialized tables in the canonical warehouse."""
 
@@ -338,11 +390,8 @@ class DataWarehouse:
 
         counts: dict[str, int] = {}
         for table_name in self.list_tables():
-            frame = self.read_table(table_name)
-            counts[table_name] = len(frame)
-            if frame.empty:
-                continue
-            self.parquet_store.write_frame(parquet_relative_path(table_name), frame)
+            counts[table_name] = self.table_row_count(table_name)
+            self.export_table(table_name)
         self._write_standard_gold_exports()
         self.write_manifest()
         return counts
@@ -352,10 +401,9 @@ class DataWarehouse:
 
         tables: dict[str, dict[str, Any]] = {}
         for table_name in self.list_tables():
-            frame = self.read_table(table_name)
             tables[table_name] = {
-                "rows": len(frame),
-                "columns": list(frame.columns),
+                "rows": self.table_row_count(table_name),
+                "columns": self.duckdb_store.column_names(table_name),
                 "parquet_path": parquet_relative_path(table_name),
             }
         manifest = WarehouseManifest(
@@ -435,8 +483,8 @@ class DataWarehouse:
                     if frame.empty:
                         continue
                     frame = self._normalize_legacy_frame(frame, target_table=target_table, source_path=path)
-                    current = self.upsert_table(target_table, frame)
-                    migrated_rows[target_table] = len(current)
+                    current_rows = self.upsert_table(target_table, frame, return_frame=False)
+                    migrated_rows[target_table] = int(current_rows)
             finally:
                 connection.close()
             if archive_legacy:
@@ -524,22 +572,25 @@ class DataWarehouse:
 
     def _write_standard_gold_exports(self) -> None:
         if self.duckdb_store.table_exists("gold_training_examples_tabular"):
-            frame = self._sanitize_gold_frame(self.read_table("gold_training_examples_tabular"))
-            if not frame.empty:
-                self.parquet_store.write_frame("gold/historical_training_set.parquet", frame)
+            self.duckdb_store.export_query(
+                self._sanitized_gold_export_query("gold_training_examples_tabular"),
+                self.parquet_store.root / "gold/historical_training_set.parquet",
+            )
         if self.duckdb_store.table_exists("gold_training_examples_sequence"):
-            frame = self.read_table("gold_training_examples_sequence")
-            if not frame.empty:
-                self.parquet_store.write_frame("gold/historical_training_sequence.parquet", frame)
+            self.duckdb_store.export_table(
+                "gold_training_examples_sequence",
+                self.parquet_store.root / "gold/historical_training_sequence.parquet",
+            )
 
-    @staticmethod
-    def _sanitize_gold_frame(frame: pd.DataFrame) -> pd.DataFrame:
-        if frame.empty:
-            return frame
-        clean = frame.copy()
-        numeric_columns = clean.select_dtypes(include=["number"]).columns
-        clean.loc[:, numeric_columns] = clean.loc[:, numeric_columns].fillna(0.0)
-        return clean
+    def _sanitized_gold_export_query(self, table_name: str) -> str:
+        select_fragments: list[str] = []
+        for column_name, data_type in self.duckdb_store.table_schema(table_name):
+            quoted_name = _quote_identifier(column_name)
+            if data_type.upper().startswith(NUMERIC_DUCKDB_TYPE_PREFIXES):
+                select_fragments.append(f"coalesce({quoted_name}, 0) as {quoted_name}")
+            else:
+                select_fragments.append(quoted_name)
+        return f"select {', '.join(select_fragments)} from {table_name}"
 
     def _resolve_legacy_table_name(self, connection: duckdb.DuckDBPyConnection, table_name: str) -> str | None:
         if table_name in TABLE_KEYS:

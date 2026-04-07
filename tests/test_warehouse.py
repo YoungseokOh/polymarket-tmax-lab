@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -125,6 +126,184 @@ def test_warehouse_normalizes_missing_legacy_key_columns(tmp_path: Path) -> None
     assert frame.iloc[0]["request_kind"] == "full"
     assert "decision_horizon" in frame.columns
     canonical.close()
+
+
+def test_warehouse_sql_upsert_replaces_null_key_rows_and_aligns_schema(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "upsert")
+    initial = pd.DataFrame(
+        [
+            {
+                "market_id": "m0",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "decision_horizon": None,
+                "forecast_time_utc": pd.Timestamp("2025-01-01T00:00:00Z"),
+                "temperature_2m": 8.0,
+            },
+            {
+                "market_id": "m1",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "decision_horizon": None,
+                "forecast_time_utc": pd.Timestamp("2025-01-01T01:00:00Z"),
+                "temperature_2m": 10.0,
+            },
+        ]
+    )
+    warehouse.upsert_table("silver_forecast_runs_hourly", initial, return_frame=False)
+
+    incremental = pd.DataFrame(
+        [
+            {
+                "market_id": "m1",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "decision_horizon": None,
+                "forecast_time_utc": pd.Timestamp("2025-01-01T01:00:00Z"),
+                "temperature_2m": 12.0,
+                "requested_run_time_utc": pd.Timestamp("2024-12-31T18:00:00Z"),
+            },
+            {
+                "market_id": "m1",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "decision_horizon": None,
+                "forecast_time_utc": pd.Timestamp("2025-01-01T01:00:00Z"),
+                "temperature_2m": 14.0,
+                "requested_run_time_utc": pd.Timestamp("2024-12-31T19:00:00Z"),
+            },
+            {
+                "market_id": "m2",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "decision_horizon": "morning_of",
+                "forecast_time_utc": pd.Timestamp("2025-01-01T02:00:00Z"),
+                "temperature_2m": 16.0,
+                "requested_run_time_utc": pd.Timestamp("2024-12-31T20:00:00Z"),
+            },
+        ]
+    )
+    row_count = warehouse.upsert_table("silver_forecast_runs_hourly", incremental, return_frame=False)
+    frame = warehouse.read_table("silver_forecast_runs_hourly").sort_values(["market_id", "forecast_time_utc"]).reset_index(drop=True)
+
+    assert int(row_count) == 3
+    assert list(frame["market_id"]) == ["m0", "m1", "m2"]
+    assert float(frame.loc[frame["market_id"] == "m1", "temperature_2m"].iloc[0]) == 14.0
+    assert pd.isna(frame.loc[frame["market_id"] == "m0", "requested_run_time_utc"].iloc[0])
+    assert pd.Timestamp(frame.loc[frame["market_id"] == "m1", "requested_run_time_utc"].iloc[0]).tz_convert("UTC") == pd.Timestamp(
+        "2024-12-31T19:00:00Z"
+    )
+    warehouse.close()
+
+
+def test_warehouse_sql_upsert_handles_all_null_stage_key_without_demoting_target_type(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "upsert_null_stage")
+    initial = pd.DataFrame(
+        [
+            {
+                "market_id": "m1",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "request_kind": "full",
+                "decision_horizon": "market_open",
+                "target_local_date": pd.Timestamp("2025-01-01"),
+            }
+        ]
+    )
+    warehouse.upsert_table("bronze_forecast_requests", initial, return_frame=False)
+
+    incremental = pd.DataFrame(
+        [
+            {
+                "market_id": "m2",
+                "model_name": "ecmwf_ifs025",
+                "endpoint_kind": "historical_forecast",
+                "request_kind": "probe",
+                "decision_horizon": None,
+                "target_local_date": pd.Timestamp("2025-01-02"),
+            }
+        ]
+    )
+    row_count = warehouse.upsert_table("bronze_forecast_requests", incremental, return_frame=False)
+    frame = warehouse.read_table("bronze_forecast_requests").sort_values(["market_id"]).reset_index(drop=True)
+
+    assert int(row_count) == 2
+    assert list(frame["market_id"]) == ["m1", "m2"]
+    assert str(frame.loc[0, "decision_horizon"]) == "market_open"
+    assert pd.isna(frame.loc[1, "decision_horizon"])
+    warehouse.close()
+
+
+def test_write_manifest_uses_duckdb_metadata_without_table_reads(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "manifest")
+    warehouse.upsert_table(
+        "bronze_market_snapshots",
+        pd.DataFrame(
+            [
+                {
+                    "market_id": "m1",
+                    "captured_at": pd.Timestamp("2025-12-10T00:00:00Z"),
+                    "question": "Highest temperature in Seoul on Dec 11?",
+                }
+            ]
+        ),
+        return_frame=False,
+    )
+
+    def _fail_read(_: str) -> pd.DataFrame:
+        raise AssertionError("write_manifest should not read full tables")
+
+    warehouse.read_table = _fail_read  # type: ignore[method-assign]
+    manifest_path = warehouse.write_manifest()
+    payload = json.loads(manifest_path.read_text())
+
+    assert payload["tables"]["bronze_market_snapshots"]["rows"] == 1
+    assert payload["tables"]["bronze_market_snapshots"]["columns"] == ["market_id", "captured_at", "question"]
+    warehouse.close()
+
+
+def test_compact_rewrites_parquet_without_table_readbacks(tmp_path: Path) -> None:
+    warehouse = _warehouse(tmp_path, "compact")
+    warehouse.upsert_table(
+        "bronze_market_snapshots",
+        pd.DataFrame(
+            [
+                {
+                    "market_id": "m1",
+                    "captured_at": pd.Timestamp("2025-12-10T00:00:00Z"),
+                    "question": "Highest temperature in Seoul on Dec 11?",
+                }
+            ]
+        ),
+        return_frame=False,
+    )
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        pd.DataFrame(
+            [
+                {
+                    "market_id": "m1",
+                    "decision_horizon": "morning_of",
+                    "realized_daily_max": 8.0,
+                    "forecast_source_kind": "fixture",
+                    "available_models_json": "[]",
+                    "selected_models_json": "[]",
+                }
+            ]
+        ),
+    )
+
+    def _fail_read(_: str) -> pd.DataFrame:
+        raise AssertionError("compact should not read full tables")
+
+    warehouse.read_table = _fail_read  # type: ignore[method-assign]
+    counts = warehouse.compact()
+
+    assert counts["bronze_market_snapshots"] == 1
+    assert counts["gold_training_examples_tabular"] == 1
+    assert (tmp_path / "parquet" / "bronze" / "bronze_market_snapshots.parquet").exists()
+    assert (tmp_path / "parquet" / "gold" / "historical_training_set.parquet").exists()
+    warehouse.close()
 
 
 def test_warehouse_blocks_canonical_gold_overwrite_without_unlock(tmp_path: Path) -> None:

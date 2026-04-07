@@ -21,6 +21,17 @@ class _BrokenOpenMeteoClient:
         raise RuntimeError("force fixture fallback")
 
 
+class _FailIfForecastFetchedClient:
+    def historical_forecast(self, **_: object) -> dict:
+        raise AssertionError("unexpected historical_forecast call")
+
+    def forecast(self, **_: object) -> dict:
+        raise AssertionError("unexpected forecast call")
+
+    def single_run(self, **_: object) -> dict:
+        raise AssertionError("unexpected single_run call")
+
+
 def _load_fixture(city: str) -> dict:
     fixture_name = city.lower().replace(" ", "_") + "_daily.json"
     return json.loads((Path("tests/fixtures/openmeteo") / fixture_name).read_text())
@@ -107,6 +118,7 @@ def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> N
         snapshots,
         allow_fixture_fallback=True,
         strict_archive=False,
+        return_tables=True,
     )
     truth_tables = pipeline.backfill_truth(snapshots)
     gold = pipeline.materialize_training_set(
@@ -117,6 +129,10 @@ def test_backfill_pipeline_builds_bronze_silver_gold_tables(tmp_path: Path) -> N
 
     assert len(market_tables["bronze_market_snapshots"]) == 4
     assert len(market_tables["silver_market_specs"]) == 4
+    assert int(forecast_tables["bronze_forecast_requests_count"]) == 16
+    assert int(forecast_tables["silver_forecast_runs_hourly_count"]) > 0
+    assert forecast_tables["bronze_forecast_requests"] is not None
+    assert forecast_tables["silver_forecast_runs_hourly"] is not None
     assert len(forecast_tables["bronze_forecast_requests"]) == 16
     assert len(forecast_tables["silver_forecast_runs_hourly"]) > 0
     assert len(truth_tables["bronze_truth_snapshots"]) == 4
@@ -188,11 +204,83 @@ def test_backfill_pipeline_strict_archive_skips_fixture_fallback(tmp_path: Path)
         snapshots,
         allow_fixture_fallback=False,
         strict_archive=True,
+        return_tables=True,
     )
 
+    assert int(forecast_tables["bronze_forecast_requests_count"]) == 8
+    assert int(forecast_tables["silver_forecast_runs_hourly_count"]) == 0
+    assert forecast_tables["bronze_forecast_requests"] is not None
+    assert forecast_tables["silver_forecast_runs_hourly"] is not None
     assert len(forecast_tables["bronze_forecast_requests"]) == 8
     assert forecast_tables["silver_forecast_runs_hourly"].empty
     assert set(forecast_tables["bronze_forecast_requests"]["request_kind"]) == {"probe", "full"}
+
+
+def test_backfill_forecasts_can_skip_table_readback(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "lightweight.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    result = pipeline.backfill_forecasts(
+        snapshots,
+        allow_fixture_fallback=True,
+        strict_archive=False,
+    )
+
+    assert result["bronze_forecast_requests"] is None
+    assert result["silver_forecast_runs_hourly"] is None
+    assert int(result["bronze_forecast_requests_count"]) == 2
+    assert int(result["silver_forecast_runs_hourly_count"]) > 0
+    assert (tmp_path / "parquet" / "silver" / "silver_forecast_runs_hourly.parquet").exists()
+    assert (tmp_path / "manifests" / "warehouse_manifest.json").exists()
+
+
+def test_backfill_forecasts_missing_only_skips_existing_request_keys(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "missing_only.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    first = pipeline.backfill_forecasts(
+        snapshots,
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+    )
+    pipeline.openmeteo = _FailIfForecastFetchedClient()  # type: ignore[assignment]
+    second = pipeline.backfill_forecasts(
+        snapshots,
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+        missing_only=True,
+    )
+
+    assert int(first["bronze_forecast_requests_count"]) == int(second["bronze_forecast_requests_count"])
+    assert int(first["silver_forecast_runs_hourly_count"]) == int(second["silver_forecast_runs_hourly_count"])
 
 
 def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: Path) -> None:
@@ -218,6 +306,7 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
         snapshots,
         strict_archive=True,
         single_run_horizons=["morning_of"],
+        return_tables=True,
     )
     pipeline.backfill_truth(snapshots)
     gold = pipeline.materialize_training_set(
@@ -226,6 +315,7 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
         decision_horizons=["morning_of"],
     )
 
+    assert forecast_tables["silver_forecast_runs_hourly"] is not None
     single_run_rows = forecast_tables["silver_forecast_runs_hourly"].loc[
         forecast_tables["silver_forecast_runs_hourly"]["endpoint_kind"] == "single_run"
     ]
