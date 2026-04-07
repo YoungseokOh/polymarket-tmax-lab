@@ -19,6 +19,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_EDGE_PATH = REPO_ROOT / "artifacts/signals/v2/scan_edge_latest.json"
 TRADES_PATH = REPO_ROOT / "artifacts/signals/v2/forward_paper_trades.json"
 
+# Skip signals where the market prices the outcome below this threshold.
+# YES signals at gamma <10% have ~1% observed win rate — model edge is spurious.
+MIN_GAMMA_PRICE = 0.10
+
 
 def _load_signals() -> list[dict]:
     if not SCAN_EDGE_PATH.exists():
@@ -54,7 +58,12 @@ def main() -> None:
     now_str = datetime.now(tz=UTC).isoformat()
     new_trades = []
 
+    skipped_low_price = 0
     for sig in signals:
+        gamma_price = sig.get("gamma_price")
+        if gamma_price is not None and float(gamma_price) < MIN_GAMMA_PRICE:
+            skipped_low_price += 1
+            continue
         trade = {
             "recorded_at": now_str,
             "city": sig.get("city", ""),
@@ -75,6 +84,9 @@ def main() -> None:
             continue
         new_trades.append(trade)
         existing_keys.add(key)
+
+    if skipped_low_price:
+        print(f"[record_paper_trades] skipped {skipped_low_price} signals with gamma_price < {MIN_GAMMA_PRICE:.0%}")
 
     if not new_trades:
         print(f"[record_paper_trades] no new signals to record (existing: {len(existing_trades)})")

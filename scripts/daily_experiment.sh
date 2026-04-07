@@ -51,6 +51,7 @@ uv run pmtmax scan-edge \
     --min-edge 0.15 \
     --min-model-prob 0.05 \
     --max-model-prob 0.95 \
+    --min-market-price 0.10 \
     --output "${SCAN_EDGE_OUTPUT}"
 
 # 3b. Record new signals as forward paper trades

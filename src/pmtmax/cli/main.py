@@ -3456,6 +3456,7 @@ def scan_edge(
     min_edge: float = 0.01,
     min_model_prob: float = 0.05,
     max_model_prob: float = 0.95,
+    min_market_price: float = typer.Option(0.0, help="Skip outcome bins where Gamma mid-price is below this threshold (e.g. 0.10 filters out <10% bins where model edge is typically spurious)."),
     output: Annotated[
         Path,
         typer.Option("--output", "--output-json"),
@@ -3522,6 +3523,8 @@ def scan_edge(
             # Use Gamma mid-price: avoids the phantom 0.001/0.999 CLOB spread on illiquid bins
             gamma_price = snapshot.outcome_prices.get(outcome_label)
             if gamma_price is None or gamma_price <= 0.0 or gamma_price >= 1.0:
+                continue
+            if min_market_price > 0.0 and gamma_price < min_market_price:
                 continue
             fee = estimate_fee(gamma_price, taker_bps=fee_bps)
             yes_edge = model_prob - gamma_price - fee
