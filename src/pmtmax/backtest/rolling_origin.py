@@ -25,7 +25,7 @@ def rolling_origin_splits(
             test = ordered.iloc[start : start + test_size]
             if test.empty:
                 break
-            yield train.copy(), test.copy()
+            yield train, test
         return
 
     if split_policy == "market_day":
@@ -45,4 +45,4 @@ def rolling_origin_splits(
         test = ordered.loc[ordered["_split_group_id"].isin(test_groups)].drop(columns="_split_group_id")
         if test.empty:
             break
-        yield train.reset_index(drop=True).copy(), test.reset_index(drop=True).copy()
+        yield train.reset_index(drop=True), test.reset_index(drop=True)

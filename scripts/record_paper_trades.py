@@ -19,9 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_EDGE_PATH = REPO_ROOT / "artifacts/signals/v2/scan_edge_latest.json"
 TRADES_PATH = REPO_ROOT / "artifacts/signals/v2/forward_paper_trades.json"
 
-# Skip signals where the market prices the outcome below this threshold.
-# YES signals at gamma <10% have ~1% observed win rate — model edge is spurious.
-MIN_GAMMA_PRICE = 0.10
+# Direction-specific gamma filters derived from paper-trade outcome analysis (2026-04-07):
+#   YES bets: gamma [0.10,0.20) → 13% wr, [0.20,0.30) → 16% wr, [0.30,0.50) → 57% wr
+#   NO bets:  gamma < 0.50 risks losing (1 - entry) on plausible outcomes
+MIN_GAMMA_YES = 0.30
+MIN_GAMMA_NO = 0.50
 
 
 def _load_signals() -> list[dict]:
@@ -61,9 +63,12 @@ def main() -> None:
     skipped_low_price = 0
     for sig in signals:
         gamma_price = sig.get("gamma_price")
-        if gamma_price is not None and float(gamma_price) < MIN_GAMMA_PRICE:
-            skipped_low_price += 1
-            continue
+        direction = sig.get("direction", "yes").lower()
+        if gamma_price is not None:
+            threshold = MIN_GAMMA_YES if direction == "yes" else MIN_GAMMA_NO
+            if float(gamma_price) < threshold:
+                skipped_low_price += 1
+                continue
         trade = {
             "recorded_at": now_str,
             "city": sig.get("city", ""),
@@ -86,7 +91,7 @@ def main() -> None:
         existing_keys.add(key)
 
     if skipped_low_price:
-        print(f"[record_paper_trades] skipped {skipped_low_price} signals with gamma_price < {MIN_GAMMA_PRICE:.0%}")
+        print(f"[record_paper_trades] skipped {skipped_low_price} signals (YES<{MIN_GAMMA_YES:.0%} or NO<{MIN_GAMMA_NO:.0%})")
 
     if not new_trades:
         print(f"[record_paper_trades] no new signals to record (existing: {len(existing_trades)})")

@@ -3185,16 +3185,22 @@ def _run_panel_pricing_backtest(
         msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
         raise typer.BadParameter(msg)
 
-    working_panel = panel.copy()
-    working_panel["market_id"] = working_panel["market_id"].astype(str)
-    working_panel["decision_horizon"] = working_panel["decision_horizon"].astype(str)
-    working_panel["outcome_label"] = working_panel["outcome_label"].astype(str)
-    working_panel["coverage_status"] = working_panel["coverage_status"].astype(str)
-    working_panel["market_price"] = pd.to_numeric(working_panel["market_price"], errors="coerce")
-    if "price_ts" in working_panel.columns:
-        working_panel["price_ts"] = pd.to_datetime(working_panel["price_ts"], errors="coerce", utc=True)
-    if "price_age_seconds" in working_panel.columns:
-        working_panel["price_age_seconds"] = pd.to_numeric(working_panel["price_age_seconds"], errors="coerce")
+    _needed_cols = ["market_id", "decision_horizon", "outcome_label", "coverage_status", "market_price"]
+    if "price_ts" in panel.columns:
+        _needed_cols.append("price_ts")
+    if "price_age_seconds" in panel.columns:
+        _needed_cols.append("price_age_seconds")
+    slim_panel = panel[_needed_cols].copy()
+    slim_panel["market_id"] = slim_panel["market_id"].astype(str)
+    slim_panel["decision_horizon"] = slim_panel["decision_horizon"].astype(str)
+    slim_panel["outcome_label"] = slim_panel["outcome_label"].astype(str)
+    slim_panel["coverage_status"] = slim_panel["coverage_status"].astype(str)
+    slim_panel["market_price"] = pd.to_numeric(slim_panel["market_price"], errors="coerce")
+    if "price_ts" in slim_panel.columns:
+        slim_panel["price_ts"] = pd.to_datetime(slim_panel["price_ts"], errors="coerce", utc=True)
+    if "price_age_seconds" in slim_panel.columns:
+        slim_panel["price_age_seconds"] = pd.to_numeric(slim_panel["price_age_seconds"], errors="coerce")
+    slim_panel = slim_panel.set_index(["market_id", "decision_horizon", "outcome_label"]).sort_index()
 
     prediction_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
@@ -3259,14 +3265,11 @@ def _run_panel_pricing_backtest(
             has_covered_price = False
             has_stale_price = False
             for outcome_label, fair_probability in forecast.outcome_probabilities.items():
-                panel_row = working_panel.loc[
-                    (working_panel["market_id"] == spec.market_id)
-                    & (working_panel["decision_horizon"] == str(row["decision_horizon"]))
-                    & (working_panel["outcome_label"] == outcome_label)
-                ].copy()
-                if panel_row.empty:
+                try:
+                    _panel_rows = slim_panel.loc[(spec.market_id, str(row["decision_horizon"]), outcome_label)]
+                except KeyError:
                     continue
-                selected = panel_row.iloc[-1]
+                selected = _panel_rows.iloc[-1] if isinstance(_panel_rows, pd.DataFrame) else _panel_rows
                 coverage_status = str(selected["coverage_status"])
                 if coverage_status == "stale":
                     has_stale_price = True
