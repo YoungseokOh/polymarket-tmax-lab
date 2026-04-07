@@ -81,6 +81,8 @@ from the refreshed curated historical inventory in the same change; do not assum
 that canonical historical collection backfills will rewrite that file for you.
 When the warehouse already has most forecast payloads, add `--forecast-missing-only`
 to `build-dataset` to avoid refetching existing forecast request keys.
+`bootstrap-lab`에도 같은 shortcut이 있고, `scripts/run_full_historical_batch.sh`의
+forecast 단계는 기본적으로 missing-only top-off를 사용한다.
 Canonical `historical_training_set*` / `historical_backtest_panel` outputs are immutable
 unless you pass `--allow-canonical-overwrite`, and the writer now snapshots the existing
 parquet + manifest under `artifacts/recovery/` first.

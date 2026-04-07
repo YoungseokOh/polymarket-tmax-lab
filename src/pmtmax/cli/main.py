@@ -4291,6 +4291,7 @@ def bootstrap_lab(
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     decision_horizons: Annotated[list[str] | None, typer.Option("--decision-horizon")] = None,
     single_run_horizons: Annotated[list[str] | None, typer.Option("--single-run-horizon")] = None,
+    forecast_missing_only: Annotated[bool, typer.Option("--forecast-missing-only/--no-forecast-missing-only")] = False,
     contract: str = "both",
     output_name: str = "historical_training_set",
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
@@ -4359,6 +4360,7 @@ def bootstrap_lab(
             cities=cities,
             decision_horizons=decision_horizons,
             single_run_horizons=single_run_horizons,
+            forecast_missing_only=forecast_missing_only,
             contract=contract,
             output_name=output_name,
             strict_archive=strict_archive,
@@ -4381,6 +4383,7 @@ def bootstrap_lab(
             strict_archive=strict_archive,
             allow_fixture_fallback=allow_demo_fixture_fallback,
             single_run_horizons=single_run_horizons or decision_horizons or config.backtest.decision_horizons or None,
+            missing_only=forecast_missing_only,
         )
         steps.append("backfill_forecasts")
         pipeline.backfill_truth(snapshots)

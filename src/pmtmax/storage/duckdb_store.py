@@ -115,6 +115,22 @@ class DuckDBStore:
         _validate_identifier(table_name)
         return self.export_query(f"select * from {table_name}", path)
 
+    def parquet_row_count(self, path: Path) -> int:
+        """Return the row count for a Parquet file without loading it into pandas."""
+
+        row = self.connection.execute("select count(*) from read_parquet(?)", [str(path)]).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def load_parquet(self, table_name: str, path: Path) -> int:
+        """Replace a table with rows loaded directly from Parquet."""
+
+        _validate_identifier(table_name)
+        self.connection.execute(
+            f"create or replace table {table_name} as select * from read_parquet(?)",  # noqa: S608
+            [str(path)],
+        )
+        return self.row_count(table_name)
+
     def upsert_frame(self, table_name: str, frame: pd.DataFrame, subset: list[str]) -> int:
         """Append rows and keep the latest row for each primary-key subset in DuckDB."""
 

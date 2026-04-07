@@ -73,11 +73,20 @@ def test_seed_export_and_restore_rebuilds_warehouse(tmp_path: Path) -> None:
     target_root = tmp_path / "target_data"
     restored_manifest = restore_seed_bundle(seed_path=seed_path, data_root=target_root)
     target = _warehouse(target_root)
-    counts = restore_warehouse_from_seed(
-        warehouse=target,
-        parquet_root=target_root / "parquet",
-        manifest_root=target_root / "manifests",
-    )
+    original_read_parquet = pd.read_parquet
+
+    def _fail_read_parquet(*args: object, **kwargs: object) -> pd.DataFrame:
+        raise AssertionError(f"restore_warehouse_from_seed should not call pandas.read_parquet: {args} {kwargs}")
+
+    pd.read_parquet = _fail_read_parquet  # type: ignore[assignment]
+    try:
+        counts = restore_warehouse_from_seed(
+            warehouse=target,
+            parquet_root=target_root / "parquet",
+            manifest_root=target_root / "manifests",
+        )
+    finally:
+        pd.read_parquet = original_read_parquet  # type: ignore[assignment]
 
     assert restored_manifest.archive_path == str(seed_path)
     assert counts["bronze_market_snapshots"] == 1

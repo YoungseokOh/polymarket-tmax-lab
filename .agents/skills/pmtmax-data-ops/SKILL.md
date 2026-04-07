@@ -40,8 +40,11 @@ Use this skill for storage, bootstrap, and long-history data operations.
   `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of`
 - Existing warehouse dataset rebuild without forecast refetch:
   `uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
+- Seed/bootstrap refresh without forecast refetch:
+  `uv run pmtmax bootstrap-lab --forecast-missing-only`
 
 ## Training Inventory Rule
 - `full_training_set_snapshots.json` does not regenerate itself from `historical_temperature_snapshots.json`.
 - If you need to refresh it, first rebuild and validate `historical_temperature_snapshots.json`, then explicitly curate and replace `full_training_set_snapshots.json` in the same change.
 - Treat that refresh as an intentional checked-in inventory update, not as part of routine canonical backfill.
+- `restore-seed` rebuilds the local warehouse from canonical parquet mirrors directly in DuckDB; it should not need pandas full-table reads.

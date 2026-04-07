@@ -8,8 +8,6 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from pmtmax.storage.schemas import (
     BootstrapManifest,
     LegacyRunEntry,
@@ -151,9 +149,7 @@ def restore_warehouse_from_seed(
 
     restored: dict[str, int] = {}
     for table_name, parquet_path in _restore_table_map(parquet_root=parquet_root, manifest_root=manifest_root).items():
-        frame = pd.read_parquet(parquet_path)
-        warehouse.duckdb_store.write_frame(table_name, frame)
-        restored[table_name] = len(frame)
+        restored[table_name] = warehouse.duckdb_store.load_parquet(table_name, parquet_path)
     warehouse.compact()
     return restored
 

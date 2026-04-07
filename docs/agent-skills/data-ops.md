@@ -19,6 +19,9 @@
 uv run pmtmax bootstrap-lab
 ```
 
+기존 canonical warehouse나 seed restore 결과를 재사용하면서 forecast만 top-off하고
+싶으면 `--forecast-missing-only`를 같이 준다.
+
 이 명령은 기본적으로:
 - legacy raw/parquet run 정리
 - seed가 있으면 restore
@@ -52,7 +55,7 @@ uv run python scripts/validate_historical_market_inventory.py
 uv run pmtmax collection-preflight --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax init-warehouse
 uv run pmtmax backfill-markets --markets-path configs/market_inventory/historical_temperature_snapshots.json
-uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of
+uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of
 uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json --truth-no-cache
 uv run pmtmax summarize-truth-coverage
 uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
@@ -67,6 +70,8 @@ uv run pmtmax compact-warehouse
 기존 canonical warehouse를 이어서 채우는 incremental run이면
 `backfill-forecasts`에 `--missing-only`를 추가해서
 `bronze_forecast_requests`에 없는 key만 수집할 수 있다.
+`scripts/run_full_historical_batch.sh`는 이 동작을 기본 forecast backfill로 사용한다.
+`bootstrap-lab`도 `--forecast-missing-only`로 같은 top-off semantics를 쓸 수 있다.
 
 `configs/market_inventory/historical_temperature_snapshots.json`은 canonical curated
 historical collection inventory다. 반면
@@ -114,6 +119,7 @@ uv run pmtmax restore-seed
 
 - seed에는 `warehouse.duckdb`를 넣지 않는다
 - raw/parquet/manifests만 옮기고 local warehouse는 다시 생성한다
+- `restore-seed`는 parquet mirror를 DuckDB에서 직접 읽어 warehouse를 재구성한다
 - machine 간 ongoing sync가 아니라 cold bootstrap용이다
 
 ## Guardrails

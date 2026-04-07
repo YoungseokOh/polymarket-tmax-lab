@@ -40,6 +40,8 @@ Use this skill for the research and trading simulation loop.
 ## Common commands
 - Canonical training build with existing forecast coverage reuse:
   `uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
+- Bootstrap refresh with existing forecast coverage reuse:
+  `uv run pmtmax bootstrap-lab --forecast-missing-only`
 - Canonical historical forecast top-off before rebuild:
   `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only`
 - If single-run horizons are part of the rebuild:

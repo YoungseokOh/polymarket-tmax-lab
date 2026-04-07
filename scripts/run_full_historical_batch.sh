@@ -130,6 +130,7 @@ run_step "Backfill archived forecasts" \
     --markets-path "$MARKETS_PATH" \
     "${CITY_ARGS[@]}" \
     --strict-archive \
+    --missing-only \
     --single-run-horizon market_open \
     --single-run-horizon previous_evening \
     --single-run-horizon morning_of

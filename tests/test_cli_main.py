@@ -20,6 +20,7 @@ from pmtmax.cli.main import (
     _run_quote_proxy_backtest,
     _run_real_history_backtest,
     backtest,
+    bootstrap_lab,
     execution_watchlist_playbook,
     execution_sensitivity_report,
     live_mm,
@@ -242,6 +243,128 @@ def test_summarize_price_history_coverage_command_writes_output(
     payload = json.loads(output.read_text())
     assert payload["request_summary"][0]["status"] == "ok"
     assert payload["panel_summary"][0]["coverage_status"] == "ok"
+
+
+def test_bootstrap_lab_passes_forecast_missing_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeHttp:
+        def close(self) -> None:
+            return None
+
+    class _FakeWarehouse:
+        def write_manifest(self) -> Path:
+            path = tmp_path / "manifests" / "warehouse_manifest.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+            return path
+
+        def start_run(self, **_: object) -> object:
+            return type("_Run", (), {"run_id": "run-1"})()
+
+        def compact(self) -> dict[str, int]:
+            return {"gold_training_examples_tabular": 1}
+
+        def finish_run(self, run: object, *, status: str, notes: str = "") -> object:
+            captured["run_status"] = status
+            captured["run_notes"] = notes
+            return run
+
+        def close(self) -> None:
+            return None
+
+    class _FakePipeline:
+        warehouse = _FakeWarehouse()
+        run_id: str | None = None
+
+        def backfill_markets(self, snapshots: list[object], source_name: str = "snapshot") -> dict[str, pd.DataFrame]:
+            captured["market_snapshots"] = snapshots
+            captured["market_source_name"] = source_name
+            return {}
+
+        def backfill_forecasts(
+            self,
+            snapshots: list[object],
+            *,
+            models: list[str] | None = None,
+            allow_fixture_fallback: bool = False,
+            strict_archive: bool = True,
+            single_run_horizons: list[str] | None = None,
+            missing_only: bool = False,
+            return_tables: bool = False,
+        ) -> dict[str, object]:
+            captured["forecast_snapshots"] = snapshots
+            captured["forecast_missing_only"] = missing_only
+            captured["forecast_single_run_horizons"] = single_run_horizons
+            return {
+                "bronze_forecast_requests_count": 0,
+                "silver_forecast_runs_hourly_count": 0,
+                "bronze_forecast_requests": None,
+                "silver_forecast_runs_hourly": None,
+            }
+
+        def backfill_truth(self, snapshots: list[object]) -> dict[str, pd.DataFrame]:
+            captured["truth_snapshots"] = snapshots
+            return {}
+
+        def materialize_training_set(
+            self,
+            snapshots: list[object],
+            *,
+            output_name: str = "historical_training_set",
+            decision_horizons: list[str] | None = None,
+            contract: str = "both",
+            allow_canonical_overwrite: bool = False,
+        ) -> pd.DataFrame:
+            captured["materialize_snapshots"] = snapshots
+            return pd.DataFrame([{"market_id": "m1"}])
+
+        def summarize_forecast_availability(self) -> dict[str, pd.DataFrame]:
+            return {"summary": pd.DataFrame(), "recommended": pd.DataFrame()}
+
+    config = type(
+        "_Config",
+        (),
+        {
+            "app": type(
+                "_App",
+                (),
+                {
+                    "data_dir": tmp_path / "data",
+                    "duckdb_path": tmp_path / "data" / "duckdb" / "warehouse.duckdb",
+                    "manifest_dir": tmp_path / "data" / "manifests",
+                    "parquet_dir": tmp_path / "data" / "parquet",
+                    "raw_dir": tmp_path / "data" / "raw",
+                    "archive_dir": tmp_path / "data" / "archive",
+                },
+            )(),
+            "backtest": type("_Backtest", (), {"decision_horizons": ["market_open", "morning_of"]})(),
+        },
+    )()
+
+    monkeypatch.setattr(
+        "pmtmax.cli.main._runtime",
+        lambda include_stores=False: (config, None, _FakeHttp(), None, None, None),
+    )
+    monkeypatch.setattr("pmtmax.cli.main._bootstrap_snapshots", lambda markets_path=None, cities=None: ["snapshot"])
+    monkeypatch.setattr("pmtmax.cli.main._backfill_pipeline", lambda config, http, openmeteo: _FakePipeline())
+    monkeypatch.setattr("pmtmax.cli.main._config_hash", lambda *args, **kwargs: "hash")
+
+    bootstrap_lab(
+        markets_path=tmp_path / "snapshots.json",
+        forecast_missing_only=True,
+        cleanup_legacy=False,
+        seed_path=tmp_path / "missing_seed.tar.gz",
+    )
+
+    assert captured["forecast_missing_only"] is True
+    assert captured["market_snapshots"] == ["snapshot"]
+    assert captured["forecast_snapshots"] == ["snapshot"]
+    assert captured["truth_snapshots"] == ["snapshot"]
+    assert captured["run_status"] == "completed"
 
 
 def test_materialize_backtest_panel_command_filters_market_ids_and_writes_output(

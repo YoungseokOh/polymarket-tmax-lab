@@ -349,3 +349,39 @@ def test_warehouse_unlocks_canonical_overwrite_and_creates_recovery_backup(tmp_p
     assert backups
     assert manifests
     warehouse.close()
+
+
+def test_write_gold_table_uses_parquet_metadata_for_shrinkage_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    warehouse = _warehouse(tmp_path, "gold_metadata")
+    first = pd.DataFrame(
+        [
+            {"market_id": "m1", "decision_horizon": "morning_of", "realized_daily_max": 8.0},
+            {"market_id": "m2", "decision_horizon": "morning_of", "realized_daily_max": 9.0},
+        ]
+    )
+    second = pd.DataFrame(
+        [
+            {"market_id": "m3", "decision_horizon": "morning_of", "realized_daily_max": 10.0},
+            {"market_id": "m4", "decision_horizon": "morning_of", "realized_daily_max": 11.0},
+        ]
+    )
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        first,
+        relative_path="gold/v2/custom_training_set.parquet",
+    )
+    monkeypatch.setattr(
+        pd,
+        "read_parquet",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("write_gold_table should not call pandas.read_parquet")),
+    )
+
+    warehouse.write_gold_table(
+        "gold_training_examples_tabular",
+        second,
+        relative_path="gold/v2/custom_training_set.parquet",
+    )
+
+    frame = warehouse.read_table("gold_training_examples_tabular").sort_values("market_id").reset_index(drop=True)
+    assert list(frame["market_id"]) == ["m3", "m4"]
+    warehouse.close()

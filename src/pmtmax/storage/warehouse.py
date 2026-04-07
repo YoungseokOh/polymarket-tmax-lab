@@ -301,8 +301,7 @@ class DataWarehouse:
                 )
                 raise ValueError(msg)
             try:
-                import pandas as _pd
-                existing_rows = len(_pd.read_parquet(existing_path))
+                existing_rows = self.duckdb_store.parquet_row_count(existing_path)
                 if existing_rows > 0 and len(frame) < existing_rows * 0.5:
                     msg = (
                         f"Shrinkage guard: refusing to overwrite {target} "

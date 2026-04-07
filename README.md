@@ -403,6 +403,7 @@ uv run pmtmax backfill-markets --markets-path configs/market_inventory/historica
 uv run pmtmax backfill-forecasts \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --strict-archive \
+  --missing-only \
   --single-run-horizon market_open \
   --single-run-horizon previous_evening \
   --single-run-horizon morning_of
@@ -427,7 +428,8 @@ uv run pmtmax compact-warehouse
 
 If you are topping off an existing warehouse and only want forecast keys that are
 absent from `bronze_forecast_requests`, add `--missing-only` to
-`backfill-forecasts`.
+`backfill-forecasts`. `scripts/run_full_historical_batch.sh` now uses this
+incremental forecast top-off by default.
 
 Price-history note: the public CLOB `/prices-history` endpoint is retention-limited in practice. Once older official-history payloads have been captured into `data/raw/bronze`, `bronze_price_history_requests`, and `silver_price_timeseries`, prefer re-materializing `gold_backtest_panel` and `artifacts/price_history_coverage.json` from the archived warehouse. A late uncached refetch can return an empty history for markets that previously had archived points, which reduces request-level coverage without improving research fidelity.
 
@@ -453,6 +455,9 @@ selected decision horizons when available. Bundled fixture fallback is demo-only
 must be explicitly enabled via `--no-strict-archive --allow-demo-fixture-fallback`.
 If the canonical gold already exists, `build-dataset` also requires
 `--allow-canonical-overwrite`; otherwise use a variant `--output-name`.
+`bootstrap-lab` accepts the same forecast-top-off shortcut via
+`--forecast-missing-only` when you want a seed/bootstrap refresh to reuse
+existing forecast request keys instead of refetching them.
 The canonical warehouse defaults to `data/duckdb/warehouse.duckdb`, and warehouse
 parquet mirrors live under `data/parquet/{bronze,silver,gold}`.
 Canonical `gold/v2/historical_training_set*` and `gold/v2/historical_backtest_panel`
