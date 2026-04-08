@@ -3633,7 +3633,7 @@ def build_dataset(
             single_run_horizons=single_run_horizons or decision_horizons or config.backtest.decision_horizons or None,
             missing_only=forecast_missing_only,
         )
-        pipeline.backfill_truth(snapshots)
+        pipeline.backfill_truth(snapshots, missing_only=forecast_missing_only)
         frame = pipeline.materialize_training_set(
             snapshots,
             output_name=output_name,

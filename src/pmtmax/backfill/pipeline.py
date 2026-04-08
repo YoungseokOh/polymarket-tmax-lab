@@ -303,53 +303,129 @@ class BackfillPipeline:
         *,
         models: list[str],
     ) -> tuple[pd.DataFrame, dict[ForecastRequestKey, ForecastRequestState]]:
-        if not self.warehouse.table_exists("bronze_forecast_requests"):
-            return pd.DataFrame(), {}
         market_ids = sorted({snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None})
         if not market_ids or not models:
             return pd.DataFrame(), {}
 
-        market_placeholders = ",".join(["?"] * len(market_ids))
-        model_placeholders = ",".join(["?"] * len(models))
-        frame = self.warehouse.read_query(
-            f"""
-            select
-                market_id,
-                model_name,
-                endpoint_kind,
-                request_kind,
-                decision_horizon,
-                cast(target_local_date as date)::varchar as target_local_date,
-                status,
-                availability_status,
-                query_signature,
-                cast(http_status as bigint) as http_status
-            from bronze_forecast_requests
-            where market_id in ({market_placeholders})
-              and model_name in ({model_placeholders})
-            """,
-            parameters=[*market_ids, *models],
-        )
         states: dict[ForecastRequestKey, ForecastRequestState] = {}
-        if frame.empty:
-            return frame, states
-        for row in frame.itertuples(index=False):
-            decision_horizon = str(row.decision_horizon) if pd.notna(row.decision_horizon) else None
-            http_status = int(row.http_status) if row.http_status is not None and not pd.isna(row.http_status) else None
-            key: ForecastRequestKey = (
-                str(row.market_id),
-                str(row.model_name),
-                str(row.endpoint_kind),
-                str(row.request_kind),
-                decision_horizon,
-                str(row.target_local_date),
+
+        # Seed states from bronze if the table exists.
+        frame = pd.DataFrame()
+        if self.warehouse.table_exists("bronze_forecast_requests"):
+            market_placeholders = ",".join(["?"] * len(market_ids))
+            model_placeholders = ",".join(["?"] * len(models))
+            frame = self.warehouse.read_query(
+                f"""
+                select
+                    market_id,
+                    model_name,
+                    endpoint_kind,
+                    request_kind,
+                    decision_horizon,
+                    cast(target_local_date as date)::varchar as target_local_date,
+                    status,
+                    availability_status,
+                    query_signature,
+                    cast(http_status as bigint) as http_status
+                from bronze_forecast_requests
+                where market_id in ({market_placeholders})
+                  and model_name in ({model_placeholders})
+                """,
+                parameters=[*market_ids, *models],
             )
-            states[key] = {
-                "status": str(row.status),
-                "availability_status": str(row.availability_status),
-                "query_signature": str(row.query_signature) if pd.notna(row.query_signature) else None,
-                "http_status": http_status,
-            }
+            for row in frame.itertuples(index=False):
+                decision_horizon = str(row.decision_horizon) if pd.notna(row.decision_horizon) else None
+                http_status = int(row.http_status) if row.http_status is not None and not pd.isna(row.http_status) else None
+                key: ForecastRequestKey = (
+                    str(row.market_id),
+                    str(row.model_name),
+                    str(row.endpoint_kind),
+                    str(row.request_kind),
+                    decision_horizon,
+                    str(row.target_local_date),
+                )
+                states[key] = {
+                    "status": str(row.status),
+                    "availability_status": str(row.availability_status),
+                    "query_signature": str(row.query_signature) if pd.notna(row.query_signature) else None,
+                    "http_status": http_status,
+                }
+
+        # Also seed from silver: if silver_forecast_runs_hourly already has rows for a
+        # market_id × model_name pair, treat them as existing so missing_only=True skips
+        # API calls for data already materialized there (common for synthetic markets
+        # loaded from parquet rather than fetched via API).
+        if self.warehouse.table_exists("silver_forecast_runs_hourly"):
+            market_placeholders = ",".join(["?"] * len(market_ids))
+            model_placeholders = ",".join(["?"] * len(models))
+            silver_pairs = self.warehouse.read_query(
+                f"""
+                select distinct market_id, model_name, endpoint_kind, decision_horizon
+                from silver_forecast_runs_hourly
+                where market_id in ({market_placeholders})
+                  and model_name in ({model_placeholders})
+                """,
+                parameters=[*market_ids, *models],
+            )
+            if not silver_pairs.empty:
+                # Build lookup: market_id → target_local_date string
+                market_date: dict[str, str] = {
+                    snapshot.spec.market_id: snapshot.spec.target_local_date.isoformat()
+                    for snapshot in snapshots
+                    if snapshot.spec is not None
+                }
+                synthetic_ok: ForecastRequestState = {
+                    "status": "ok",
+                    "availability_status": "available",
+                    "query_signature": None,
+                    "http_status": 200,
+                }
+                synthetic_skip: ForecastRequestState = {
+                    "status": "skipped_silver_present",
+                    "availability_status": "available",
+                    "query_signature": None,
+                    "http_status": None,
+                }
+                # Collect which (market_id, model) have historical_forecast in silver
+                hf_pairs: set[tuple[str, str]] = set()
+                for row in silver_pairs.itertuples(index=False):
+                    mid = str(row.market_id)
+                    model = str(row.model_name)
+                    ek = str(row.endpoint_kind) if pd.notna(row.endpoint_kind) else ""
+                    dh = str(row.decision_horizon) if pd.notna(row.decision_horizon) else None
+
+                    date_str = market_date.get(mid)
+                    if date_str is None:
+                        continue
+
+                    if ek == "historical_forecast":
+                        # Mark the full historical_forecast request as done
+                        full_key: ForecastRequestKey = (mid, model, "historical_forecast", "full", None, date_str)
+                        states.setdefault(full_key, synthetic_ok)
+                        # Also mark the probe as done so backfill_forecasts does not
+                        # call _probe_forecast_availability for already-materialized data.
+                        probe_key: ForecastRequestKey = (mid, model, "historical_forecast", "probe", None, date_str)
+                        states.setdefault(probe_key, synthetic_ok)
+                        hf_pairs.add((mid, model))
+                    elif ek == "single_run" and dh is not None:
+                        # Mark this specific single_run horizon as done
+                        sr_key: ForecastRequestKey = (mid, model, "single_run", "single_run", dh, date_str)
+                        states.setdefault(sr_key, synthetic_ok)
+
+                # For markets with historical_forecast in silver but no single_run data,
+                # add placeholder skip-states for all config horizons so that
+                # _backfill_single_run_requests does not attempt API calls.
+                # Horizons are read from config at runtime; we use a fixed list of the
+                # three standard decision horizons since that is what build-dataset passes.
+                _std_horizons = ("market_open", "previous_evening", "morning_of")
+                for mid, model in hf_pairs:
+                    date_str = market_date.get(mid)
+                    if date_str is None:
+                        continue
+                    for horizon in _std_horizons:
+                        sr_key = (mid, model, "single_run", "single_run", horizon, date_str)
+                        states.setdefault(sr_key, synthetic_skip)
+
         return frame, states
 
     def backfill_forecasts(
@@ -378,7 +454,7 @@ class BackfillPipeline:
         silver_rows: list[dict[str, object]] = []
         model_rows: list[dict[str, object]] = []
         source_rows: list[dict[str, object]] = []
-        checkpoint_snapshots = 25
+        checkpoint_snapshots = 250
         processed_since_checkpoint = 0
         bronze_count = self.warehouse.table_row_count("bronze_forecast_requests")
         silver_count = self.warehouse.table_row_count("silver_forecast_runs_hourly")
@@ -747,14 +823,28 @@ class BackfillPipeline:
             "silver_forecast_runs_hourly": silver,
         }
 
-    def backfill_truth(self, snapshots: list[MarketSnapshot]) -> dict[str, pd.DataFrame]:
+    def backfill_truth(self, snapshots: list[MarketSnapshot], *, missing_only: bool = False) -> dict[str, pd.DataFrame]:
         """Persist raw official truth payloads and normalized daily observations."""
+
+        # When missing_only=True, skip markets that already have truth data in silver.
+        existing_truth_ids: set[str] = set()
+        if missing_only and self.warehouse.table_exists("silver_observations_daily"):
+            market_ids = sorted({s.spec.market_id for s in snapshots if s.spec is not None})
+            if market_ids:
+                placeholders = ",".join(["?"] * len(market_ids))
+                result = self.warehouse.read_query(
+                    f"select distinct market_id from silver_observations_daily where market_id in ({placeholders})",  # noqa: S608
+                    parameters=market_ids,
+                )
+                existing_truth_ids = set(result["market_id"].tolist()) if not result.empty else set()
 
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
         for snapshot in snapshots:
             spec = snapshot.spec
             if spec is None:
+                continue
+            if missing_only and spec.market_id in existing_truth_ids:
                 continue
             truth_source = make_truth_source(
                 spec,
@@ -1444,35 +1534,138 @@ class BackfillPipeline:
             msg = f"Unsupported materialization contract: {contract}"
             raise ValueError(msg)
         horizons = decision_horizons or ["market_open", "previous_evening", "morning_of"]
-        forecast_frame = self.warehouse.read_table("silver_forecast_runs_hourly")
-        truth_frame = self.warehouse.read_table("silver_observations_daily")
+        needed_ids = sorted({s.spec.market_id for s in snapshots if s.spec is not None})
+        id_placeholders = ",".join(["?"] * len(needed_ids))
+
+        # Precompute all daily features in a single DuckDB SQL aggregation.
+        # This replaces the per-market-×-model-×-horizon Python feature loop
+        # (91k × 3 × 4 = 1.1M calls) with one vectorised GROUP BY.
+        features_df = self.warehouse.read_query(
+            f"""
+            select
+                market_id,
+                model_name,
+                endpoint_kind,
+                coalesce(cast(decision_horizon as varchar), '__historical__') as dh_key,
+                max(temperature_2m)  filter (where local_date = target_local_date) as model_daily_max,
+                avg(temperature_2m)  filter (where local_date = target_local_date) as model_daily_mean,
+                min(temperature_2m)  filter (where local_date = target_local_date) as model_daily_min,
+                max(temperature_2m)  filter (where local_date = target_local_date)
+                    - min(temperature_2m) filter (where local_date = target_local_date) as diurnal_amplitude,
+                avg(case when hour between 11 and 15 and local_date = target_local_date
+                         then temperature_2m end) as midday_temp,
+                avg(cloud_cover)          filter (where local_date = target_local_date) as cloud_cover_mean,
+                avg(wind_speed_10m)       filter (where local_date = target_local_date) as wind_speed_mean,
+                avg(relative_humidity_2m) filter (where local_date = target_local_date) as humidity_mean,
+                avg(dew_point_2m)         filter (where local_date = target_local_date) as dew_point_mean,
+                count(*)                  filter (where local_date = target_local_date) as num_hours,
+                max(issue_time_utc) as latest_issue_time_utc
+            from silver_forecast_runs_hourly
+            where market_id in ({id_placeholders})
+            group by market_id, model_name, endpoint_kind, dh_key
+            """,  # noqa: S608
+            parameters=needed_ids,
+        )
+        truth_df = self.warehouse.read_query(
+            f"select * from silver_observations_daily where market_id in ({id_placeholders})",  # noqa: S608
+            parameters=needed_ids,
+        )
+
+        # Build lookup dicts for O(1) per-market access.
+        # feature_lookup: (market_id, model_name, endpoint_kind, dh_key) → feature dict
+        _feat_cols = [
+            "model_daily_max", "model_daily_mean", "model_daily_min", "diurnal_amplitude",
+            "midday_temp", "cloud_cover_mean", "wind_speed_mean", "humidity_mean",
+            "dew_point_mean", "num_hours", "latest_issue_time_utc",
+        ]
+        feature_lookup: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        for frow in features_df.itertuples(index=False):
+            key = (str(frow.market_id), str(frow.model_name), str(frow.endpoint_kind), str(frow.dh_key))
+            feature_lookup[key] = {col: getattr(frow, col) for col in _feat_cols}
+
+        truth_by_market: dict[str, pd.Series] = {}
+        for mid, grp in truth_df.groupby("market_id", sort=False):
+            truth_by_market[str(mid)] = grp.iloc[-1]
+
+        # Keep raw hourly data available for sequence rows (loaded lazily per-market).
+        forecast_by_market: dict[str, pd.DataFrame] = {}
+        if contract in {"sequence", "both"}:
+            hourly_df = self.warehouse.read_query(
+                f"select * from silver_forecast_runs_hourly where market_id in ({id_placeholders})",  # noqa: S608
+                parameters=needed_ids,
+            )
+            for mid, grp in hourly_df.groupby("market_id", sort=False):
+                forecast_by_market[str(mid)] = grp.reset_index(drop=True)
+            del hourly_df
+
         rows: list[dict[str, object]] = []
         sequence_rows: list[dict[str, object]] = []
         for snapshot in snapshots:
             spec = snapshot.spec
             if spec is None:
                 continue
-            market_forecasts = _rows_for_market(forecast_frame, spec.market_id)
-            market_truth = _rows_for_market(truth_frame, spec.market_id)
-            if market_forecasts.empty or market_truth.empty:
+            mid = str(spec.market_id)
+            truth_series = truth_by_market.get(mid)
+            if truth_series is None:
                 LOGGER.warning(
                     "materialize_training_set_skip",
                     extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
                 )
                 continue
-            truth_row = market_truth.iloc[-1]
+
+            # Check that at least one model has features for this market.
+            has_features = any(
+                (mid, m, ek, dh) in feature_lookup
+                for m in (self.models or [])
+                for ek in ("historical_forecast", "single_run")
+                for dh in ("__historical__", *horizons)
+            )
+            if not has_features:
+                LOGGER.warning(
+                    "materialize_training_set_skip",
+                    extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
+                )
+                continue
+
+            truth_row = truth_series
+            winning_outcome = infer_winning_label(spec, float(truth_row["daily_max"]))
+
             for horizon in horizons:
                 decision_point = self._decision_point(spec, horizon)
-                selected_forecasts = self._select_forecasts_for_horizon(market_forecasts, horizon)
-                if selected_forecasts.empty:
+                # Resolve available models for this horizon using the feature lookup.
+                selected_models: list[str] = []
+                for model in (self.models or []):
+                    # Prefer single_run for this horizon, fall back to historical_forecast.
+                    if (mid, model, "single_run", horizon) in feature_lookup:
+                        selected_models.append(model)
+                    elif (mid, model, "historical_forecast", "__historical__") in feature_lookup:
+                        selected_models.append(model)
+
+                if not selected_models:
                     LOGGER.warning(
                         "materialize_training_set_skip_horizon",
                         extra={"market_id": spec.market_id, "horizon": horizon, "reason": "missing_horizon_forecasts"},
                     )
                     continue
-                selected_models = sorted(selected_forecasts["model_name"].dropna().astype(str).unique().tolist())
-                issue_time = self._materialized_issue_time(selected_forecasts, decision_point["issue_time_utc"])
-                winning_outcome = infer_winning_label(spec, float(truth_row["daily_max"]))
+
+                # Determine issue_time from the latest precomputed timestamp.
+                issue_time_candidates = [
+                    feature_lookup.get((mid, m, "single_run", horizon), {}).get("latest_issue_time_utc")
+                    or feature_lookup.get((mid, m, "historical_forecast", "__historical__"), {}).get("latest_issue_time_utc")
+                    for m in selected_models
+                ]
+                issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
+                issue_time: pd.Timestamp = (
+                    pd.Timestamp(max(issue_time_candidates)) if issue_time_candidates
+                    else pd.Timestamp(decision_point["issue_time_utc"])
+                )
+
+                # Determine forecast source kind.
+                source_kind = (
+                    "single_run" if any((mid, m, "single_run", horizon) in feature_lookup for m in selected_models)
+                    else "historical_forecast"
+                )
+
                 row: dict[str, object] = {
                     "market_id": spec.market_id,
                     "station_id": spec.station_id,
@@ -1490,32 +1683,71 @@ class BackfillPipeline:
                     "winning_outcome": winning_outcome,
                     "available_models_json": json.dumps(selected_models),
                     "selected_models_json": json.dumps(selected_models),
-                    "forecast_source_kind": self._forecast_source_kind(selected_forecasts),
-                    **self._metadata_fields(source_priority=self._source_priority(self._forecast_source_kind(selected_forecasts))),
+                    "forecast_source_kind": source_kind,
+                    **self._metadata_fields(source_priority=self._source_priority(source_kind)),
                 }
-                self._populate_feature_row(row, selected_forecasts, spec.target_local_date, spec.timezone, unit=spec.unit)
+
+                # Populate model features from the precomputed lookup.
+                for model in self.models or []:
+                    feat = (
+                        feature_lookup.get((mid, model, "single_run", horizon))
+                        or feature_lookup.get((mid, model, "historical_forecast", "__historical__"))
+                        or {}
+                    )
+                    raw_features = {
+                        "model_daily_max": float(feat.get("model_daily_max") or 0.0),
+                        "model_daily_mean": float(feat.get("model_daily_mean") or 0.0),
+                        "model_daily_min": float(feat.get("model_daily_min") or 0.0),
+                        "diurnal_amplitude": float(feat.get("diurnal_amplitude") or 0.0),
+                        "midday_temp": float(feat.get("midday_temp") or feat.get("model_daily_mean") or 0.0),
+                        "cloud_cover_mean": float(feat.get("cloud_cover_mean") or 0.0),
+                        "wind_speed_mean": float(feat.get("wind_speed_mean") or 0.0),
+                        "humidity_mean": float(feat.get("humidity_mean") or 0.0),
+                        "dew_point_mean": float(feat.get("dew_point_mean") or 0.0),
+                        "num_hours": float(feat.get("num_hours") or 0.0),
+                    }
+                    features = _convert_celsius_features(raw_features, spec.unit)
+                    for key, value in features.items():
+                        row[f"{model}_{key}"] = value
+                    if "model_daily_max" in features and "model_daily_max" not in row:
+                        row["model_daily_max"] = features["model_daily_max"]
+
+                row["neighbor_mean_temp"] = float(
+                    _coerce_float(row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0)))
+                )
+                row["neighbor_spread"] = abs(
+                    _coerce_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
+                    - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
+                )
+
                 availability = {model: bool(model in selected_models) for model in (self.models or [])}
                 row["contract_version"] = "v2"
                 row["group_id"] = f"{spec.market_id}|{spec.target_local_date.isoformat()}"
                 row["split_group"] = row["group_id"]
                 row["feature_availability_json"] = json.dumps(availability, sort_keys=True)
                 rows.append(row)
-                sequence_rows.extend(
-                    self._build_sequence_rows(
-                        selected_forecasts=selected_forecasts,
-                        spec=spec,
-                        horizon=horizon,
-                        decision_point=decision_point,
-                        issue_time=issue_time,
-                        snapshot=snapshot,
-                        winning_outcome=winning_outcome,
-                        realized_daily_max=float(truth_row["daily_max"]),
+
+                if contract in {"sequence", "both"}:
+                    market_forecasts = forecast_by_market.get(mid, pd.DataFrame())
+                    selected_forecasts = self._select_forecasts_for_horizon(market_forecasts, horizon)
+                    sequence_rows.extend(
+                        self._build_sequence_rows(
+                            selected_forecasts=selected_forecasts,
+                            spec=spec,
+                            horizon=horizon,
+                            decision_point=decision_point,
+                            issue_time=issue_time,
+                            snapshot=snapshot,
+                            winning_outcome=winning_outcome,
+                            realized_daily_max=float(truth_row["daily_max"]),
+                        )
                     )
-                )
 
         frame = pd.DataFrame(rows)
         if frame.empty:
-            msg = self._empty_materialization_message(snapshots, forecast_frame, truth_frame)
+            _fc_proxy = features_df[["market_id"]].drop_duplicates() if not features_df.empty else pd.DataFrame()
+            _tr_proxy = truth_df[["market_id"]].drop_duplicates() if not truth_df.empty else pd.DataFrame()
+            msg = self._empty_materialization_message(snapshots, _fc_proxy, _tr_proxy)
             raise ValueError(msg)
         if not frame.empty:
             numeric_columns = frame.select_dtypes(include=["number"]).columns
