@@ -3526,9 +3526,13 @@ def scan_edge(
                 continue
             if min_market_price > 0.0 and gamma_price < min_market_price:
                 continue
-            fee = estimate_fee(gamma_price, taker_bps=fee_bps)
-            yes_edge = model_prob - gamma_price - fee
-            no_edge = (1.0 - model_prob) - (1.0 - gamma_price) - fee
+            no_price = 1.0 - gamma_price
+            if min_market_price > 0.0 and no_price < min_market_price:
+                continue
+            yes_fee = estimate_fee(gamma_price, taker_bps=fee_bps)
+            no_fee = estimate_fee(no_price, taker_bps=fee_bps)
+            yes_edge = model_prob - gamma_price - yes_fee
+            no_edge = (1.0 - model_prob) - no_price - no_fee
             best_edge = max(yes_edge, no_edge)
             if abs(best_edge) < min_edge:
                 continue

@@ -167,11 +167,30 @@ class BackfillPipeline:
     def backfill_markets(self, snapshots: list[MarketSnapshot], source_name: str = "snapshot") -> dict[str, pd.DataFrame]:
         """Persist raw market payloads and normalized market specs."""
 
+        checkpoint_markets = 2000
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
         station_rows: list[dict[str, object]] = []
         source_rows: list[dict[str, object]] = []
-        for snapshot in snapshots:
+        bronze_total: pd.DataFrame = pd.DataFrame()
+        silver_total: pd.DataFrame = pd.DataFrame()
+
+        def _flush() -> None:
+            nonlocal bronze_total, silver_total
+            if bronze_rows:
+                bronze_total = self.warehouse.upsert_table("bronze_market_snapshots", pd.DataFrame(bronze_rows))
+                bronze_rows.clear()
+            if silver_rows:
+                silver_total = self.warehouse.upsert_table("silver_market_specs", pd.DataFrame(silver_rows))
+                silver_rows.clear()
+            if station_rows:
+                self.warehouse.upsert_table("dim_station", pd.DataFrame(station_rows))
+                station_rows.clear()
+            if source_rows:
+                self.warehouse.upsert_table("dim_source", pd.DataFrame(source_rows))
+                source_rows.clear()
+
+        for i, snapshot in enumerate(snapshots):
             market_id = str(snapshot.market.get("id") or (snapshot.spec.market_id if snapshot.spec else "unknown"))
             captured_at = pd.Timestamp(snapshot.captured_at)
             relative_path = (
@@ -201,83 +220,80 @@ class BackfillPipeline:
                     ),
                 }
             )
-            if snapshot.spec is None:
-                continue
-            spec = snapshot.spec
-            silver_rows.append(
-                {
-                    "market_id": spec.market_id,
-                    "event_id": spec.event_id,
-                    "slug": spec.slug,
-                    "question": spec.question,
-                    "city": spec.city,
-                    "country": spec.country,
-                    "target_local_date": pd.Timestamp(spec.target_local_date),
-                    "timezone": spec.timezone,
-                    "official_source_name": spec.official_source_name,
-                    "official_source_url": spec.official_source_url,
-                    "station_id": spec.station_id,
-                    "station_name": spec.station_name,
-                    "station_lat": spec.station_lat,
-                    "station_lon": spec.station_lon,
-                    "truth_track": spec.truth_track,
-                    "settlement_eligible": spec.settlement_eligible,
-                    "public_truth_source_name": spec.public_truth_source_name,
-                    "public_truth_station_id": spec.public_truth_station_id,
-                    "research_priority": spec.research_priority,
-                    "unit": spec.unit,
-                    "precision_rule_json": spec.precision_rule.model_dump_json(),
-                    "outcome_schema_json": json.dumps(
-                        [outcome.model_dump(mode="json") for outcome in spec.outcome_schema],
-                        sort_keys=True,
-                    ),
-                    "finalization_policy_json": spec.finalization_policy.model_dump_json(),
-                    "token_ids_json": json.dumps(spec.token_ids),
-                    "notes": spec.notes,
-                    "spec_json": spec.model_dump_json(),
-                    **self._metadata_fields(source_priority=100),
-                }
-            )
-            station_rows.append(
-                {
-                    "station_id": spec.station_id,
-                    "station_name": spec.station_name,
-                    "city": spec.city,
-                    "country": spec.country,
-                    "timezone": spec.timezone,
-                    "station_lat": spec.station_lat,
-                    "station_lon": spec.station_lon,
-                    "official_source_name": spec.official_source_name,
-                    "truth_track": spec.truth_track,
-                    "settlement_eligible": spec.settlement_eligible,
-                    "public_truth_source_name": spec.public_truth_source_name,
-                    "public_truth_station_id": spec.public_truth_station_id,
-                    "research_priority": spec.research_priority,
-                    **self._metadata_fields(source_priority=100),
-                }
-            )
-            source_rows.append(
-                {
-                    "source_key": stable_hash(f"{spec.official_source_name}|{spec.station_id}")[:16],
-                    "source_name": spec.official_source_name,
-                    "source_url": spec.official_source_url,
-                    "station_id": spec.station_id,
-                    "city": spec.city,
-                    "source_kind": spec.adapter_key(),
-                    "truth_track": spec.truth_track,
-                    "settlement_eligible": spec.settlement_eligible,
-                    **self._metadata_fields(source_priority=100),
-                }
-            )
+            if snapshot.spec is not None:
+                spec = snapshot.spec
+                silver_rows.append(
+                    {
+                        "market_id": spec.market_id,
+                        "event_id": spec.event_id,
+                        "slug": spec.slug,
+                        "question": spec.question,
+                        "city": spec.city,
+                        "country": spec.country,
+                        "target_local_date": pd.Timestamp(spec.target_local_date),
+                        "timezone": spec.timezone,
+                        "official_source_name": spec.official_source_name,
+                        "official_source_url": spec.official_source_url,
+                        "station_id": spec.station_id,
+                        "station_name": spec.station_name,
+                        "station_lat": spec.station_lat,
+                        "station_lon": spec.station_lon,
+                        "truth_track": spec.truth_track,
+                        "settlement_eligible": spec.settlement_eligible,
+                        "public_truth_source_name": spec.public_truth_source_name,
+                        "public_truth_station_id": spec.public_truth_station_id,
+                        "research_priority": spec.research_priority,
+                        "unit": spec.unit,
+                        "precision_rule_json": spec.precision_rule.model_dump_json(),
+                        "outcome_schema_json": json.dumps(
+                            [outcome.model_dump(mode="json") for outcome in spec.outcome_schema],
+                            sort_keys=True,
+                        ),
+                        "finalization_policy_json": spec.finalization_policy.model_dump_json(),
+                        "token_ids_json": json.dumps(spec.token_ids),
+                        "notes": spec.notes,
+                        "spec_json": spec.model_dump_json(),
+                        **self._metadata_fields(source_priority=100),
+                    }
+                )
+                station_rows.append(
+                    {
+                        "station_id": spec.station_id,
+                        "station_name": spec.station_name,
+                        "city": spec.city,
+                        "country": spec.country,
+                        "timezone": spec.timezone,
+                        "station_lat": spec.station_lat,
+                        "station_lon": spec.station_lon,
+                        "official_source_name": spec.official_source_name,
+                        "truth_track": spec.truth_track,
+                        "settlement_eligible": spec.settlement_eligible,
+                        "public_truth_source_name": spec.public_truth_source_name,
+                        "public_truth_station_id": spec.public_truth_station_id,
+                        "research_priority": spec.research_priority,
+                        **self._metadata_fields(source_priority=100),
+                    }
+                )
+                source_rows.append(
+                    {
+                        "source_key": stable_hash(f"{spec.official_source_name}|{spec.station_id}")[:16],
+                        "source_name": spec.official_source_name,
+                        "source_url": spec.official_source_url,
+                        "station_id": spec.station_id,
+                        "city": spec.city,
+                        "source_kind": spec.adapter_key(),
+                        "truth_track": spec.truth_track,
+                        "settlement_eligible": spec.settlement_eligible,
+                        **self._metadata_fields(source_priority=100),
+                    }
+                )
 
-        bronze = self.warehouse.upsert_table("bronze_market_snapshots", pd.DataFrame(bronze_rows))
-        silver = self.warehouse.upsert_table("silver_market_specs", pd.DataFrame(silver_rows))
-        if station_rows:
-            self.warehouse.upsert_table("dim_station", pd.DataFrame(station_rows))
-        if source_rows:
-            self.warehouse.upsert_table("dim_source", pd.DataFrame(source_rows))
+            if (i + 1) % checkpoint_markets == 0:
+                _flush()
+
+        _flush()
         self.warehouse.write_manifest()
-        return {"bronze_market_snapshots": bronze, "silver_market_specs": silver}
+        return {"bronze_market_snapshots": bronze_total, "silver_market_specs": silver_total}
 
     @staticmethod
     def _forecast_request_key(
