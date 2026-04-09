@@ -11,7 +11,10 @@ from pathlib import Path
 import pandas as pd
 
 from pmtmax.backtest.metrics import summarize_trade_log
-from pmtmax.backtest.recent_core_benchmark import classify_profitability, summarize_recent_core_profitability
+from pmtmax.backtest.recent_core_benchmark import (
+    classify_profitability,
+    summarize_recent_core_profitability,
+)
 from pmtmax.utils import dump_json, load_json, load_yaml_with_extends
 
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")

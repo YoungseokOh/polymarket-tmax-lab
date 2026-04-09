@@ -72,10 +72,15 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "S", "C4", "SIM"]
-ignore = ["E501", "S101"]
+# E501: line too long (handled by formatter)
+# S101: assert in tests
+# B008: typer.Option/Argument in function defaults is the intended typer pattern
+# S608: internal DuckDB queries are not user-facing SQL injection vectors
+ignore = ["E501", "S101", "B008", "S608"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S106"]
+"tests/*" = ["S105", "S106", "S107", "S108"]
+"scripts/*" = ["F401", "F841", "F541", "S110", "S112", "SIM105"]
 "notebooks/*.ipynb" = ["I001"]
 
 [tool.ruff.format]

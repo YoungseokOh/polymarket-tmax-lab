@@ -55,8 +55,7 @@ from pmtmax.markets.repository import (
     load_market_snapshots,
     save_market_snapshots,
 )
-from pmtmax.markets.station_registry import lookup_city_stations
-from pmtmax.markets.station_registry import lookup_station
+from pmtmax.markets.station_registry import lookup_city_stations, lookup_station
 from pmtmax.markets.station_registry import supported_cities as catalog_supported_cities
 from pmtmax.modeling.advanced.lgbm_emos import LgbmEMOSVariantConfig
 from pmtmax.modeling.autoresearch import (

@@ -136,9 +136,8 @@ def _resolve_station_id(
 ) -> str:
     if source_name == "Wunderground" and source_url:
         return source_url.rstrip("/").split("/")[-1]
-    if source_name == "NOAA Timeseries" and source_url:
-        if station_match := NOAA_SITE_RE.search(source_url):
-            return station_match.group("station").upper()
+    if source_name == "NOAA Timeseries" and source_url and (station_match := NOAA_SITE_RE.search(source_url)):
+        return station_match.group("station").upper()
     if source_name.startswith("Hong Kong Observatory"):
         if source_url:
             station_match = re.search(r"station=([A-Z0-9]+)", source_url)

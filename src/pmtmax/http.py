@@ -58,9 +58,12 @@ class CachedHttpClient:
         """Fetch JSON with optional disk cache and optional TTL expiry."""
 
         cache_path = self._request_cache_path(url, "json", payload=params, payload_key="params")
-        if use_cache and cache_path.exists():
-            if cache_ttl_seconds is None or (time.time() - cache_path.stat().st_mtime) < cache_ttl_seconds:
-                return json.loads(cache_path.read_text())
+        if (
+            use_cache
+            and cache_path.exists()
+            and (cache_ttl_seconds is None or (time.time() - cache_path.stat().st_mtime) < cache_ttl_seconds)
+        ):
+            return json.loads(cache_path.read_text())
 
         response = self.client.get(url, params=params)
         response.raise_for_status()

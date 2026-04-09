@@ -6,7 +6,6 @@ import respx
 from pmtmax.http import CachedHttpClient
 from pmtmax.weather.metar_client import MetarClient
 
-
 SAMPLE_METAR_RESPONSE = [
     {
         "icaoId": "KJFK",

@@ -168,10 +168,10 @@ class DuckDBStore:
                 )
 
             self.connection.execute(
-                (
+                
                     f"create or replace temp table {resolved_name} as "
                     f"select * from {table_name} union all by name select * from {stage_name} limit 0"
-                )  # noqa: S608
+                  # noqa: S608
             )
             resolved_schema_map = dict(self.table_schema(resolved_name))
             target_schema_map = dict(self.table_schema(table_name))
@@ -181,10 +181,10 @@ class DuckDBStore:
                     continue
                 with suppress(duckdb.Error):
                     self.connection.execute(
-                        (
+                        
                             f"alter table {table_name} alter column {_quote_identifier(column_name)} "
                             f"set data type {resolved_type}"
-                        )  # noqa: S608
+                          # noqa: S608
                     )
 
             target_schema = self.table_schema(table_name)
@@ -209,10 +209,10 @@ class DuckDBStore:
                 f"delete from {table_name} as target using {stage_name} as stage where {join_conditions}"  # noqa: S608
             )
             self.connection.execute(
-                (
+                
                     f"insert into {table_name} "
                     f"select {', '.join(select_fragments)} from {stage_name} as stage"
-                )  # noqa: S608
+                  # noqa: S608
             )
         finally:
             self.connection.execute(f"drop table if exists {resolved_name}")  # noqa: S608

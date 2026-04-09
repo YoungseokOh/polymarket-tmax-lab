@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-
 CATALOG_PATH = Path(__file__).resolve().parents[3] / "configs" / "market_inventory" / "station_catalog.json"
 
 

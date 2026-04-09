@@ -127,7 +127,7 @@ def process_city_year_model_vars(
             "generationtime_ms": 0.1,
             "utc_offset_seconds": 0,
             "timezone": tz,
-            "hourly_units": {v: "°C" for v in hourly_vars},
+            "hourly_units": dict.fromkeys(hourly_vars, "°C"),
             "hourly": day_hourly,
             "model": model,
         }

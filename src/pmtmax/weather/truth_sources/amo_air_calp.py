@@ -12,9 +12,9 @@ from pmtmax.http import CachedHttpClient
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.storage.schemas import ObservationRecord
 from pmtmax.weather.truth_sources.base import (
-    TruthSourceLagError,
     TruthFetchBundle,
     TruthSource,
+    TruthSourceLagError,
     celsius_to_fahrenheit,
 )
 

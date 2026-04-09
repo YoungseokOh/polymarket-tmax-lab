@@ -1556,36 +1556,42 @@ class BackfillPipeline:
         # Precompute all daily features in a single DuckDB SQL aggregation.
         # This replaces the per-market-×-model-×-horizon Python feature loop
         # (91k × 3 × 4 = 1.1M calls) with one vectorised GROUP BY.
-        features_df = self.warehouse.read_query(
-            f"""
-            select
-                market_id,
-                model_name,
-                endpoint_kind,
-                coalesce(cast(decision_horizon as varchar), '__historical__') as dh_key,
-                max(temperature_2m)  filter (where local_date = target_local_date) as model_daily_max,
-                avg(temperature_2m)  filter (where local_date = target_local_date) as model_daily_mean,
-                min(temperature_2m)  filter (where local_date = target_local_date) as model_daily_min,
-                max(temperature_2m)  filter (where local_date = target_local_date)
-                    - min(temperature_2m) filter (where local_date = target_local_date) as diurnal_amplitude,
-                avg(case when hour between 11 and 15 and local_date = target_local_date
-                         then temperature_2m end) as midday_temp,
-                avg(cloud_cover)          filter (where local_date = target_local_date) as cloud_cover_mean,
-                avg(wind_speed_10m)       filter (where local_date = target_local_date) as wind_speed_mean,
-                avg(relative_humidity_2m) filter (where local_date = target_local_date) as humidity_mean,
-                avg(dew_point_2m)         filter (where local_date = target_local_date) as dew_point_mean,
-                count(*)                  filter (where local_date = target_local_date) as num_hours,
-                max(issue_time_utc) as latest_issue_time_utc
-            from silver_forecast_runs_hourly
-            where market_id in ({id_placeholders})
-            group by market_id, model_name, endpoint_kind, dh_key
-            """,  # noqa: S608
-            parameters=needed_ids,
-        )
-        truth_df = self.warehouse.read_query(
-            f"select * from silver_observations_daily where market_id in ({id_placeholders})",  # noqa: S608
-            parameters=needed_ids,
-        )
+        if self.warehouse.table_exists("silver_forecast_runs_hourly"):
+            features_df = self.warehouse.read_query(
+                f"""
+                select
+                    market_id,
+                    model_name,
+                    endpoint_kind,
+                    coalesce(cast(decision_horizon as varchar), '__historical__') as dh_key,
+                    max(temperature_2m)  filter (where local_date = target_local_date) as model_daily_max,
+                    avg(temperature_2m)  filter (where local_date = target_local_date) as model_daily_mean,
+                    min(temperature_2m)  filter (where local_date = target_local_date) as model_daily_min,
+                    max(temperature_2m)  filter (where local_date = target_local_date)
+                        - min(temperature_2m) filter (where local_date = target_local_date) as diurnal_amplitude,
+                    avg(case when hour between 11 and 15 and local_date = target_local_date
+                             then temperature_2m end) as midday_temp,
+                    avg(cloud_cover)          filter (where local_date = target_local_date) as cloud_cover_mean,
+                    avg(wind_speed_10m)       filter (where local_date = target_local_date) as wind_speed_mean,
+                    avg(relative_humidity_2m) filter (where local_date = target_local_date) as humidity_mean,
+                    avg(dew_point_2m)         filter (where local_date = target_local_date) as dew_point_mean,
+                    count(*)                  filter (where local_date = target_local_date) as num_hours,
+                    max(issue_time_utc) as latest_issue_time_utc
+                from silver_forecast_runs_hourly
+                where market_id in ({id_placeholders})
+                group by market_id, model_name, endpoint_kind, dh_key
+                """,  # noqa: S608
+                parameters=needed_ids,
+            )
+        else:
+            features_df = pd.DataFrame()
+        if self.warehouse.table_exists("silver_observations_daily"):
+            truth_df = self.warehouse.read_query(
+                f"select * from silver_observations_daily where market_id in ({id_placeholders})",  # noqa: S608
+                parameters=needed_ids,
+            )
+        else:
+            truth_df = pd.DataFrame()
 
         # Build lookup dicts for O(1) per-market access.
         # feature_lookup: (market_id, model_name, endpoint_kind, dh_key) → feature dict
@@ -1600,18 +1606,20 @@ class BackfillPipeline:
             feature_lookup[key] = {col: getattr(frow, col) for col in _feat_cols}
 
         truth_by_market: dict[str, pd.Series] = {}
-        for mid, grp in truth_df.groupby("market_id", sort=False):
-            truth_by_market[str(mid)] = grp.iloc[-1]
+        if not truth_df.empty and "market_id" in truth_df.columns:
+            for mid, grp in truth_df.groupby("market_id", sort=False):
+                truth_by_market[str(mid)] = grp.iloc[-1]
 
         # Keep raw hourly data available for sequence rows (loaded lazily per-market).
         forecast_by_market: dict[str, pd.DataFrame] = {}
-        if contract in {"sequence", "both"}:
+        if contract in {"sequence", "both"} and self.warehouse.table_exists("silver_forecast_runs_hourly"):
             hourly_df = self.warehouse.read_query(
                 f"select * from silver_forecast_runs_hourly where market_id in ({id_placeholders})",  # noqa: S608
                 parameters=needed_ids,
             )
-            for mid, grp in hourly_df.groupby("market_id", sort=False):
-                forecast_by_market[str(mid)] = grp.reset_index(drop=True)
+            if not hourly_df.empty and "market_id" in hourly_df.columns:
+                for mid, grp in hourly_df.groupby("market_id", sort=False):
+                    forecast_by_market[str(mid)] = grp.reset_index(drop=True)
             del hourly_df
 
         rows: list[dict[str, object]] = []
@@ -1630,10 +1638,12 @@ class BackfillPipeline:
                 continue
 
             # Check that at least one model has features for this market.
+            # "fixture" endpoint_kind is used by test fixtures as a stand-in for historical_forecast.
+            _known_endpoint_kinds = ("historical_forecast", "single_run", "fixture")
             has_features = any(
                 (mid, m, ek, dh) in feature_lookup
                 for m in (self.models or [])
-                for ek in ("historical_forecast", "single_run")
+                for ek in _known_endpoint_kinds
                 for dh in ("__historical__", *horizons)
             )
             if not has_features:
@@ -1651,10 +1661,8 @@ class BackfillPipeline:
                 # Resolve available models for this horizon using the feature lookup.
                 selected_models: list[str] = []
                 for model in (self.models or []):
-                    # Prefer single_run for this horizon, fall back to historical_forecast.
-                    if (mid, model, "single_run", horizon) in feature_lookup:
-                        selected_models.append(model)
-                    elif (mid, model, "historical_forecast", "__historical__") in feature_lookup:
+                    # Prefer single_run for this horizon, fall back to historical_forecast/fixture.
+                    if (mid, model, "single_run", horizon) in feature_lookup or (mid, model, "historical_forecast", "__historical__") in feature_lookup or (mid, model, "fixture", "__historical__") in feature_lookup:
                         selected_models.append(model)
 
                 if not selected_models:
@@ -1668,6 +1676,7 @@ class BackfillPipeline:
                 issue_time_candidates = [
                     feature_lookup.get((mid, m, "single_run", horizon), {}).get("latest_issue_time_utc")
                     or feature_lookup.get((mid, m, "historical_forecast", "__historical__"), {}).get("latest_issue_time_utc")
+                    or feature_lookup.get((mid, m, "fixture", "__historical__"), {}).get("latest_issue_time_utc")
                     for m in selected_models
                 ]
                 issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
@@ -1708,6 +1717,7 @@ class BackfillPipeline:
                     feat = (
                         feature_lookup.get((mid, model, "single_run", horizon))
                         or feature_lookup.get((mid, model, "historical_forecast", "__historical__"))
+                        or feature_lookup.get((mid, model, "fixture", "__historical__"))
                         or {}
                     )
                     raw_features = {
