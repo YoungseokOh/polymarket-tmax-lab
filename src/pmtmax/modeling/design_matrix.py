@@ -158,6 +158,30 @@ class ContextualFeatureBuilder:
     medians: dict[str, float] = field(default_factory=dict)
     output_columns: list[str] = field(default_factory=list)
     model_daily_max_features: list[str] = field(default_factory=list)
+    # Climate normals: (city, month, day_of_month) → (mean_°C, std_°C)
+    # Computed from training-set realized_daily_max; safe to use at inference time.
+    clim_normals: dict[tuple[str, int, int], tuple[float, float]] = field(default_factory=dict)
+
+    def _compute_clim_normals(self, frame: pd.DataFrame) -> None:
+        """Compute per-(city, month, day) climatological mean and std from truth labels."""
+        if "realized_daily_max" not in frame.columns or "target_date" not in frame.columns:
+            return
+        cities = _extract_cities(frame)
+        dates = pd.to_datetime(frame["target_date"], errors="coerce")
+        truth = pd.to_numeric(frame["realized_daily_max"], errors="coerce")
+        tmp = pd.DataFrame({
+            "city": cities.values,
+            "month": dates.dt.month.values,
+            "day": dates.dt.day.values,
+            "truth": truth.values,
+        }).dropna(subset=["truth"])
+        grouped = tmp.groupby(["city", "month", "day"])["truth"]
+        means = grouped.mean()
+        stds = grouped.std().fillna(1.0).clip(lower=0.5)
+        self.clim_normals = {
+            (str(idx[0]), int(idx[1]), int(idx[2])): (float(means[idx]), float(stds[idx]))
+            for idx in means.index
+        }
 
     def fit(self, frame: pd.DataFrame) -> ContextualFeatureBuilder:
         ordered = _ordered_frame(frame)
@@ -193,6 +217,7 @@ class ContextualFeatureBuilder:
             else:
                 medians[feature] = 0.0
         self.medians = medians
+        self._compute_clim_normals(ordered)
         transformed = self._build_frame(ordered)
         self.output_columns = list(transformed.columns)
         return self
@@ -262,5 +287,44 @@ class ContextualFeatureBuilder:
             data[f"city__{_safe_token(category)}"] = (cities == category).astype(float)
         for category in self.horizon_categories:
             data[f"horizon__{_safe_token(category)}"] = (horizons == category).astype(float)
+
+        # Climate anomaly features: (forecast - clim_mean) / clim_std
+        # Uses per-(city, month, day) normals fit on training truth labels.
+        # At inference time, the stored normals are applied to the NWP forecast.
+        # getattr guard: old pickles (pre-clim_normals) won't have this attribute.
+        clim_normals = getattr(self, "clim_normals", {})
+        if clim_normals:
+            target_dates = pd.to_datetime(
+                frame.get("target_date", pd.Series([pd.NaT] * len(frame), index=frame.index)),
+                errors="coerce",
+            )
+            months = target_dates.dt.month.fillna(1).astype(int)
+            days = target_dates.dt.day.fillna(1).astype(int)
+
+            # Use ensemble mean of available model forecasts as the "forecast" for anomaly
+            max_feat_cols = [f for f in self.model_daily_max_features if f in frame.columns]
+            if max_feat_cols:
+                forecast_vals = (
+                    frame[max_feat_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .mean(axis=1)
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+            else:
+                forecast_vals = np.zeros(len(frame), dtype=float)
+
+            clim_mean_arr = np.zeros(len(frame), dtype=float)
+            clim_std_arr = np.ones(len(frame), dtype=float)
+            for i, (city, m, d) in enumerate(zip(cities, months, days)):
+                key = (str(city), int(m), int(d))
+                if key in clim_normals:
+                    clim_mean_arr[i], clim_std_arr[i] = clim_normals[key]
+
+            anomaly = forecast_vals - clim_mean_arr
+            data["clim_forecast_anomaly"] = anomaly
+            data["clim_forecast_anomaly_zscore"] = anomaly / np.where(clim_std_arr > 0, clim_std_arr, 1.0)
+            data["clim_mean"] = clim_mean_arr
+            data["clim_std"] = clim_std_arr
 
         return pd.DataFrame(data, index=frame.index, dtype=float)
