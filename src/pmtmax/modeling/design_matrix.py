@@ -316,15 +316,14 @@ class ContextualFeatureBuilder:
 
             clim_mean_arr = np.zeros(len(frame), dtype=float)
             clim_std_arr = np.ones(len(frame), dtype=float)
-            for i, (city, m, d) in enumerate(zip(cities, months, days)):
+            for i, (city, m, d) in enumerate(zip(cities, months, days, strict=False)):
                 key = (str(city), int(m), int(d))
                 if key in clim_normals:
                     clim_mean_arr[i], clim_std_arr[i] = clim_normals[key]
 
             anomaly = forecast_vals - clim_mean_arr
-            data["clim_forecast_anomaly"] = anomaly
+            # Only expose z-score: how many std-devs is this forecast from seasonal normal?
+            # Raw anomaly and clim_mean cause regression-to-mean bias on anomalous weather days.
             data["clim_forecast_anomaly_zscore"] = anomaly / np.where(clim_std_arr > 0, clim_std_arr, 1.0)
-            data["clim_mean"] = clim_mean_arr
-            data["clim_std"] = clim_std_arr
 
         return pd.DataFrame(data, index=frame.index, dtype=float)
