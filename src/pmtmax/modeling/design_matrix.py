@@ -288,6 +288,29 @@ class ContextualFeatureBuilder:
         for category in self.horizon_categories:
             data[f"horizon__{_safe_token(category)}"] = (horizons == category).astype(float)
 
+        # Weather interaction features derived from the primary NWP model.
+        # These encode known meteorological relationships as explicit features so
+        # the tree learner doesn't need deep splits to discover them.
+        _p = "ecmwf_ifs025"
+        _cloud = f"{_p}_cloud_cover_mean"
+        _diurnal = f"{_p}_diurnal_amplitude"
+        _dew = f"{_p}_dew_point_mean"
+        _tmax = f"{_p}_model_daily_max"
+        _wind = f"{_p}_wind_speed_mean"
+        _humid = f"{_p}_humidity_mean"
+        if _cloud in data and _diurnal in data:
+            # Cloud suppresses diurnal swing; high cloud → small swing
+            data["wx_cloud_diurnal"] = np.asarray(data[_cloud], dtype=float) * np.asarray(data[_diurnal], dtype=float)
+        if _tmax in data and _dew in data:
+            # Dew point depression: distance from saturation; higher → drier → more extreme heat possible
+            data["wx_dew_depression"] = np.asarray(data[_tmax], dtype=float) - np.asarray(data[_dew], dtype=float)
+        if _tmax in data and _humid in data:
+            # Heat-index proxy: high temp × high humidity → feels hotter, harder to reach target max
+            data["wx_heat_index_proxy"] = np.asarray(data[_tmax], dtype=float) * np.asarray(data[_humid], dtype=float) / 100.0
+        if _wind in data and _diurnal in data:
+            # Wind disperses heat; high wind suppresses diurnal max
+            data["wx_wind_diurnal"] = np.asarray(data[_wind], dtype=float) * np.asarray(data[_diurnal], dtype=float)
+
         # Climate anomaly features: (forecast - clim_mean) / clim_std
         # Uses per-(city, month, day) normals fit on training truth labels.
         # At inference time, the stored normals are applied to the NWP forecast.
