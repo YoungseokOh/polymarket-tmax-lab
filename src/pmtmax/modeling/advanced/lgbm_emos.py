@@ -28,9 +28,14 @@ class LgbmEMOSVariantConfig:
     recency_half_life_days: float
     use_oof_scale: bool = True  # False → faster (in-sample scale), True → honest OOF scale
     subsample_freq: int = 0  # 0 = disabled (default); 1 = enable row subsampling every tree
+    subsample: float = 0.9  # Row subsampling ratio per tree
+    colsample_bytree: float = 0.9  # Column subsampling ratio per tree
+    reg_alpha: float = 0.1  # L1 regularization
+    reg_lambda: float = 1.0  # L2 regularization
     use_quantile_loss: bool = False  # True → fit q10/q50/q90 quantile models; scale = (q90-q10)/2.56
     use_neighbor_delta: bool = False  # True → add nwp_vs_neighbor_delta/spread_ratio to feature matrix
     fixed_std: float | None = None  # If set, skip scale model entirely and use this constant std
+    drop_dead_features: bool = False  # True → exclude xmod_*, kma_gdps_*, gfs_seamless_* (near-zero importance)
 
 
 LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
@@ -503,11 +508,11 @@ def _new_lgbm(cfg: LgbmEMOSVariantConfig, alpha: float | None = None) -> LGBMReg
         num_leaves=cfg.num_leaves,
         max_depth=cfg.max_depth,
         min_child_samples=cfg.min_child_samples,
-        subsample=0.9,
+        subsample=cfg.subsample,
         subsample_freq=cfg.subsample_freq,
-        colsample_bytree=0.9,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        colsample_bytree=cfg.colsample_bytree,
+        reg_alpha=cfg.reg_alpha,
+        reg_lambda=cfg.reg_lambda,
         random_state=42,
         verbose=-1,
         **kwargs,
@@ -552,12 +557,22 @@ class LgbmEMOSModel:
         if not self.feature_names or len(ordered) < self.min_train_rows:
             return
 
+        cfg = self._variant_config
+
+        # Prune dead-weight features before fitting the builder
+        active_feature_names = self.feature_names
+        if cfg.drop_dead_features:
+            _dead_prefixes = ("xmod_", "kma_gdps_", "gfs_seamless_", "ecmwf_aifs025_single_")
+            active_feature_names = [
+                f for f in self.feature_names
+                if not any(f.startswith(p) for p in _dead_prefixes)
+            ]
+        self.builder = ContextualFeatureBuilder(active_feature_names)
         self.builder.fit(ordered)
         x_base = self.builder.transform(ordered)
         x_extra = _nwp_spread_features(ordered)
         x = pd.concat([x_base, x_extra], axis=1)
 
-        cfg = self._variant_config
         if cfg.use_neighbor_delta:
             x = self._add_neighbor_delta(x, ordered)
         sw = recency_weights(ordered, half_life_days=cfg.recency_half_life_days) if cfg.use_recency_weights else None
