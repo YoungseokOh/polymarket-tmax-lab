@@ -34,9 +34,14 @@ class LgbmAutoresearchParams(BaseModel):
     recency_half_life_days: float | None = None
     use_oof_scale: bool | None = None
     subsample_freq: int | None = None
+    subsample: float | None = None
+    colsample_bytree: float | None = None
+    reg_alpha: float | None = None
+    reg_lambda: float | None = None
     use_quantile_loss: bool | None = None
     use_neighbor_delta: bool | None = None
     fixed_std: float | None = None
+    drop_dead_features: bool | None = None
 
     def override_payload(self) -> dict[str, Any]:
         """Return only explicitly-set values."""
