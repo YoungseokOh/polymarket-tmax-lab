@@ -51,6 +51,12 @@ For overnight runs, use `/tmp/p7_chain.sh` pattern:
 - runs scan-edge + paper-trader after promotion
 - sends Telegram notification on completion
 
+## Dataset State (verified 2026-04-14)
+- Training set: **275,019 rows** (27 cities × 2016-2025 × 3 horizons) — already expanded
+- Backtest panel: 43,326 rows
+- Autoresearch manifest uses: `data/parquet/gold/v2/historical_training_set.parquet`
+- During autoresearch-step training: 220,017 rows used (80% split), 55,155 holdout
+
 ## Available Debias Knobs (Phase 7+)
 | Param | Default | Effect |
 |-------|---------|--------|
