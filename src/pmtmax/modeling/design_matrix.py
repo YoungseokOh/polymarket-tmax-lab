@@ -172,6 +172,7 @@ class ContextualFeatureBuilder:
     output_columns: list[str] = field(default_factory=list)
     model_daily_max_features: list[str] = field(default_factory=list)
     use_city_lat: bool = False  # True → add continuous city_latitude feature (lat/90, signed for hemisphere)
+    use_city_month: bool = False  # True → add city×month interaction dummies (city×12 months)
     def fit(self, frame: pd.DataFrame) -> ContextualFeatureBuilder:
         ordered = _ordered_frame(frame)
         self.base_feature_names = list(dict.fromkeys(self.base_feature_names))
@@ -280,6 +281,14 @@ class ContextualFeatureBuilder:
             lat_map = _city_latitude_map()
             # Normalise to [-1, 1]; sign encodes hemisphere (+ = N, - = S)
             data["city_latitude"] = cities.map(lambda c: lat_map.get(c, 0.0) / 90.0).astype(float)
+
+        if self.use_city_month:
+            months = target_dates.dt.month.fillna(1).astype(int)
+            for city in self.city_categories:
+                city_tok = _safe_token(city)
+                city_mask = (cities == city).to_numpy(dtype=bool)
+                for month in range(1, 13):
+                    data[f"cm__{city_tok}__m{month:02d}"] = (city_mask & (months == month).to_numpy()).astype(float)
 
         # Weather interaction features derived from the primary NWP model.
         # These encode known meteorological relationships as explicit features so

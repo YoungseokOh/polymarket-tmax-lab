@@ -43,6 +43,8 @@ class LgbmAutoresearchParams(BaseModel):
     fixed_std: float | None = None
     drop_dead_features: bool | None = None
     use_city_lat: bool | None = None
+    use_city_month: bool | None = None
+    quantile_center_alpha: float | None = None
 
     def override_payload(self) -> dict[str, Any]:
         """Return only explicitly-set values."""

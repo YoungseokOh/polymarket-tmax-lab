@@ -37,6 +37,8 @@ class LgbmEMOSVariantConfig:
     fixed_std: float | None = None  # If set, skip scale model entirely and use this constant std
     drop_dead_features: bool = False  # True → exclude xmod_*, kma_gdps_*, gfs_seamless_* (near-zero importance)
     use_city_lat: bool = False  # True → add continuous city_latitude feature to design matrix
+    use_city_month: bool = False  # True → add city×month interaction dummies to design matrix
+    quantile_center_alpha: float = 0.5  # Center quantile alpha (0.5=median, 0.4=40th pct → systematic downshift)
 
 
 LGBM_EMOS_VARIANTS: dict[str, LgbmEMOSVariantConfig] = {
@@ -568,7 +570,7 @@ class LgbmEMOSModel:
                 f for f in self.feature_names
                 if not any(f.startswith(p) for p in _dead_prefixes)
             ]
-        self.builder = ContextualFeatureBuilder(active_feature_names, use_city_lat=cfg.use_city_lat)
+        self.builder = ContextualFeatureBuilder(active_feature_names, use_city_lat=cfg.use_city_lat, use_city_month=cfg.use_city_month)
         self.builder.fit(ordered)
         x_base = self.builder.transform(ordered)
         x_extra = _nwp_spread_features(ordered)
@@ -579,17 +581,28 @@ class LgbmEMOSModel:
         sw = recency_weights(ordered, half_life_days=cfg.recency_half_life_days) if cfg.use_recency_weights else None
 
         if cfg.use_quantile_loss:
-            # Quantile regression mode: fit q10/q50/q90 models directly
+            # Quantile regression mode: fit q10/qCenter/q90 models in parallel threads.
             import sys
-            print(f"[lgbm_emos] fitting q50 on {len(x)} rows ...", flush=True, file=sys.stderr)
-            self._mean_model = _new_lgbm(cfg, alpha=0.5)
-            self._mean_model.fit(x, y, sample_weight=sw)
-            print(f"[lgbm_emos] fitting q10 ...", flush=True, file=sys.stderr)
-            self._q10_model = _new_lgbm(cfg, alpha=0.1)
-            self._q10_model.fit(x, y, sample_weight=sw)
-            print(f"[lgbm_emos] fitting q90 ...", flush=True, file=sys.stderr)
-            self._q90_model = _new_lgbm(cfg, alpha=0.9)
-            self._q90_model.fit(x, y, sample_weight=sw)
+            from concurrent.futures import ThreadPoolExecutor
+            center_alpha = cfg.quantile_center_alpha
+            print(
+                f"[lgbm_emos] fitting q10/q{center_alpha:.0%}/q90 in parallel on {len(x)} rows ...",
+                flush=True, file=sys.stderr,
+            )
+
+            def _fit(alpha: float) -> LGBMRegressor:
+                m = _new_lgbm(cfg, alpha=alpha)
+                m.fit(x, y, sample_weight=sw)
+                return m
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                f_center = pool.submit(_fit, center_alpha)
+                f_q10 = pool.submit(_fit, 0.1)
+                f_q90 = pool.submit(_fit, 0.9)
+                self._mean_model = f_center.result()
+                self._q10_model = f_q10.result()
+                self._q90_model = f_q90.result()
+
             print(f"[lgbm_emos] quantile fit done", flush=True, file=sys.stderr)
             self._scale_model = None
         elif cfg.fixed_std is not None:
