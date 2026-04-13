@@ -590,9 +590,16 @@ class LgbmEMOSModel:
                 flush=True, file=sys.stderr,
             )
 
+            import time
+            _t0 = time.time()
+
             def _fit(alpha: float) -> LGBMRegressor:
+                label = f"q{int(alpha*100):02d}"
+                print(f"[lgbm_emos] {label} start  {time.strftime('%H:%M:%S')}", flush=True, file=sys.stderr)
                 m = _new_lgbm(cfg, alpha=alpha)
                 m.fit(x, y, sample_weight=sw)
+                elapsed = time.time() - _t0
+                print(f"[lgbm_emos] {label} done   {time.strftime('%H:%M:%S')} (+{elapsed/60:.1f}m)", flush=True, file=sys.stderr)
                 return m
 
             with ThreadPoolExecutor(max_workers=3) as pool:
@@ -603,7 +610,8 @@ class LgbmEMOSModel:
                 self._q10_model = f_q10.result()
                 self._q90_model = f_q90.result()
 
-            print(f"[lgbm_emos] quantile fit done", flush=True, file=sys.stderr)
+            total = time.time() - _t0
+            print(f"[lgbm_emos] quantile fit done  total={total/60:.1f}m", flush=True, file=sys.stderr)
             self._scale_model = None
         elif cfg.fixed_std is not None:
             # Fixed-std mode: mean model only, scale = constant (skips scale model entirely)
