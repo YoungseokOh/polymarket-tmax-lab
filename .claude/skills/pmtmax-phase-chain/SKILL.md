@@ -29,9 +29,11 @@ Gate is slow (~4h). Skip it unless two candidates are within 0.005 CRPS.
 uv run pmtmax autoresearch-step artifacts/autoresearch/<run_tag>/candidates/<name>.yaml
 
 # 2. Compare step CRPS — lower is better
-# Champion step CRPS baseline: 0.7887 (debias_short_halflife)
+# Deployed champion step CRPS baseline: 0.7873 (quantile_emos_highcap)
+# Note: autoresearch-promote requires BOTH gate_summary + paper_summary → gate cannot be skipped for promotion
 
-# 3. Promote best if it beats champion
+# 3. Promote best if it beats champion (requires gate first)
+uv run pmtmax autoresearch-gate artifacts/autoresearch/<run_tag>/candidates/<best>.yaml
 uv run pmtmax autoresearch-promote \
   artifacts/autoresearch/<run_tag>/candidates/<best>.yaml \
   --publish-champion --force
@@ -70,14 +72,26 @@ For overnight runs, use `/tmp/p7_chain.sh` pattern:
 3. Step CRPS (proxy for probabilistic quality, lower is better)
 4. Gate CRPS (only if candidates are close in step)
 
-## Current Champion
-- Name: `debias_short_halflife`
-- Step CRPS: 0.7887
-- Gate CRPS: 0.8068
-- Key params: halflife=15d, quantile loss, use_neighbor_delta=true
+## Deployed Champion
+- Name: `quantile_emos_highcap`
+- Step CRPS: 0.7873 ← baseline to beat for any new Phase
+- Gate CRPS: in analysis/gate_summary__quantile_emos_highcap.json
+- Published: 2026-04-12
 
-## Paper Trade Stats (as of Apr 13 2026)
-- Overall win rate: 77% (56 settled)
-- NO direction: 89% (strong)
-- YES direction: 53% (target of Phase 7 fix)
-- Losses concentrated in: Singapore/HK April, Chengdu, Milan, Seattle
+## Phase 7 Results (as of Apr 14 2026)
+- Goal: fix upward temp bias causing YES direction 53% win rate
+- Hypothesis: q40 center + city×month dummies
+- Best candidate: `p7_combined` (q40+city_month), Step CRPS 0.7887
+- Result: **WORSE than deployed champion** (0.7887 vs 0.7873) — not promoted
+- Known bug: autoresearch-step ran p7_combined for all 3 candidates (variable shadowing in chain script)
+- Conclusion: debias approach does not improve step CRPS over quantile_emos_highcap
+
+## Top Step CRPS in 20260410 run (sorted)
+| Candidate | Step CRPS |
+|-----------|-----------|
+| debias_high_reg | 0.7866 |
+| debias_ultrashort | 0.7871 |
+| **quantile_emos_highcap** | **0.7873** ← deployed |
+| debias_city_zone | 0.7874 |
+| p7_combined | 0.7887 |
+| debias_short_halflife | 0.7887 |
