@@ -1,0 +1,18 @@
+run_tag: 20260410-lgbm-275k-expansion
+candidate_name: quantile_emos_highcap
+model_name: lgbm_emos
+base_variant: recency_neighbor_oof
+description: "Phase 5: Quantile EMOS + best params.\nq10/q50/q90 + num_leaves=127\
+  \ + min_child=50 \uC870\uD569.\nGaussian \uC81C\uC57D \uC5C6\uB294 \uBD84\uD3EC\
+  \ \uD559\uC2B5 + \uB192\uC740 \uBAA8\uB378 \uC6A9\uB7C9.\n"
+params:
+  n_estimators: 800
+  num_leaves: 127
+  max_depth: 8
+  learning_rate: 0.03
+  min_child_samples: 50
+  use_recency_weights: true
+  recency_half_life_days: 30.0
+  use_oof_scale: false
+  use_quantile_loss: true
+  use_neighbor_delta: true
