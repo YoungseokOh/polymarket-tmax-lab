@@ -6,10 +6,23 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+
+@lru_cache(maxsize=1)
+def _city_latitude_map() -> dict[str, float]:
+    """Load city → latitude mapping from station catalog."""
+    catalog_path = Path(__file__).resolve().parents[4] / "configs" / "market_inventory" / "station_catalog.json"
+    try:
+        catalog = json.loads(catalog_path.read_text())
+        return {str(info.get("city") or key): float(info["lat"]) for key, info in catalog.items()}
+    except Exception:
+        return {}
 
 
 def _safe_token(value: str) -> str:
@@ -158,6 +171,7 @@ class ContextualFeatureBuilder:
     medians: dict[str, float] = field(default_factory=dict)
     output_columns: list[str] = field(default_factory=list)
     model_daily_max_features: list[str] = field(default_factory=list)
+    use_city_lat: bool = False  # True → add continuous city_latitude feature (lat/90, signed for hemisphere)
     def fit(self, frame: pd.DataFrame) -> ContextualFeatureBuilder:
         ordered = _ordered_frame(frame)
         self.base_feature_names = list(dict.fromkeys(self.base_feature_names))
@@ -261,6 +275,11 @@ class ContextualFeatureBuilder:
             data[f"city__{_safe_token(category)}"] = (cities == category).astype(float)
         for category in self.horizon_categories:
             data[f"horizon__{_safe_token(category)}"] = (horizons == category).astype(float)
+
+        if self.use_city_lat:
+            lat_map = _city_latitude_map()
+            # Normalise to [-1, 1]; sign encodes hemisphere (+ = N, - = S)
+            data["city_latitude"] = cities.map(lambda c: lat_map.get(c, 0.0) / 90.0).astype(float)
 
         # Weather interaction features derived from the primary NWP model.
         # These encode known meteorological relationships as explicit features so

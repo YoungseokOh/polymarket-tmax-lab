@@ -3201,6 +3201,7 @@ def _run_panel_pricing_backtest(
         slim_panel["price_age_seconds"] = pd.to_numeric(slim_panel["price_age_seconds"], errors="coerce")
     slim_panel = slim_panel.set_index(["market_id", "decision_horizon", "outcome_label"]).sort_index()
 
+    import sys
     prediction_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
     priced_decision_rows = 0
@@ -3229,13 +3230,17 @@ def _run_panel_pricing_backtest(
         if variant_config is not None:
             train_kwargs["variant_config"] = variant_config
         if cached_artifact is None or step % retrain_stride == 0:
+            print(f"[backtest] step={step} retraining model on {len(train)} rows ...", flush=True, file=sys.stderr)
             cached_artifact = train_model(
                 model_name,
                 train,
                 artifacts_dir,
                 **train_kwargs,
             )
+            print(f"[backtest] step={step} retrain done", flush=True, file=sys.stderr)
         artifact = cached_artifact
+        if step % 500 == 0:
+            print(f"[backtest] step={step} evaluating ...", flush=True, file=sys.stderr)
         step += 1
         for _, row in test.iterrows():
             spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))

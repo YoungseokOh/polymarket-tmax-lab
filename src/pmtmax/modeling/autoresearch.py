@@ -42,6 +42,7 @@ class LgbmAutoresearchParams(BaseModel):
     use_neighbor_delta: bool | None = None
     fixed_std: float | None = None
     drop_dead_features: bool | None = None
+    use_city_lat: bool | None = None
 
     def override_payload(self) -> dict[str, Any]:
         """Return only explicitly-set values."""
