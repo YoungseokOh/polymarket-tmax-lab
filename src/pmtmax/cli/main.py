@@ -2434,12 +2434,19 @@ def _run_paper_model_evaluation(
     min_market_price: float = 0.0,
     max_city_exposure: float | None = None,
     global_max_exposure: float | None = None,
+    kelly_max_fraction: float = 0.05,
 ) -> tuple[list[dict[str, object]], float]:
     """Evaluate one model over active markets with paper-broker accounting."""
 
     broker = PaperBroker(bankroll=bankroll)
-    current_exposure_by_city: dict[str, float] = {}
-    results: list[dict[str, object]] = []
+    _city_cap = max_city_exposure if max_city_exposure is not None else config.execution.max_city_exposure
+    _global_cap = global_max_exposure if global_max_exposure is not None else config.execution.global_max_exposure
+
+    # --- Phase 1: evaluate ALL snapshots; collect tradable candidates separately ---
+    # This allows Phase 2 to sort by edge and allocate highest-edge trades first,
+    # avoiding the greedy-order bias of sequential exposure-limit checking.
+    non_tradable_results: list[dict[str, object]] = []
+    tradable_candidates: list[dict[str, object]] = []
 
     for snapshot in snapshots:
         spec = snapshot.spec
@@ -2463,7 +2470,7 @@ def _run_paper_model_evaluation(
             "decision_horizon": decision_horizon,
         }
         if horizon_reason == "policy_filtered":
-            results.append({**base_row, "reason": "policy_filtered"})
+            non_tradable_results.append({**base_row, "reason": "policy_filtered"})
             continue
         if decision_horizon is None:
             continue
@@ -2471,10 +2478,10 @@ def _run_paper_model_evaluation(
             feature_frame = builder.build_live_row(spec, horizon=decision_horizon)
             forecast = predict_market(model_path, model_name, spec, feature_frame)
         except Exception as exc:  # noqa: BLE001
-            results.append({**base_row, "reason": "forecast_failed", "error": str(exc)})
+            non_tradable_results.append({**base_row, "reason": "forecast_failed", "error": str(exc)})
             continue
         if not forecast_fresh(forecast.generated_at, config.execution.stale_forecast_minutes):
-            results.append(
+            non_tradable_results.append(
                 {
                     **base_row,
                     "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
@@ -2486,7 +2493,7 @@ def _run_paper_model_evaluation(
             continue
         forecast_rejection_reason = _forecast_contract_rejection_reason(forecast)
         if forecast_rejection_reason is not None:
-            results.append(
+            non_tradable_results.append(
                 {
                     **base_row,
                     "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
@@ -2503,8 +2510,6 @@ def _run_paper_model_evaluation(
             books = _build_gamma_books_for_forecast(snapshot, forecast.outcome_probabilities)
         else:
             books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
-        # Gamma-price mode: bypass spread/liquidity guards — they are based on a synthetic
-        # book, not a live CLOB, so they carry no real execution risk signal.
         effective_max_spread_bps = 1_000_000 if price_source == "gamma" else max_spread_bps
         effective_min_liquidity = 0.0 if price_source == "gamma" else min_liquidity
         evaluation = _evaluate_market_signal(
@@ -2526,55 +2531,84 @@ def _run_paper_model_evaluation(
         book = evaluation["book"]
         reason = str(evaluation["reason"])
         candidate = evaluation.get("candidate")
-        fill_payload: dict[str, object] | None = None
-        size_notional: float | None = None
+
+        # Build the shared result fields (used in both tradable and non-tradable paths).
+        result_fields: dict[str, object] = {
+            **base_row,
+            "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
+            "probability_source": getattr(forecast, "probability_source", "raw"),
+            "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
+            "outcome_label": candidate.get("outcome_label") if isinstance(candidate, dict) else None,
+            "token_id": candidate.get("token_id") if isinstance(candidate, dict) else None,
+            "fair_probability": candidate.get("fair_probability") if isinstance(candidate, dict) else None,
+            "best_bid": candidate.get("best_bid") if isinstance(candidate, dict) else None,
+            "best_ask": candidate.get("best_ask") if isinstance(candidate, dict) else None,
+            "executable_price": candidate.get("best_ask") if isinstance(candidate, dict) else None,
+            "spread": candidate.get("spread") if isinstance(candidate, dict) else None,
+            "visible_liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
+            "liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
+            "fee_estimate": candidate.get("fee_estimate") if isinstance(candidate, dict) else None,
+            "slippage_estimate": candidate.get("slippage_estimate") if isinstance(candidate, dict) else None,
+            "raw_gap": candidate.get("raw_gap") if isinstance(candidate, dict) else None,
+            "after_cost_edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
+            "edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
+            "book_source": candidate.get("book_source") if isinstance(candidate, dict) else None,
+            "book_source_counts": evaluation["book_source_counts"],
+        }
+
         if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot) and min_market_price > 0 and signal.executable_price < min_market_price:
             reason = "market_price_below_threshold"
+
         if reason == "tradable" and isinstance(signal, TradeSignal) and isinstance(book, BookSnapshot):
-            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
-            size = size_notional / max(signal.executable_price, 1e-6)
-            current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
-            _city_cap = max_city_exposure if max_city_exposure is not None else config.execution.max_city_exposure
-            _global_cap = global_max_exposure if global_max_exposure is not None else config.execution.global_max_exposure
-            if not exposure_ok(current_city_exposure, size_notional, _city_cap):
-                reason = "city_exposure_limit"
-            elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, _global_cap):
-                reason = "global_exposure_limit"
-            else:
-                fill = broker.simulate_fill(signal, book=book, size=size)
-                if fill is None:
-                    reason = "broker_rejected"
-                else:
-                    current_exposure_by_city[spec.city] = current_city_exposure + size_notional
-                    fill_payload = fill.model_dump(mode="json")
-        results.append(
-            {
-                **base_row,
-                "forecast_contract_version": getattr(forecast, "contract_version", "v2"),
-                "probability_source": getattr(forecast, "probability_source", "raw"),
-                "distribution_family": getattr(forecast, "distribution_family", "gaussian"),
-                "outcome_label": candidate.get("outcome_label") if isinstance(candidate, dict) else None,
-                "token_id": candidate.get("token_id") if isinstance(candidate, dict) else None,
-                "fair_probability": candidate.get("fair_probability") if isinstance(candidate, dict) else None,
-                "best_bid": candidate.get("best_bid") if isinstance(candidate, dict) else None,
-                "best_ask": candidate.get("best_ask") if isinstance(candidate, dict) else None,
-                "executable_price": candidate.get("best_ask") if isinstance(candidate, dict) else None,
-                "spread": candidate.get("spread") if isinstance(candidate, dict) else None,
-                "visible_liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
-                "liquidity": candidate.get("visible_liquidity") if isinstance(candidate, dict) else None,
-                "fee_estimate": candidate.get("fee_estimate") if isinstance(candidate, dict) else None,
-                "slippage_estimate": candidate.get("slippage_estimate") if isinstance(candidate, dict) else None,
-                "raw_gap": candidate.get("raw_gap") if isinstance(candidate, dict) else None,
-                "after_cost_edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
-                "edge": candidate.get("after_cost_edge") if isinstance(candidate, dict) else None,
-                "book_source": candidate.get("book_source") if isinstance(candidate, dict) else None,
-                "book_source_counts": evaluation["book_source_counts"],
+            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price, max_fraction=kelly_max_fraction)
+            tradable_candidates.append({
+                "result_fields": result_fields,
+                "signal": signal,
+                "book": book,
+                "spec": spec,
                 "size_notional": size_notional,
-                "reason": reason,
-                "fill": fill_payload,
-            }
-        )
-    # Normalize: if total Kelly notional exceeds bankroll, scale all positions down
+                "edge": signal.edge,
+            })
+        else:
+            non_tradable_results.append({**result_fields, "size_notional": None, "reason": reason, "fill": None})
+
+    # --- Phase 2: sort tradable candidates by edge descending, apply exposure limits ---
+    # This ensures highest-edge trades are always allocated first regardless of snapshot order.
+    tradable_candidates.sort(key=lambda c: c["edge"], reverse=True)
+
+    current_exposure_by_city: dict[str, float] = {}
+    filled_results: list[dict[str, object]] = []
+
+    for cand in tradable_candidates:
+        signal = cand["signal"]
+        book = cand["book"]
+        spec = cand["spec"]
+        size_notional = cand["size_notional"]
+        result_fields = cand["result_fields"]
+
+        current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
+        if not exposure_ok(current_city_exposure, size_notional, _city_cap):
+            reason = "city_exposure_limit"
+            fill_payload = None
+        elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, _global_cap):
+            reason = "global_exposure_limit"
+            fill_payload = None
+        else:
+            size = size_notional / max(signal.executable_price, 1e-6)
+            fill = broker.simulate_fill(signal, book=book, size=size)
+            if fill is None:
+                reason = "broker_rejected"
+                fill_payload = None
+            else:
+                reason = "tradable"
+                current_exposure_by_city[spec.city] = current_city_exposure + size_notional
+                fill_payload = fill.model_dump(mode="json")
+
+        filled_results.append({**result_fields, "size_notional": size_notional, "reason": reason, "fill": fill_payload})
+
+    results = non_tradable_results + filled_results
+
+    # Normalize: if total Kelly notional exceeds bankroll, scale all filled positions down
     # proportionally so the portfolio fits within the bankroll (simultaneous Kelly).
     total_notional = sum(
         float(r["size_notional"])
@@ -7164,6 +7198,7 @@ def paper_trader(
     min_market_price: float = typer.Option(0.0, help="Skip outcomes where Gamma mid-price is below this threshold (e.g. 0.10 to exclude <10% bins)"),
     max_city_exposure: float | None = typer.Option(None, help="Max notional per city (default: config value $500). Scale down with bankroll, e.g. --max-city-exposure 30 for $200 bankroll."),
     global_max_exposure: float | None = typer.Option(None, help="Max total notional across all cities (default: config value $2000). Set to bankroll for full deployment, e.g. --global-max-exposure 200."),
+    kelly_cap: float = typer.Option(0.05, help="Kelly fraction cap per trade (default 0.05 = flat 5%%). Use 0.30 for proportional portfolio sizing — high-edge trades get more capital, normalized to bankroll total."),
     output: Path = Path("artifacts/signals/v2/paper_signals.json"),
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
@@ -7184,6 +7219,7 @@ def paper_trader(
     min_market_price = float(_resolve_option_value(min_market_price, 0.0))
     max_city_exposure = _resolve_option_value(max_city_exposure)
     global_max_exposure = _resolve_option_value(global_max_exposure)
+    kelly_cap = float(_resolve_option_value(kelly_cap, 0.05))
     output = _resolve_option_value(output, Path("artifacts/signals/v2/paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
@@ -7224,6 +7260,7 @@ def paper_trader(
         min_market_price=min_market_price,
         max_city_exposure=float(max_city_exposure) if max_city_exposure is not None else None,
         global_max_exposure=float(global_max_exposure) if global_max_exposure is not None else None,
+        kelly_max_fraction=kelly_cap,
     )
     dump_json(output, results)
     console.print_json(data=results)
