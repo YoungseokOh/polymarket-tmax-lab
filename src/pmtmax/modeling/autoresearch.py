@@ -44,6 +44,8 @@ class LgbmAutoresearchParams(BaseModel):
     drop_dead_features: bool | None = None
     use_city_lat: bool | None = None
     use_city_month: bool | None = None
+    use_clim_anomaly: bool | None = None
+    use_forecast_bias: bool | None = None
     quantile_center_alpha: float | None = None
 
     def override_payload(self) -> dict[str, Any]:

@@ -182,6 +182,13 @@ class ContextualFeatureBuilder:
     model_daily_max_features: list[str] = field(default_factory=list)
     use_city_lat: bool = False  # True → add continuous city_latitude feature (lat/90, signed for hemisphere)
     use_city_month: bool = False  # True → add city×month interaction dummies (city×12 months)
+    use_clim_anomaly: bool = False  # True → add clim_delta / clim_zscore (NWP forecast vs city×month normal)
+    use_forecast_bias: bool = False  # True → add forecast_bias / bias_corrected_nwp (city×month systematic error)
+    # Fitted climate normals: {(city, month) → (mean, std)} — populated by fit(), used in transform()
+    clim_normals: dict = field(default_factory=dict)
+    # Fitted forecast bias: {(city, month) → mean_bias} — populated by fit(), used in transform()
+    forecast_bias_normals: dict = field(default_factory=dict)
+
     def fit(self, frame: pd.DataFrame) -> ContextualFeatureBuilder:
         ordered = _ordered_frame(frame)
         self.base_feature_names = list(dict.fromkeys(self.base_feature_names))
@@ -216,6 +223,41 @@ class ContextualFeatureBuilder:
             else:
                 medians[feature] = 0.0
         self.medians = medians
+
+        # Climate normals: city×month mean and std of realized_daily_max
+        if self.use_clim_anomaly and "realized_daily_max" in ordered.columns and "target_date" in ordered.columns:
+            cities_for_clim = _extract_cities(ordered).fillna("unknown").astype(str)
+            months = pd.to_datetime(ordered["target_date"], errors="coerce").dt.month.fillna(1).astype(int)
+            obs = pd.to_numeric(ordered["realized_daily_max"], errors="coerce")
+            clim_df = pd.DataFrame({"city": cities_for_clim, "month": months, "obs": obs}).dropna()
+            grouped = clim_df.groupby(["city", "month"])["obs"]
+            self.clim_normals = {
+                (city, month): (float(grp.mean()), max(float(grp.std(ddof=1)), 0.5))
+                for (city, month), grp in grouped
+                if len(grp) >= 5
+            }
+
+        # Forecast bias: city×month mean of (realized_daily_max - ecmwf_ifs025_model_daily_max)
+        # Captures systematic model cold/warm bias to improve bin prediction accuracy.
+        if (
+            self.use_forecast_bias
+            and "realized_daily_max" in ordered.columns
+            and "target_date" in ordered.columns
+            and "ecmwf_ifs025_model_daily_max" in ordered.columns
+        ):
+            cities_for_bias = _extract_cities(ordered).fillna("unknown").astype(str)
+            months_for_bias = pd.to_datetime(ordered["target_date"], errors="coerce").dt.month.fillna(1).astype(int)
+            realized = pd.to_numeric(ordered["realized_daily_max"], errors="coerce")
+            forecast = pd.to_numeric(ordered["ecmwf_ifs025_model_daily_max"], errors="coerce")
+            error = realized - forecast
+            bias_df = pd.DataFrame({"city": cities_for_bias, "month": months_for_bias, "error": error}).dropna()
+            grouped_bias = bias_df.groupby(["city", "month"])["error"]
+            self.forecast_bias_normals = {
+                (city, month): float(grp.mean())
+                for (city, month), grp in grouped_bias
+                if len(grp) >= 5
+            }
+
         transformed = self._build_frame(ordered)
         self.output_columns = list(transformed.columns)
         return self
@@ -298,6 +340,48 @@ class ContextualFeatureBuilder:
                 city_mask = (cities == city).to_numpy(dtype=bool)
                 for month in range(1, 13):
                     data[f"cm__{city_tok}__m{month:02d}"] = (city_mask & (months == month).to_numpy()).astype(float)
+
+        # Climate anomaly features: how unusual is the NWP forecast relative to historical normal?
+        # clim_delta   = NWP forecast daily max - climatological mean for this city/month
+        # clim_zscore  = clim_delta / climatological std (normalized anomaly)
+        # Large |clim_zscore| → model sees something unusual → high uncertainty → be cautious
+        if self.use_clim_anomaly and self.clim_normals:
+            nwp_max = np.asarray(data.get("ecmwf_ifs025_model_daily_max", np.zeros(len(frame))), dtype=float)
+            target_dates_for_clim = pd.to_datetime(
+                frame.get("target_date", pd.Series([pd.NaT] * len(frame), index=frame.index)),
+                errors="coerce",
+            )
+            months_for_clim = target_dates_for_clim.dt.month.fillna(1).astype(int).to_numpy()
+            cities_for_clim = _extract_cities(frame).fillna("unknown").astype(str).to_numpy()
+            clim_delta = np.zeros(len(frame), dtype=float)
+            clim_zscore = np.zeros(len(frame), dtype=float)
+            for i in range(len(frame)):
+                key = (cities_for_clim[i], int(months_for_clim[i]))
+                if key in self.clim_normals:
+                    mean, std = self.clim_normals[key]
+                    clim_delta[i] = nwp_max[i] - mean
+                    clim_zscore[i] = clim_delta[i] / std
+            data["clim_delta"] = clim_delta
+            data["clim_zscore"] = clim_zscore
+
+        # Forecast bias features: systematic city×month model error correction.
+        # forecast_bias      = historical mean(realized - ecmwf) for this city/month
+        # bias_corrected_nwp = ecmwf forecast + forecast_bias (bias-corrected point estimate)
+        if self.use_forecast_bias and self.forecast_bias_normals:
+            nwp_for_bias = np.asarray(data.get("ecmwf_ifs025_model_daily_max", np.zeros(len(frame))), dtype=float)
+            target_dates_for_bias = pd.to_datetime(
+                frame.get("target_date", pd.Series([pd.NaT] * len(frame), index=frame.index)),
+                errors="coerce",
+            )
+            months_for_bias = target_dates_for_bias.dt.month.fillna(1).astype(int).to_numpy()
+            cities_for_bias = _extract_cities(frame).fillna("unknown").astype(str).to_numpy()
+            forecast_bias = np.zeros(len(frame), dtype=float)
+            for i in range(len(frame)):
+                key = (cities_for_bias[i], int(months_for_bias[i]))
+                if key in self.forecast_bias_normals:
+                    forecast_bias[i] = self.forecast_bias_normals[key]
+            data["forecast_bias"] = forecast_bias
+            data["bias_corrected_nwp"] = nwp_for_bias + forecast_bias
 
         # Weather interaction features derived from the primary NWP model.
         # These encode known meteorological relationships as explicit features so
