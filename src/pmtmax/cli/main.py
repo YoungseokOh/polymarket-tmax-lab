@@ -2432,6 +2432,8 @@ def _run_paper_model_evaluation(
     book_cache: dict[str, dict[str, BookSnapshot]] | None = None,
     price_source: str = "gamma",
     min_market_price: float = 0.0,
+    max_city_exposure: float | None = None,
+    global_max_exposure: float | None = None,
 ) -> tuple[list[dict[str, object]], float]:
     """Evaluate one model over active markets with paper-broker accounting."""
 
@@ -2532,9 +2534,11 @@ def _run_paper_model_evaluation(
             size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
             size = size_notional / max(signal.executable_price, 1e-6)
             current_city_exposure = current_exposure_by_city.get(spec.city, 0.0)
-            if not exposure_ok(current_city_exposure, size_notional, config.execution.max_city_exposure):
+            _city_cap = max_city_exposure if max_city_exposure is not None else config.execution.max_city_exposure
+            _global_cap = global_max_exposure if global_max_exposure is not None else config.execution.global_max_exposure
+            if not exposure_ok(current_city_exposure, size_notional, _city_cap):
                 reason = "city_exposure_limit"
-            elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, config.execution.global_max_exposure):
+            elif not exposure_ok(sum(current_exposure_by_city.values()), size_notional, _global_cap):
                 reason = "global_exposure_limit"
             else:
                 fill = broker.simulate_fill(signal, book=book, size=size)
@@ -7158,6 +7162,8 @@ def paper_trader(
     min_liquidity: float | None = typer.Option(None, help="Minimum liquidity override"),
     price_source: str = typer.Option("gamma", help="Price source for edge calculation: 'gamma' (Gamma mid-prices) or 'clob' (live order book)"),
     min_market_price: float = typer.Option(0.0, help="Skip outcomes where Gamma mid-price is below this threshold (e.g. 0.10 to exclude <10% bins)"),
+    max_city_exposure: float | None = typer.Option(None, help="Max notional per city (default: config value $500). Scale down with bankroll, e.g. --max-city-exposure 30 for $200 bankroll."),
+    global_max_exposure: float | None = typer.Option(None, help="Max total notional across all cities (default: config value $2000). Set to bankroll for full deployment, e.g. --global-max-exposure 200."),
     output: Path = Path("artifacts/signals/v2/paper_signals.json"),
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
@@ -7176,6 +7182,8 @@ def paper_trader(
     min_liquidity = _resolve_option_value(min_liquidity)
     price_source = str(_resolve_option_value(price_source, "gamma"))
     min_market_price = float(_resolve_option_value(min_market_price, 0.0))
+    max_city_exposure = _resolve_option_value(max_city_exposure)
+    global_max_exposure = _resolve_option_value(global_max_exposure)
     output = _resolve_option_value(output, Path("artifacts/signals/v2/paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
@@ -7214,6 +7222,8 @@ def paper_trader(
         min_liquidity=float(min_liquidity if min_liquidity is not None else config.execution.min_liquidity),
         price_source=price_source,
         min_market_price=min_market_price,
+        max_city_exposure=float(max_city_exposure) if max_city_exposure is not None else None,
+        global_max_exposure=float(global_max_exposure) if global_max_exposure is not None else None,
     )
     dump_json(output, results)
     console.print_json(data=results)
