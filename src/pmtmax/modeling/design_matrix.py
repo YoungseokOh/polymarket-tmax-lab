@@ -111,29 +111,38 @@ def recency_weights(frame: pd.DataFrame, *, half_life_days: float = 90.0) -> np.
 
 
 def _parse_feature_availability(frame: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
-    default_payloads: list[dict[str, bool]]
+    # Fast path: no JSON column — use column notna as availability proxy.
     if "feature_availability_json" not in frame.columns:
-        default_payloads = [{} for _ in range(len(frame))]
-    else:
-        default_payloads = []
-        for raw in frame["feature_availability_json"]:
-            if not isinstance(raw, str):
-                default_payloads.append({})
-                continue
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = {}
-            default_payloads.append(payload if isinstance(payload, dict) else {})
+        data = {}
+        for feature in feature_names:
+            data[feature] = frame[feature].notna() if feature in frame.columns else pd.Series(False, index=frame.index)
+        return pd.DataFrame(data, index=frame.index, dtype=float)
 
-    data: dict[str, list[float]] = {}
+    # Parse JSON column in one vectorised pass (avoids per-row iloc which is O(n²)).
+    def _safe_parse(x: object) -> dict:
+        if not isinstance(x, str):
+            return {}
+        try:
+            payload = json.loads(x)
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    parsed_series = frame["feature_availability_json"].map(_safe_parse)
+    # Build wide DataFrame from list of dicts — one allocation instead of N×F appends.
+    json_df = pd.DataFrame(list(parsed_series), index=frame.index)
+
+    data = {}
     for feature in feature_names:
-        column_values: list[float] = []
-        frame_has_feature = feature in frame.columns
-        for row_idx, payload in enumerate(default_payloads):
-            fallback = bool(frame_has_feature and pd.notna(frame.iloc[row_idx][feature]))
-            column_values.append(float(bool(payload.get(feature, fallback))))
-        data[feature] = column_values
+        # Vectorised notna fallback — replaces the slow frame.iloc[row][feature] loop.
+        fallback = frame[feature].notna() if feature in frame.columns else pd.Series(False, index=frame.index)
+        if feature in json_df.columns:
+            json_col = pd.to_numeric(json_df[feature], errors="coerce")
+            # Use JSON value where present, else fall back to notna.
+            merged = json_col.where(json_col.notna(), fallback.astype(float))
+            data[feature] = merged.astype(float)
+        else:
+            data[feature] = fallback.astype(float)
     return pd.DataFrame(data, index=frame.index, dtype=float)
 
 
