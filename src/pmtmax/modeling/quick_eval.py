@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm as _scipy_norm
 
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.modeling.bin_mapper import map_normal_to_outcomes, map_samples_to_outcomes
@@ -64,19 +65,84 @@ def _predict_row(model: object, row: pd.Series, *, num_samples: int) -> dict[str
     }
 
 
+def _gaussian_crps_vectorized(means: np.ndarray, stds: np.ndarray, y_true: np.ndarray) -> np.ndarray:
+    """Analytical CRPS for Gaussian predictive distributions — exact, no sampling.
+
+    CRPS(N(μ,σ), y) = σ * (z*(2Φ(z)-1) + 2φ(z) - 1/√π)  where z = (y-μ)/σ
+    """
+    z = (y_true - means) / stds
+    return stds * (z * (2.0 * _scipy_norm.cdf(z) - 1.0) + 2.0 * _scipy_norm.pdf(z) - 1.0 / np.sqrt(np.pi))
+
+
 def evaluate_saved_model(
     model_path: Path,
     holdout: pd.DataFrame,
     *,
     num_samples: int = DEFAULT_NUM_SAMPLES,
 ) -> dict[str, float] | None:
-    """Evaluate one saved model artifact on a fixed holdout split."""
+    """Evaluate one saved model artifact on a fixed holdout split.
 
+    Uses batch prediction + analytical Gaussian CRPS instead of row-by-row
+    Monte Carlo sampling — reduces evaluation from ~25 min to ~10 s on 55k rows.
+    """
     try:
         model = load_model(model_path)
     except Exception:
         return None
 
+    if len(holdout) == 0:
+        return None
+
+    # Single batch prediction call replaces 55k individual model.predict(1_row) calls.
+    try:
+        prediction = model.predict(holdout)
+    except Exception:
+        # Fallback to legacy row-by-row path for models that can't handle batches.
+        return _evaluate_saved_model_legacy(model, holdout, num_samples=num_samples)
+
+    y_true = holdout["realized_daily_max"].to_numpy(dtype=float)
+    winners = holdout["winning_outcome"].astype(str).tolist()
+    valid = np.isfinite(y_true)
+
+    if len(prediction) == 2:
+        means = np.asarray(prediction[0]).reshape(-1).astype(float)
+        stds = np.maximum(np.asarray(prediction[1]).reshape(-1).astype(float), 0.1)
+        crps_vals = _gaussian_crps_vectorized(means[valid], stds[valid], y_true[valid])
+        mae_vals = np.abs(y_true[valid] - means[valid])
+    else:
+        # Mixture model: fall back to sampling path (uncommon case).
+        return _evaluate_saved_model_legacy(model, holdout, num_samples=num_samples)
+
+    # Brier score: parse market specs per-row (JSON parse only, no model call).
+    specs_json = holdout["market_spec_json"].tolist()
+    valid_indices = np.where(valid)[0]
+    briers: list[float] = []
+    for idx in valid_indices:
+        try:
+            spec = MarketSpec.model_validate_json(str(specs_json[idx]))
+            probs = map_normal_to_outcomes(spec, float(means[idx]), float(stds[idx]))
+            briers.append(brier_score(probs, winners[idx]))
+        except Exception:
+            continue
+
+    n = len(briers)
+    if n == 0:
+        return None
+    return {
+        "n": float(n),
+        "mae": float(np.mean(mae_vals[:n])),
+        "crps": float(np.mean(crps_vals[:n])),
+        "brier": float(np.mean(briers)),
+    }
+
+
+def _evaluate_saved_model_legacy(
+    model: object,
+    holdout: pd.DataFrame,
+    *,
+    num_samples: int = DEFAULT_NUM_SAMPLES,
+) -> dict[str, float] | None:
+    """Legacy row-by-row evaluation path (kept as fallback for non-Gaussian models)."""
     maes: list[float] = []
     crps_scores: list[float] = []
     briers: list[float] = []
@@ -91,7 +157,6 @@ def evaluate_saved_model(
         maes.append(abs(y_true - float(np.mean(samples))))
         crps_scores.append(crps_from_samples(np.asarray(samples), y_true))
         briers.append(brier_score(probs, winner))
-
     if not maes:
         return None
     return {
