@@ -52,7 +52,8 @@ def main() -> None:
             results.append(r)
             print(
                 f"MAE={r['mae']:.4f}  CRPS={r['crps']:.4f}  "
-                f"Brier={r['brier']:.4f}  (n={int(r['n'])})"
+                f"Brier={r['brier']:.4f}  DirAcc={r.get('dir_acc', float('nan')):.3f}  "
+                f"ECE={r.get('ece', float('nan')):.4f}  (n={int(r['n'])})"
             )
         else:
             print("FAILED")
@@ -61,13 +62,17 @@ def main() -> None:
         print("No results.")
         return
 
-    res_df = pd.DataFrame(results)[["model", "mae", "crps", "brier", "n"]]
+    cols = ["model", "crps", "brier", "dir_acc", "ece", "mae", "n"]
+    cols = [c for c in cols if c in results[0]]
+    res_df = pd.DataFrame(results)[cols]
     res_df = res_df.sort_values("crps").reset_index(drop=True)
 
     print("\n=== QUICK EVAL (fixed 80/20 split, no retraining) ===")
     print(res_df.to_string(index=False, float_format="{:.4f}".format))
-    print(f"\n  --> BEST CRPS: {res_df.iloc[0]['model']}")
-    print(f"  --> BEST MAE:  {res_df.sort_values('mae').iloc[0]['model']}")
+    print(f"\n  --> BEST CRPS:    {res_df.iloc[0]['model']}")
+    print(f"  --> BEST DirAcc:  {res_df.sort_values('dir_acc', ascending=False).iloc[0]['model']}")
+    print(f"  --> LOWEST ECE:   {res_df.sort_values('ece').iloc[0]['model']}")
+    print(f"  --> BEST MAE:     {res_df.sort_values('mae').iloc[0]['model']}")
 
 
 if __name__ == "__main__":

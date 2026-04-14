@@ -3499,6 +3499,8 @@ def scan_edge(
     min_model_prob: float = 0.05,
     max_model_prob: float = 0.95,
     min_market_price: float = typer.Option(0.0, help="Skip outcome bins where Gamma mid-price is below this threshold (e.g. 0.10 filters out <10% bins where model edge is typically spurious)."),
+    min_gamma: float = typer.Option(0.0, help="Skip bins where gamma_price < min_gamma. Use 0.15 to exclude near-zero bins where market is almost certainly right."),
+    max_gamma: float = typer.Option(1.0, help="Skip bins where gamma_price > max_gamma. Use 0.85 to exclude near-certain bins where market is almost certainly right."),
     output: Annotated[
         Path,
         typer.Option("--output", "--output-json"),
@@ -3570,6 +3572,9 @@ def scan_edge(
                 continue
             no_price = 1.0 - gamma_price
             if min_market_price > 0.0 and no_price < min_market_price:
+                continue
+            # Exclude extreme-confidence bins: market is almost always right at extremes
+            if gamma_price < min_gamma or gamma_price > max_gamma:
                 continue
             yes_fee = estimate_fee(gamma_price, taker_bps=fee_bps)
             no_fee = estimate_fee(no_price, taker_bps=fee_bps)

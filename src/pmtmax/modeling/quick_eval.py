@@ -113,26 +113,50 @@ def evaluate_saved_model(
         # Mixture model: fall back to sampling path (uncommon case).
         return _evaluate_saved_model_legacy(model, holdout, num_samples=num_samples)
 
-    # Brier score: parse market specs per-row (JSON parse only, no model call).
+    # Brier score, Direction Accuracy, ECE: parse market specs per-row (JSON parse only, no model call).
     specs_json = holdout["market_spec_json"].tolist()
     valid_indices = np.where(valid)[0]
     briers: list[float] = []
+    dir_acc_vals: list[float] = []
+    ece_pairs: list[tuple[float, float]] = []  # (predicted_prob, actual_outcome) across all bins
     for idx in valid_indices:
         try:
             spec = MarketSpec.model_validate_json(str(specs_json[idx]))
             probs = map_normal_to_outcomes(spec, float(means[idx]), float(stds[idx]))
-            briers.append(brier_score(probs, winners[idx]))
+            winner = winners[idx]
+            briers.append(brier_score(probs, winner))
+            # Direction Accuracy: is the top-1 predicted bin the actual winner?
+            predicted_winner = max(probs, key=lambda k: probs[k])
+            dir_acc_vals.append(1.0 if predicted_winner == winner else 0.0)
+            # ECE: collect (predicted_prob, is_winner) for every bin in this row
+            for bin_label, p in probs.items():
+                ece_pairs.append((float(p), 1.0 if bin_label == winner else 0.0))
         except Exception:
             continue
 
     n = len(briers)
     if n == 0:
         return None
+
+    # Expected Calibration Error — 10 equal-width probability buckets
+    ece = 0.0
+    if ece_pairs:
+        p_all = np.array([x[0] for x in ece_pairs])
+        y_all = np.array([x[1] for x in ece_pairs])
+        bin_edges = np.linspace(0.0, 1.0, 11)
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            mask = (p_all >= lo) & (p_all < hi)
+            if mask.sum() == 0:
+                continue
+            ece += (mask.sum() / len(p_all)) * abs(p_all[mask].mean() - y_all[mask].mean())
+
     return {
         "n": float(n),
         "mae": float(np.mean(mae_vals[:n])),
         "crps": float(np.mean(crps_vals[:n])),
         "brier": float(np.mean(briers)),
+        "dir_acc": float(np.mean(dir_acc_vals)),
+        "ece": float(ece),
     }
 
 
@@ -146,6 +170,8 @@ def _evaluate_saved_model_legacy(
     maes: list[float] = []
     crps_scores: list[float] = []
     briers: list[float] = []
+    dir_acc_vals: list[float] = []
+    ece_pairs: list[tuple[float, float]] = []
     for _, row in holdout.iterrows():
         result = _predict_row(model, row, num_samples=num_samples)
         if result is None:
@@ -157,11 +183,29 @@ def _evaluate_saved_model_legacy(
         maes.append(abs(y_true - float(np.mean(samples))))
         crps_scores.append(crps_from_samples(np.asarray(samples), y_true))
         briers.append(brier_score(probs, winner))
+        predicted_winner = max(probs, key=lambda k: probs[k])
+        dir_acc_vals.append(1.0 if predicted_winner == winner else 0.0)
+        for bin_label, p in probs.items():
+            ece_pairs.append((float(p), 1.0 if bin_label == winner else 0.0))
     if not maes:
         return None
+
+    ece = 0.0
+    if ece_pairs:
+        p_all = np.array([x[0] for x in ece_pairs])
+        y_all = np.array([x[1] for x in ece_pairs])
+        bin_edges = np.linspace(0.0, 1.0, 11)
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            mask = (p_all >= lo) & (p_all < hi)
+            if mask.sum() == 0:
+                continue
+            ece += (mask.sum() / len(p_all)) * abs(p_all[mask].mean() - y_all[mask].mean())
+
     return {
         "n": float(len(maes)),
         "mae": float(np.mean(maes)),
         "crps": float(np.mean(crps_scores)),
         "brier": float(np.mean(briers)),
+        "dir_acc": float(np.mean(dir_acc_vals)),
+        "ece": float(ece),
     }

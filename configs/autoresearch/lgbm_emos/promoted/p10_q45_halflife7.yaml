@@ -1,0 +1,32 @@
+run_tag: 20260410-lgbm-275k-expansion
+candidate_name: p10_q45_halflife7
+model_name: lgbm_emos
+base_variant: recency_neighbor_oof
+description: 'Phase 10: q45 center + halflife=7d (ultra-recent focus).
+
+  p9_q45_center (halflife=15d) is best CRPS at 0.7786.
+
+  Hypothesis: compressing to 7-day halflife maximizes weight on spring 2026
+
+  data (the YES-failure period), allowing model to learn the cool-season
+
+  correction more aggressively than 15d allows.
+
+  Risk: smaller effective training set may hurt generalization.
+
+  '
+params:
+  n_estimators: 800
+  num_leaves: 127
+  max_depth: 8
+  learning_rate: 0.03
+  min_child_samples: 50
+  use_recency_weights: true
+  recency_half_life_days: 7.0
+  use_oof_scale: false
+  reg_alpha: 0.5
+  reg_lambda: 5.0
+  use_quantile_loss: true
+  use_neighbor_delta: true
+  drop_dead_features: true
+  quantile_center_alpha: 0.45

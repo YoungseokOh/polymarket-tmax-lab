@@ -54,8 +54,23 @@ bash scripts/autoresearch.sh step --spec-path artifacts/autoresearch/<run_tag>/c
   - `subsample_freq`
   - `fixed_std`
 
-## Gate Rules
-- quick step decides `keep / discard / crash` by lexicographic `CRPS -> Brier -> MAE`
+## Champion Selection Rules (updated 2026-04-15)
+
+Champion is selected by **paper-trading win rate + PnL**, NOT CRPS alone.
+
+### New Process
+1. **Quick step** (2 min): check CRPS + DirAcc + ECE. Only proceed if DirAcc improves or CRPS improves by >0.001.
+2. **Shadow scan-edge** (same day): run scan-edge with `--model-path` pointing to candidate (not published alias). Compare signals vs current champion.
+3. **Paper trade** (3–7 days): record candidate signals in separate log. After settlement, compare win rate + PnL vs champion baseline.
+4. **Promote** if candidate shows better win rate or PnL with comparable CRPS.
+5. **Gate** (5h benchmark): only for large CRPS jumps (>0.005) or major architectural changes. Skip for incremental tuning.
+
+### Quick Step Decision Criteria
+- `CRPS -> DirAcc (desc) -> Brier -> ECE (asc) -> MAE`
+- DirAcc = fraction of rows where top-1 predicted bin == actual winning bin (higher = better)
+- ECE = Expected Calibration Error (lower = better; well-calibrated model should have ECE < 0.05)
+
+### Legacy Gate Rules
 - benchmark gate compares candidate vs baseline on grouped holdout under both `market_day` and `target_day`
 - paper analysis uses direct candidate `--model-path`, not public aliases
 - promotion copies the winning YAML into `configs/autoresearch/lgbm_emos/promoted/`

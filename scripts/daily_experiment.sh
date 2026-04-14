@@ -52,11 +52,17 @@ uv run pmtmax scan-edge \
     --min-model-prob 0.05 \
     --max-model-prob 0.95 \
     --min-market-price 0.10 \
+    --min-gamma 0.15 \
+    --max-gamma 0.85 \
     --output "${SCAN_EDGE_OUTPUT}"
 
 # 3b. Record new signals as forward paper trades
 echo "${LOG_PREFIX} recording paper trades..."
 uv run python scripts/record_paper_trades.py
+
+# 3c. Record ALL signals (unfiltered) for direction accuracy analysis
+echo "${LOG_PREFIX} recording all signals (unfiltered)..."
+uv run python scripts/record_all_signals.py
 
 # 4. Append snapshot to history
 if [[ -f "${SCAN_EDGE_OUTPUT}" ]]; then

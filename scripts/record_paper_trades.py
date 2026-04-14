@@ -19,11 +19,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_EDGE_PATH = REPO_ROOT / "artifacts/signals/v2/scan_edge_latest.json"
 TRADES_PATH = REPO_ROOT / "artifacts/signals/v2/forward_paper_trades.json"
 
-# Direction-specific gamma filters derived from paper-trade outcome analysis (2026-04-07):
+# Direction-specific gamma filters derived from paper-trade outcome analysis (2026-04-15):
 #   YES bets: gamma [0.10,0.20) → 13% wr, [0.20,0.30) → 16% wr, [0.30,0.50) → 57% wr
-#   NO bets:  gamma < 0.50 risks losing (1 - entry) on plausible outcomes
+#   NO bets (min): gamma < 0.50 risks losing (1 - entry) on plausible outcomes
+#   NO bets (max): gamma > 0.75 → market highly confident in YES, loses 87.5% of the time
+#     Analysis: NO wins avg gamma=0.576, NO losses avg gamma=0.892 (63 settled trades)
 MIN_GAMMA_YES = 0.30
+MAX_GAMMA_YES = 0.40  # YES bets: gamma [0.30,0.40) → 58.8% wr; gamma [0.40,0.60) → 0% wr (23 trades)
 MIN_GAMMA_NO = 0.50
+MAX_GAMMA_NO = 0.70  # NO bets: gamma ≤0.70 → 45.5% wr; gamma >0.70 → market always right (87.5% loss)
+# Sweep analysis 2026-04-15 (63 settled trades)
 
 
 def _load_signals() -> list[dict]:
@@ -65,8 +70,15 @@ def main() -> None:
         gamma_price = sig.get("gamma_price")
         direction = sig.get("direction", "yes").lower()
         if gamma_price is not None:
-            threshold = MIN_GAMMA_YES if direction == "yes" else MIN_GAMMA_NO
-            if float(gamma_price) < threshold:
+            gp = float(gamma_price)
+            min_threshold = MIN_GAMMA_YES if direction == "yes" else MIN_GAMMA_NO
+            if gp < min_threshold:
+                skipped_low_price += 1
+                continue
+            if direction == "yes" and gp > MAX_GAMMA_YES:
+                skipped_low_price += 1
+                continue
+            if direction == "no" and gp > MAX_GAMMA_NO:
                 skipped_low_price += 1
                 continue
         trade = {

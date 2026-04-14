@@ -269,6 +269,48 @@ def main() -> None:
     print()
     print(f"  Updated trades written to {TRADES_PATH}")
 
+    # Also settle all_signals_log.jsonl (unfiltered signal accuracy tracker)
+    _settle_all_signals_log(gamma_prices, silver_prices)
+
+
+def _settle_all_signals_log(
+    gamma_prices: dict,
+    silver_prices: dict,
+) -> None:
+    """Update outcome field in all_signals_log.jsonl for settled markets."""
+    log_path = REPO_ROOT / "artifacts/signals/v2/all_signals_log.jsonl"
+    if not log_path.exists():
+        return
+
+    lines = log_path.read_text().splitlines()
+    updated = []
+    newly_settled = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            updated.append(line)
+            continue
+
+        # Only update if not already settled
+        if entry.get("outcome") is None:
+            city = str(entry.get("city", ""))
+            date = str(entry.get("date", ""))
+            bin_label = str(entry.get("bin", ""))
+            key = (city, date, bin_label)
+            latest_price: float | None = silver_prices.get(key) or gamma_prices.get(key)
+            outcome = _classify_outcome(latest_price)
+            if outcome is not None:
+                entry["outcome"] = outcome
+                newly_settled += 1
+
+        updated.append(json.dumps(entry))
+
+    log_path.write_text("\n".join(updated) + "\n")
+    print(f"  all_signals_log: {newly_settled} newly settled (total lines: {len(updated)})")
+
 
 if __name__ == "__main__":
     main()

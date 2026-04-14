@@ -1,0 +1,28 @@
+run_tag: 20260410-lgbm-275k-expansion
+candidate_name: p9_q45_center
+model_name: lgbm_emos
+base_variant: recency_neighbor_oof
+description: 'Phase 9 (YES debias): p8_source_filter base + quantile_center_alpha=0.45.
+
+  Shifts center quantile from q50 to q45 -> cooler predictions -> less YES over-confidence.
+
+  Milder than Phase 7''s q40 (which worsened CRPS by 0.0014).
+
+  Hypothesis: q45 reduces YES bias with smaller CRPS cost than q40.
+
+  '
+params:
+  n_estimators: 800
+  num_leaves: 127
+  max_depth: 8
+  learning_rate: 0.03
+  min_child_samples: 50
+  use_recency_weights: true
+  recency_half_life_days: 15.0
+  use_oof_scale: false
+  reg_alpha: 0.5
+  reg_lambda: 5.0
+  use_quantile_loss: true
+  use_neighbor_delta: true
+  drop_dead_features: true
+  quantile_center_alpha: 0.45
