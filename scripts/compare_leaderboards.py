@@ -2,8 +2,8 @@
 
 Usage:
     uv run python scripts/compare_leaderboards.py \
-      --main artifacts/benchmarks/v2/leaderboard.json \
-      --extra artifacts/benchmarks/v2/lgbm_emos_leaderboard.json
+      --main artifacts/workspaces/historical_real/benchmarks/leaderboard.json \
+      --extra artifacts/workspaces/historical_real/benchmarks/lgbm_emos_leaderboard.json
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pmtmax.modeling.champion import score_leaderboard, score_trading_leaderboard
+from pmtmax.modeling.champion import score_execution_candidate_leaderboard, score_leaderboard
 
 
 def load_leaderboard(path: Path) -> list[dict]:
@@ -78,19 +78,19 @@ def main() -> None:
     print(f"\n  --> RESEARCH CHAMPION: {champion}")
 
     if "real_history_pnl_mean" in df.columns:
-        print("\n=== TRADING CHAMPION RANKING ===")
+        print("\n=== EXECUTION CANDIDATE RANKING ===")
         try:
-            tscored = score_trading_leaderboard(df)
+            tscored = score_execution_candidate_leaderboard(df)
             for _, row in tscored.iterrows():
                 print(
-                    f"  {row['model_name']:25s} trading_score={row['trading_champion_score']:.3f}"
+                    f"  {row['model_name']:25s} execution_score={row['execution_candidate_score']:.3f}"
                     f"  PnL=${row['real_history_pnl_mean']:.1f}"
                     f"  hit={row['real_history_hit_rate_mean']:.3f}"
                 )
-            trading_champion = tscored.iloc[0]["model_name"]
-            print(f"\n  --> TRADING CHAMPION: {trading_champion}")
+            execution_candidate = tscored.iloc[0]["model_name"]
+            print(f"\n  --> EXECUTION CANDIDATE: {execution_candidate}")
         except Exception as e:
-            print(f"  (trading champion selection failed: {e})")
+            print(f"  (execution candidate ranking failed: {e})")
 
 
 if __name__ == "__main__":

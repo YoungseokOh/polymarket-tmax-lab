@@ -3,140 +3,123 @@ from __future__ import annotations
 from pmtmax.backtest.recent_core_benchmark import summarize_recent_core_profitability
 
 
-def test_summarize_recent_core_profitability_returns_go_when_policy_pnl_is_positive_with_sample() -> None:
+def _city_row(*, panel_rows: int, ok_rows: int, real_trades: float, real_pnl: float, proxy_trades: float, proxy_pnl: float) -> dict[str, object]:
+    return {
+        "panel_summary": {"rows": panel_rows, "coverage": {"ok": ok_rows, "missing": panel_rows - ok_rows}},
+        "real_history_metrics": {
+            "num_trades": real_trades,
+            "pnl": real_pnl,
+            "priced_decision_rows": float(ok_rows),
+            "skipped_missing_price": 0.0,
+            "skipped_stale_price": 0.0,
+            "skipped_non_positive_edge": 0.0,
+            "hit_rate": 0.55,
+            "avg_edge": 0.2,
+            "avg_price_age_seconds": 900.0,
+        },
+        "quote_proxy_metrics": {
+            "num_trades": proxy_trades,
+            "pnl": proxy_pnl,
+            "priced_decision_rows": float(ok_rows),
+            "skipped_missing_price": 0.0,
+            "skipped_stale_price": 0.0,
+            "skipped_non_positive_edge": 0.0,
+            "hit_rate": 0.52,
+            "avg_edge": 0.18,
+        },
+        "policy_real_history_metrics": {
+            "num_trades": real_trades,
+            "pnl": real_pnl,
+            "hit_rate": 0.55,
+            "avg_edge": 0.2,
+        },
+        "policy_quote_proxy_metrics": {
+            "num_trades": proxy_trades,
+            "pnl": proxy_pnl,
+            "hit_rate": 0.52,
+            "avg_edge": 0.18,
+        },
+    }
+
+
+def test_summarize_recent_core_profitability_returns_go_when_all_city_gates_pass() -> None:
     summary = summarize_recent_core_profitability(
         {
-            "Seoul": {
-                "panel_summary": {"rows": 30, "coverage": {"ok": 20, "missing": 10}},
-                "real_history_metrics": {
-                    "num_trades": 12.0,
-                    "pnl": 40.0,
-                    "priced_decision_rows": 25.0,
-                    "skipped_missing_price": 5.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 1.0,
-                    "hit_rate": 0.5,
-                    "avg_edge": 0.2,
-                    "avg_price_age_seconds": 1000.0,
-                },
-                "quote_proxy_metrics": {
-                    "num_trades": 12.0,
-                    "pnl": 25.0,
-                    "priced_decision_rows": 25.0,
-                    "skipped_missing_price": 5.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 1.0,
-                    "hit_rate": 0.5,
-                    "avg_edge": 0.2,
-                },
-                "policy_real_history_metrics": {"num_trades": 12.0, "pnl": 30.0, "hit_rate": 0.5, "avg_edge": 0.2},
-                "policy_quote_proxy_metrics": {"num_trades": 12.0, "pnl": 20.0, "hit_rate": 0.5, "avg_edge": 0.2},
-            },
-            "NYC": {
-                "panel_summary": {"rows": 35, "coverage": {"ok": 25, "missing": 10}},
-                "real_history_metrics": {
-                    "num_trades": 10.0,
-                    "pnl": 15.0,
-                    "priced_decision_rows": 20.0,
-                    "skipped_missing_price": 4.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 2.0,
-                    "hit_rate": 0.6,
-                    "avg_edge": 0.3,
-                    "avg_price_age_seconds": 2000.0,
-                },
-                "quote_proxy_metrics": {
-                    "num_trades": 10.0,
-                    "pnl": 18.0,
-                    "priced_decision_rows": 20.0,
-                    "skipped_missing_price": 4.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 2.0,
-                    "hit_rate": 0.6,
-                    "avg_edge": 0.3,
-                },
-                "policy_real_history_metrics": {"num_trades": 10.0, "pnl": 12.0, "hit_rate": 0.6, "avg_edge": 0.3},
-                "policy_quote_proxy_metrics": {"num_trades": 10.0, "pnl": 8.0, "hit_rate": 0.6, "avg_edge": 0.3},
-            },
+            "Seoul": _city_row(panel_rows=80, ok_rows=60, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=6.0),
+            "London": _city_row(panel_rows=78, ok_rows=55, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
         }
     )
 
     assert summary["decision"] == "GO"
-    assert summary["decision_reason"] == "positive_policy_pnl_in_real_and_proxy"
+    assert summary["decision_reason"] == "positive_policy_pnl_in_real_and_proxy_with_city_gates"
     assert summary["sample_adequacy"]["passes"] is True
-    assert summary["aggregate_real_history_metrics"]["num_trades"] == 22.0
-    assert summary["aggregate_real_history_metrics"]["priced_decision_rows"] == 45.0
-    assert summary["aggregate_policy_real_history_metrics"]["pnl"] == 42.0
-    assert summary["aggregate_panel_coverage"]["coverage"] == {"missing": 20, "ok": 45}
+    assert summary["aggregate_real_history_metrics"]["priced_decision_rows"] == 177.0
+    assert summary["aggregate_panel_coverage"]["ok_ratio"] > 0.20
+    assert summary["city_gate_details"]["Seoul"]["passes_panel_coverage"] is True
+    assert summary["city_gate_details"]["Seoul"]["passes"] is True
+    assert summary["city_gate_details"]["NYC"]["passes"] is True
+    assert summary["city_gate_details"]["London"]["passes"] is True
 
 
-def test_summarize_recent_core_profitability_is_inconclusive_when_sample_is_too_small() -> None:
+def test_summarize_recent_core_profitability_is_inconclusive_when_city_trade_count_is_too_small() -> None:
     summary = summarize_recent_core_profitability(
         {
-            "London": {
-                "panel_summary": {"rows": 20, "coverage": {"ok": 12, "missing": 8}},
-                "real_history_metrics": {
-                    "num_trades": 6.0,
-                    "pnl": 10.0,
-                    "priced_decision_rows": 18.0,
-                    "skipped_missing_price": 2.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 1.0,
-                    "hit_rate": 0.5,
-                    "avg_edge": 0.2,
-                },
-                "quote_proxy_metrics": {
-                    "num_trades": 6.0,
-                    "pnl": 11.0,
-                    "priced_decision_rows": 18.0,
-                    "skipped_missing_price": 2.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 1.0,
-                    "hit_rate": 0.5,
-                    "avg_edge": 0.2,
-                },
-                "policy_real_history_metrics": {"num_trades": 6.0, "pnl": 7.0, "hit_rate": 0.5, "avg_edge": 0.2},
-                "policy_quote_proxy_metrics": {"num_trades": 6.0, "pnl": 8.0, "hit_rate": 0.5, "avg_edge": 0.2},
-            }
+            "Seoul": _city_row(panel_rows=80, ok_rows=60, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=9.0, proxy_trades=39.0, proxy_pnl=6.0),
+            "London": _city_row(panel_rows=78, ok_rows=55, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
+        }
+    )
+
+    assert summary["decision"] == "INCONCLUSIVE"
+    assert summary["decision_reason"] == "city_quote_proxy_sample_inadequate"
+    assert summary["sample_adequacy"]["passes"] is True
+    assert summary["city_gate_details"]["NYC"]["passes_trade_count"] is False
+
+
+def test_summarize_recent_core_profitability_is_inconclusive_when_one_city_panel_coverage_is_too_thin() -> None:
+    summary = summarize_recent_core_profitability(
+        {
+            "Seoul": _city_row(panel_rows=100, ok_rows=80, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
+            "NYC": _city_row(panel_rows=100, ok_rows=75, real_trades=44.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=6.0),
+            "London": _city_row(panel_rows=100, ok_rows=10, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
+        }
+    )
+
+    assert summary["decision"] == "INCONCLUSIVE"
+    assert summary["decision_reason"] == "city_panel_coverage_inadequate"
+    assert summary["sample_adequacy"]["passes"] is True
+    assert summary["city_gate_details"]["London"]["passes_panel_coverage"] is False
+    assert summary["city_gate_details"]["London"]["passes"] is False
+    assert summary["reduced_core_candidate"]["decision"] == "GO"
+    assert summary["reduced_core_candidate"]["publish_eligible"] is False
+    assert summary["reduced_core_candidate"]["coverage_eligible_cities"] == ["Seoul", "NYC"]
+    assert summary["reduced_core_candidate"]["coverage_excluded_cities"]["London"]["reason"] == "panel_coverage_below_threshold"
+
+
+def test_summarize_recent_core_profitability_returns_no_go_when_one_city_proxy_pnl_is_negative() -> None:
+    summary = summarize_recent_core_profitability(
+        {
+            "Seoul": _city_row(panel_rows=80, ok_rows=60, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=-1.0),
+            "London": _city_row(panel_rows=78, ok_rows=55, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
+        }
+    )
+
+    assert summary["decision"] == "NO_GO"
+    assert summary["decision_reason"] == "city_quote_proxy_negative_pnl"
+    assert summary["city_gate_details"]["NYC"]["passes_non_negative_pnl"] is False
+
+
+def test_summarize_recent_core_profitability_is_inconclusive_when_panel_coverage_is_too_low() -> None:
+    summary = summarize_recent_core_profitability(
+        {
+            "Seoul": _city_row(panel_rows=80, ok_rows=10, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=9, real_trades=44.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=6.0),
+            "London": _city_row(panel_rows=78, ok_rows=8, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
         }
     )
 
     assert summary["decision"] == "INCONCLUSIVE"
     assert summary["decision_reason"] == "insufficient_sample"
-    assert summary["sample_adequacy"]["passes"] is False
-
-
-def test_summarize_recent_core_profitability_is_inconclusive_when_pricing_paths_disagree() -> None:
-    summary = summarize_recent_core_profitability(
-        {
-            "Seoul": {
-                "panel_summary": {"rows": 50, "coverage": {"ok": 40, "missing": 10}},
-                "real_history_metrics": {
-                    "num_trades": 20.0,
-                    "pnl": 5.0,
-                    "priced_decision_rows": 50.0,
-                    "skipped_missing_price": 0.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 0.0,
-                    "hit_rate": 0.55,
-                    "avg_edge": 0.25,
-                },
-                "quote_proxy_metrics": {
-                    "num_trades": 20.0,
-                    "pnl": -3.0,
-                    "priced_decision_rows": 50.0,
-                    "skipped_missing_price": 0.0,
-                    "skipped_stale_price": 0.0,
-                    "skipped_non_positive_edge": 0.0,
-                    "hit_rate": 0.45,
-                    "avg_edge": 0.18,
-                },
-                "policy_real_history_metrics": {"num_trades": 20.0, "pnl": 6.0, "hit_rate": 0.55, "avg_edge": 0.25},
-                "policy_quote_proxy_metrics": {"num_trades": 20.0, "pnl": -2.0, "hit_rate": 0.45, "avg_edge": 0.18},
-            }
-        }
-    )
-
-    assert summary["decision"] == "INCONCLUSIVE"
-    assert summary["decision_reason"] == "pricing_paths_disagree"
-    assert summary["sample_adequacy"]["passes"] is True
+    assert summary["sample_adequacy"]["aggregate_panel_ok_ratio"] < 0.20

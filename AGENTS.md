@@ -50,19 +50,21 @@ uv run pmtmax build-dataset \
     --allow-canonical-overwrite
 uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 uv run python scripts/quick_eval.py
-uv run pmtmax benchmark-models --retrain-stride 30
-uv run pmtmax autoresearch-init
-uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax observation-report --model-name trading_champion
-uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
+scripts/pmtmax-workspace historical_real uv run pmtmax benchmark-models --retrain-stride 30
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-init
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-step --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/run_recent_core_benchmark_local.sh
+uv run pmtmax publish-champion /path/to/workspace/model.pkl --recent-core-summary-path artifacts/workspaces/recent_core_eval/recent_core_benchmark/recent_core_benchmark_summary.json
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-report --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-shadow --model-name champion --max-cycles 1
 uv run pmtmax station-dashboard
-uv run pmtmax station-cycle --model-name trading_champion
-uv run pmtmax scan-edge \
-    --model-name trading_champion \
+scripts/pmtmax-workspace ops_daily uv run pmtmax station-cycle --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax scan-edge \
+    --model-name champion \
     --min-edge 0.15 \
     --min-model-prob 0.05 \
     --max-model-prob 0.95 \
-    --output artifacts/signals/v2/scan_edge_latest.json
+    --output artifacts/workspaces/ops_daily/signals/v2/scan_edge_latest.json
 uv run pytest
 ```
 
@@ -83,6 +85,23 @@ uv run pytest
 - observation overrides are target-day only and should prefer `exact_public intraday -> documented research intraday -> METAR fallback`.
 - `scan-edge` without `--min-model-prob`/`--max-model-prob` generates 0%/100% model-prob signals (overconfident noise).
 - Never run `benchmark-models` without `--retrain-stride 30` — default stride=1 takes 10+ hours.
+- `benchmark-models` no longer publishes aliases. Public promotion must go through `publish-champion` with a recent-core `GO` summary.
+- public alias is single-source-of-truth: `artifacts/public_models/champion.*`.
+- keep workspace roots separate via `scripts/pmtmax-workspace`: `ops_daily`, `historical_real`, `research_synth`, `recent_core_eval`.
+- Synthetic single-run NWP re-collection → always use `synthetic_historical_snapshots.json` (103,110 markets).
+  Never substitute `full_training_set_snapshots.json` (1,834 real markets) or `synthetic_gfs_eligible.json` (42,870 subset).
+  Correct command:
+  ```bash
+  uv run pmtmax backfill-forecasts \
+    --markets-path configs/market_inventory/synthetic_historical_snapshots.json \
+    --model gfs_seamless --model ecmwf_ifs025 --model kma_gdps \
+    --single-run-horizon morning_of --single-run-horizon previous_evening --single-run-horizon market_open \
+    --missing-only
+  ```
+  Model archive start dates (requests before these are silently skipped by `SINGLE_RUN_MODEL_MIN_DATE`):
+  - `gfs_seamless`: 2021-07-01
+  - `ecmwf_ifs025`: 2024-03-01
+  - `kma_gdps`: 2025-01-01
 
 ## Agent Assets
 - `CLAUDE.md` is a compatibility bridge for Claude and points back to this file.

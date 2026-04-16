@@ -59,7 +59,7 @@ def build_revenue_gate_report(
     opportunity_summary: Mapping[str, Any] | None,
     open_phase_summary: Mapping[str, Any] | None,
     observation_summary: Mapping[str, Any] | None = None,
-    trading_alias_name: str = "trading_champion",
+    required_model_alias: str = "champion",
     pilot_constraints: Mapping[str, Any] | None = None,
     market_scope: str = "recent_core",
 ) -> dict[str, object]:
@@ -74,12 +74,9 @@ def build_revenue_gate_report(
         if "decision" in benchmark_summary or "decision_reason" in benchmark_summary:
             benchmark_decision = str(benchmark_summary.get("decision", benchmark_decision))
             benchmark_reason = str(benchmark_summary.get("decision_reason", benchmark_reason))
-        elif bool(benchmark_summary.get("trading_champion_published")):
-            benchmark_decision = "GO"
-            benchmark_reason = "published_trading_champion_alias"
         elif bool(benchmark_summary.get("champion_published")):
-            benchmark_decision = "INCONCLUSIVE"
-            benchmark_reason = "published_research_champion_only"
+            benchmark_decision = "GO"
+            benchmark_reason = "published_champion_alias"
         aggregate_policy_real_history_metrics = dict(
             benchmark_summary.get("aggregate_policy_real_history_metrics", {})
         )
@@ -140,7 +137,7 @@ def build_revenue_gate_report(
         "open_phase_shadow_gate": open_phase_gate,
         "observation_shadow_gate": observation_gate,
         "observation_source_breakdown": observation_source_breakdown,
-        "required_model_alias": trading_alias_name,
+        "required_model_alias": required_model_alias,
         "eligible_for_live_pilot": decision == "GO",
         "pilot_constraints": constraints,
     }

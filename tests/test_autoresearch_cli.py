@@ -205,7 +205,7 @@ def test_autoresearch_step_appends_result(tmp_path: Path, monkeypatch) -> None:
     assert len(results_jsonl) == 1
 
 
-def test_autoresearch_promote_writes_promoted_spec_and_alias(tmp_path: Path, monkeypatch) -> None:
+def test_autoresearch_promote_writes_promoted_spec_without_publishing_alias(tmp_path: Path, monkeypatch) -> None:
     run_tag = "20260404-lgbm"
     dataset_path = tmp_path / "historical_training_set.parquet"
     panel_path = tmp_path / "historical_backtest_panel.parquet"
@@ -232,18 +232,14 @@ def test_autoresearch_promote_writes_promoted_spec_and_alias(tmp_path: Path, mon
     model_path.with_name(f"{model_path.stem}.calibrator.pkl").write_bytes(b"cal")
 
     monkeypatch.setattr("pmtmax.cli.main.promoted_lgbm_emos_spec_path", lambda candidate_name: tmp_path / "promoted" / f"{candidate_name}.yaml")
-    monkeypatch.setattr("pmtmax.cli.main._default_model_path", lambda alias_name: tmp_path / "aliases" / f"{alias_name}.pkl")
-    monkeypatch.setattr("pmtmax.cli.main._default_alias_metadata_path", lambda alias_name: tmp_path / "aliases" / f"{alias_name}.json")
 
     autoresearch_promote(
         spec_path=spec_path,
         root_dir=tmp_path / "runs",
-        publish_champion=True,
-        publish_trading_champion=True,
     )
 
     assert (tmp_path / "promoted" / "candidate_alpha.yaml").exists()
-    champion_meta = json.loads((tmp_path / "aliases" / "champion.json").read_text())
-    trading_meta = json.loads((tmp_path / "aliases" / "trading_champion.json").read_text())
-    assert champion_meta["variant"] == "candidate_alpha"
-    assert trading_meta["variant"] == "candidate_alpha"
+    summary = json.loads(
+        (tmp_path / "runs" / run_tag / "analysis" / "promotion_summary__candidate_alpha.json").read_text()
+    )
+    assert summary["published_aliases"] == {}

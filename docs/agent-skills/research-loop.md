@@ -19,10 +19,10 @@
 - `hope-hunt-report`
 - `hope-hunt-daemon`
 
-## Current Champion (as of 2026-04-04)
-- Model: `lgbm_emos`, variant: `recency_neighbor_oof`
-- pkl: `artifacts/models/v2/lgbm_emos__recency_neighbor_oof.pkl`
-- champion.json: `artifacts/models/v2/champion.json`
+## Current Public Champion
+- shared registry: `artifacts/public_models/champion.pkl`
+- metadata: `artifacts/public_models/champion.json`
+- promotion rule: only `uv run pmtmax publish-champion ...` may update the public alias
 
 ## Daily Data Collection (cron 00:00 UTC = 09:00 KST)
 ```bash
@@ -46,11 +46,11 @@ must use an absolute path:
 ## scan-edge (signal generation)
 ```bash
 uv run pmtmax scan-edge \
-    --model-name trading_champion \
+    --model-name champion \
     --min-edge 0.15 \
     --min-model-prob 0.05 \
     --max-model-prob 0.95 \
-    --output artifacts/signals/v2/scan_edge_latest.json
+    --output artifacts/workspaces/ops_daily/signals/v2/scan_edge_latest.json
 ```
 `--min-model-prob 0.05 --max-model-prob 0.95` is required — filters out overconfident 0%/100% predictions.
 
@@ -117,7 +117,7 @@ uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/
 
 - candidate YAML is the only thing the agent should edit inside the loop
 - promoted winners are copied to `configs/autoresearch/lgbm_emos/promoted/`
-- alias publish remains explicit even after promotion
+- alias publish remains explicit even after promotion; `autoresearch-promote` no longer mutates the public alias
 
 집에서 canonical dataset/model 존재 여부를 신경 쓰지 않고 바로 recent benchmark나
 shadow watcher를 돌리고 싶으면 다음 래퍼를 사용한다.
@@ -131,10 +131,20 @@ scripts/run_opportunity_shadow_watch.sh --max-cycles 1
 `opportunity-shadow` default to `--horizon policy`. The policy lives in
 `configs/recent-core-horizon-policy.yaml` and filtered rows are emitted as
 `reason=policy_filtered`.
+기존 backtest artifact에서 recent-core city/horizon coverage와 policy PnL만
+빠르게 다시 보고 싶으면 다음 helper를 사용한다.
+
+```bash
+uv run python scripts/recent_core_diagnostics.py
+```
+
+`recent_core_benchmark_summary.json`의 top-level `decision`만 public `champion`
+publish gate로 인정된다. `reduced_core_candidate`는 coverage-thin city를 제외한
+축소 코어 진단 결과라서 `decision=GO`여도 publish에는 쓸 수 없다.
 paper-only sweeps can override that with
 `--horizon-policy-path configs/paper-all-supported-horizon-policy.yaml`.
 The paper-only sweep grid lives in `configs/paper-exploration.yaml`.
-수익화 전용 루프에서는 `--core-recent-only`와 `--model-name trading_champion` 조합을 기본으로 쓴다.
+수익화 전용 루프에서는 `--core-recent-only`와 `--model-name champion` 조합을 기본으로 쓰되, `ops_daily` workspace에서만 운영한다.
 recent-core 바깥의 fresh listing 탐색은 `--market-scope supported_wu_open_phase`
 또는 전용 wrapper인 `hope-hunt-report` / `hope-hunt-daemon`을 쓴다.
 
@@ -144,15 +154,15 @@ zero-fill 진단은 다음 셋으로 돌린다.
 uv run pmtmax paper-multimodel-report --markets-path artifacts/discovered_markets.json
 uv run pmtmax execution-sensitivity-report --markets-path artifacts/discovered_markets.json
 uv run pmtmax market-bottleneck-report \
-    --input-path artifacts/signals/v2/paper_signals.json \
-    --opportunity-summary-path artifacts/signals/v2/opportunity_shadow_summary.json \
-    --observation-summary-path artifacts/signals/v2/observation_shadow_summary.json
+    --input-path artifacts/workspaces/ops_daily/signals/v2/paper_signals.json \
+    --opportunity-summary-path artifacts/workspaces/ops_daily/signals/v2/opportunity_shadow_summary.json \
+    --observation-summary-path artifacts/workspaces/ops_daily/signals/v2/observation_shadow_summary.json
 uv run pmtmax execution-watchlist-playbook \
-    --champion-bottleneck-path artifacts/signals/v2/market_bottleneck_report__champion_alias.json \
-    --challenger-bottleneck-path artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
-    --fee-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
-    --policy-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
-    --sensitivity-summary-path artifacts/signals/v2/execution_sensitivity/<run_tag>/summary.json
+    --champion-bottleneck-path artifacts/workspaces/ops_daily/signals/v2/market_bottleneck_report__champion_alias.json \
+    --challenger-bottleneck-path artifacts/workspaces/ops_daily/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
+    --fee-watchlist-summary-path artifacts/workspaces/ops_daily/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
+    --policy-watchlist-summary-path artifacts/workspaces/ops_daily/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
+    --sensitivity-summary-path artifacts/workspaces/ops_daily/signals/v2/execution_sensitivity/<run_tag>/summary.json
 ```
 
 - `paper-multimodel-report`는 챔피언과 현재 top challenger pool을 같은 snapshot/books에서 비교한다
@@ -163,19 +173,19 @@ uv run pmtmax execution-watchlist-playbook \
 관측 기반 weather-station 루프는 다음 command를 쓴다.
 
 ```bash
-uv run pmtmax observation-report --model-name trading_champion
-uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
-uv run pmtmax observation-daemon --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-report --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-shadow --model-name champion --max-cycles 1
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-daemon --model-name champion
 uv run pmtmax approve-live-candidate <token> --dry-run
 uv run pmtmax station-dashboard
 uv run pmtmax station-dashboard-daemon
-uv run pmtmax station-cycle --model-name trading_champion
-uv run pmtmax station-daemon --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax station-cycle --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax station-daemon --model-name champion
 ```
 
 - `observation-report` / `observation-shadow`는 target-day market에서 strongest lower-bound를 골라 이미 불가능해진 하단 outcome을 0으로 만들고 queue를 `tradable`, `manual_review`, `blocked`로 분리한다
 - source priority는 `exact_public intraday -> documented research intraday -> METAR fallback`이다. 현재 내장 exact/research intraday는 Hong Kong/HKO, Taipei/CWA, Seoul/AIR_CALP다
-- output은 `artifacts/signals/v2/observation_shadow_latest.json`, `observation_alerts_latest.json`, `live_pilot_queue.json`에 기록된다
+- output은 `artifacts/workspaces/ops_daily/signals/v2/observation_shadow_latest.json`, `observation_alerts_latest.json`, `live_pilot_queue.json`에 기록된다
 - `opportunity_shadow_summary.json`과 `observation_shadow_summary.json`에는 `by_reason`, `by_city_reason`, `by_horizon_reason`, `top_near_miss_markets`, `top_fee_killed_markets`, `top_spread_blocked_markets`, `top_policy_filtered_markets`가 함께 들어간다
 - `observation_shadow_summary.json`에는 추가로 `by_source_family`, `by_observation_source`, `top_after_cost_edges`, `top_price_vs_observation_gaps`가 들어가므로 어떤 소스 계층이 실제 edge를 만드는지 바로 비교할 수 있다
 - `approve-live-candidate`는 queue token을 다시 검증하고 preview/post 전에 candidate가 여전히 살아 있는지 fail-closed로 확인한다
@@ -183,7 +193,7 @@ uv run pmtmax station-daemon --model-name trading_champion
 - dashboard의 watchlist alert는 Tier A rule과 현재 `best_ask`를 비교해서만 올리며, live spread/edge guardrail을 자동으로 바꾸지 않는다
 - `station-cycle`은 opportunity-report, opportunity-shadow, observation-report, open-phase-shadow, revenue-gate-report, station-dashboard를 순서대로 갱신하는 one-shot orchestrator다
 - `station-daemon`은 같은 전체 cycle을 interval 기반으로 반복한다
-- `revenue-gate-report`와 `station-cycle`의 기본 benchmark 입력은 `artifacts/benchmarks/v2/benchmark_summary.json`이다. recent-core 전용 richer summary가 있으면 `--benchmark-summary-path`로 덮어쓴다
+- `revenue-gate-report`와 `station-cycle`의 기본 benchmark 입력은 `artifacts/workspaces/historical_real/benchmarks/v2/benchmark_summary.json`이다. recent-core 전용 richer summary가 있으면 `--benchmark-summary-path`로 덮어쓴다
 
 ## Real Historical Workflow
 ```bash
@@ -209,24 +219,18 @@ uv run python scripts/build_active_weather_watchlist.py
 ```
 
 ## Artifacts
-- gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`
-- sequence dataset: `data/parquet/gold/v2/historical_training_set_sequence.parquet`
-- model artifacts: `artifacts/models/v2/`
-- trading alias: `artifacts/models/v2/trading_champion.pkl`, `artifacts/models/v2/trading_champion.json`
-- benchmark outputs: `artifacts/benchmarks/v2/leaderboard.json`, `artifacts/benchmarks/v2/leaderboard.csv`
-- ablation outputs: `artifacts/benchmarks/v2/*_ablation_leaderboard.json`, `artifacts/benchmarks/v2/*_ablation_leaderboard.csv`
-- champion alias: `artifacts/models/v2/champion.pkl`, `artifacts/models/v2/champion.json`
-- backtest outputs: `artifacts/backtests/v2/`
-- paper outputs: `artifacts/signals/v2/paper_signals.json`
-- opportunity outputs: `artifacts/signals/v2/opportunity_report.json`
-- shadow validation outputs: `artifacts/signals/v2/opportunity_shadow.jsonl`, `artifacts/signals/v2/opportunity_shadow_latest.json`, `artifacts/signals/v2/opportunity_shadow_summary.json`
-- observation-station outputs: `artifacts/signals/v2/observation_shadow.jsonl`, `artifacts/signals/v2/observation_shadow_latest.json`, `artifacts/signals/v2/observation_shadow_summary.json`, `artifacts/signals/v2/observation_alerts_latest.json`, `artifacts/signals/v2/live_pilot_queue.json`
-- station dashboard outputs: `artifacts/signals/v2/station_dashboard.json`, `artifacts/signals/v2/station_dashboard.html`, `artifacts/signals/v2/station_dashboard_state.json`
-- execution watchlist playbook: `artifacts/signals/v2/execution_watchlist_playbook.json`, `artifacts/signals/v2/execution_watchlist_playbook.md`
-- station orchestrator state: `artifacts/signals/v2/station_cycle_state.json`
-- open-phase validation outputs: `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`, `artifacts/signals/v2/open_phase_shadow_summary.json`
-- hope-hunt outputs: `artifacts/signals/v2/hope_hunt_history.jsonl`, `artifacts/signals/v2/hope_hunt_latest.json`, `artifacts/signals/v2/hope_hunt_summary.json`
-- revenue gate output: `artifacts/signals/v2/revenue_gate_summary.json`
+- historical-real dataset: `data/workspaces/historical_real/parquet/gold/historical_training_set.parquet`
+- research-synth dataset: `data/workspaces/research_synth/parquet/gold/historical_training_set.parquet`
+- workspace-local model artifacts: `artifacts/workspaces/<workspace>/models/v2/`
+- public champion alias: `artifacts/public_models/champion.pkl`, `artifacts/public_models/champion.json`
+- benchmark outputs: `artifacts/workspaces/<workspace>/benchmarks/v2/`
+- ablation outputs: `artifacts/workspaces/<workspace>/benchmarks/v2/*_ablation_leaderboard.*`
+- backtest outputs: `artifacts/workspaces/<workspace>/backtests/v2/`
+- paper/opportunity/observation/open-phase/hope-hunt outputs: `artifacts/workspaces/ops_daily/signals/v2/`
+- station dashboard outputs: `artifacts/workspaces/ops_daily/signals/v2/station_dashboard.{json,html}`
+- execution watchlist playbook: `artifacts/workspaces/ops_daily/signals/v2/execution_watchlist_playbook.{json,md}`
+- station orchestrator state: `artifacts/workspaces/ops_daily/signals/v2/station_cycle_state.json`
+- revenue gate output: `artifacts/workspaces/ops_daily/signals/v2/revenue_gate_summary.json`
 - closed-event manifests: `data/manifests/historical_event_candidates.json`, `data/manifests/historical_event_page_fetches.json`, `data/manifests/historical_collection_status.json`
 - active watchlist: `artifacts/active_weather_watchlist.json`
 
@@ -236,7 +240,8 @@ uv run python scripts/build_active_weather_watchlist.py
 - 모델보다 settlement fidelity와 lookahead 방지가 우선이다
 - grouped split이 기본이며 row split은 지원 workflow가 아니다
 - `benchmark-ablations`는 grouped one-shot holdout 전용 내부 연구 command이며 champion alias는 publish하지 않는다
-- `benchmark-models`는 research `champion`과 execution-oriented `trading_champion`을 함께 publish한다
+- `benchmark-models`는 workspace-local leaderboard만 갱신한다
+- public alias promotion은 `publish-champion` + recent-core `GO` summary 조합만 허용된다
 - active market 탐색에서는 `missing_book`과 `no_positive_edge`를 구분해서 해석해야 한다
 - live/paper/opportunity 경로는 calibrated probability가 없으면 `missing_calibrator`로 fail closed 한다
 - `opportunity-shadow`는 주문/알림 없이 `raw_gap`, `after_cost_edge`, reject reason을 시간축으로 쌓아 현재 탐색 로직이 실제로 기회를 잡는지 검증하는 경로다

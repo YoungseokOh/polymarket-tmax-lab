@@ -16,29 +16,42 @@ export PATH="/home/seok436/.local/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-MODEL="trading_champion"
-SCAN_EDGE_OUTPUT="artifacts/signals/v2/scan_edge_latest.json"
-SCAN_EDGE_HISTORY="artifacts/signals/v2/scan_edge_history.jsonl"
-PAPER_SIGNALS_DIR="artifacts/signals/v2/paper_snapshots"
-PAPER_SIGNALS_LATEST="artifacts/signals/v2/paper_signals_latest.json"
+if [[ "${PMTMAX_WORKSPACE_NAME:-}" != "ops_daily" ]]; then
+    exec "${REPO_ROOT}/scripts/pmtmax-workspace" ops_daily "${REPO_ROOT}/scripts/daily_experiment.sh" "$@"
+fi
+
+ARTIFACTS_ROOT="${PMTMAX_ARTIFACTS_DIR:-${REPO_ROOT}/artifacts}"
+MODEL="champion"
+DISCOVERED_MARKETS_PATH="${ARTIFACTS_ROOT}/discovered_markets.json"
+SCAN_EDGE_OUTPUT="${ARTIFACTS_ROOT}/signals/v2/scan_edge_latest.json"
+SCAN_EDGE_HISTORY="${ARTIFACTS_ROOT}/signals/v2/scan_edge_history.jsonl"
+PAPER_SIGNALS_DIR="${ARTIFACTS_ROOT}/signals/v2/paper_snapshots"
+PAPER_SIGNALS_LATEST="${ARTIFACTS_ROOT}/signals/v2/paper_signals_latest.json"
 
 # Ensure log directory exists (cron will abort if missing)
-mkdir -p logs artifacts/signals/v2 "${PAPER_SIGNALS_DIR}"
+mkdir -p logs "${ARTIFACTS_ROOT}/signals/v2" "${PAPER_SIGNALS_DIR}"
 LOG_PREFIX="[daily_experiment $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
+
+LOCK_FILE="${REPO_ROOT}/logs/daily_experiment.lock"
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    echo "${LOG_PREFIX} skipped: another daily experiment run is still active"
+    exit 0
+fi
 
 echo "${LOG_PREFIX} starting"
 
 # 1. Refresh market snapshots + Gamma prices
 echo "${LOG_PREFIX} scan-markets..."
-uv run pmtmax scan-markets
+uv run pmtmax scan-markets --output "${DISCOVERED_MARKETS_PATH}"
 
 # 1b. Backfill truth for all active cities (uses updated station_catalog → Wunderground)
 echo "${LOG_PREFIX} backfill-truth (all cities)..."
-uv run pmtmax backfill-truth --markets-path artifacts/discovered_markets.json
+uv run pmtmax backfill-truth --markets-path "${DISCOVERED_MARKETS_PATH}"
 
 # 1c. Backfill forecasts for all active cities
 echo "${LOG_PREFIX} backfill-forecasts (all cities)..."
-uv run pmtmax backfill-forecasts --markets-path artifacts/discovered_markets.json
+uv run pmtmax backfill-forecasts --markets-path "${DISCOVERED_MARKETS_PATH}"
 
 # 2. Log Gamma prices to timeseries
 echo "${LOG_PREFIX} logging gamma prices..."
@@ -54,6 +67,7 @@ uv run pmtmax scan-edge \
     --min-market-price 0.10 \
     --min-gamma 0.15 \
     --max-gamma 0.85 \
+    --max-no-gamma 0.70 \
     --output "${SCAN_EDGE_OUTPUT}"
 
 # 3b. Record new signals as forward paper trades

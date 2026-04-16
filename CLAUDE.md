@@ -14,6 +14,6 @@ Primary repository guidance lives in `AGENTS.md`. If `CLAUDE.md` and `AGENTS.md`
 - canonical overwrite → auto-backup first under `artifacts/recovery/`
 - lag recovery truth probes → prefer `--truth-no-cache --truth-per-source-limit 1`
 - autoresearch → edit one YAML candidate at a time under `artifacts/autoresearch/<run_tag>/candidates/`
-- autoresearch → do not publish `champion` / `trading_champion` implicitly
+- autoresearch → do not publish `champion` implicitly
 - `scan-edge` → always `--min-model-prob 0.05 --max-model-prob 0.95`
 - `benchmark-models` → always `--retrain-stride 30`

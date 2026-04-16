@@ -37,21 +37,21 @@ Live trading is implemented but disabled by default.
 - verify legal and regional eligibility before any live use
 - validate fee, nonce, and auth handling against current official docs before enabling
 - use `uv run pmtmax live-trader --dry-run` first to collect a preflight report and signed-order previews
-- use `uv run pmtmax observation-report --model-name trading_champion` or `observation-shadow --max-cycles 1` when you want the observation station to populate `live_pilot_queue.json`
+- use `uv run pmtmax observation-report --model-name champion` or `observation-shadow --max-cycles 1` when you want the observation station to populate `live_pilot_queue.json`
 - use `uv run pmtmax approve-live-candidate <token> --dry-run` before any posting attempt; manual approval remains the default gate even under the live pilot preset
 - observation source priority is `exact_public intraday -> documented research intraday -> METAR fallback`; do not silently blend sources
 - inspect `observation_shadow_summary.json` for `by_source_family` and `by_observation_source` before expanding the live pilot; source-layer drift should be visible before bankroll changes
 - use `uv run pmtmax station-dashboard` when you want one consolidated Discovery / Observation / Execution panel before a manual approval session
-- use `uv run pmtmax station-cycle --model-name trading_champion` when you want the whole station stack to refresh in one command before reviewing the queue
-- use `uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
-- use `uv run pmtmax benchmark-models` before relying on the default `champion` or `trading_champion` alias in paper/live/opportunity paths
+- use `uv run pmtmax station-cycle --model-name champion` when you want the whole station stack to refresh in one command before reviewing the queue
+- use `uv run pmtmax opportunity-report --core-recent-only --model-name champion` before any live or paper session to distinguish `missing_book` from genuine `no_positive_edge`
+- use `scripts/run_recent_core_benchmark_local.sh` and then `uv run pmtmax publish-champion <model_path> --recent-core-summary-path ...` before changing the single public `champion` alias
 - use `uv run pmtmax revenue-gate-report` before promoting the small-cap live pilot; benchmark `GO` without opportunity/open-phase/observation confirmation remains insufficient
 - `live-trader`, `scan-daemon`, and `opportunity-report` now default to the
   checked-in recent horizon policy (`configs/recent-core-horizon-policy.yaml`);
   disallowed city/date combinations are surfaced as `policy_filtered`
 - `configs/revenue-pilot-core.yaml` is the conservative live-pilot preset: keep bankroll at roughly `$500`, city exposure at `100`, global exposure at `200`, and stay on the recent-core city set with manual approval
 - `configs/live-pilot-all-supported.yaml` is the broader manual-approval preset for all supported cities; it keeps per-city/global exposure lower (`50 / 150`) and automatically sizes `research_public` candidates below `exact_public`
-- signal outputs are written under `artifacts/signals/v2/`
+- signal outputs are written under the active workspace artifact root, typically `artifacts/workspaces/ops_daily/signals/v2/`
 
 ## See Also
 - `docs/codebase/backtest-execution.md` for the execution folder split

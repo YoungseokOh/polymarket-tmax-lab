@@ -30,10 +30,10 @@ Use this skill for the research and trading simulation loop.
 - zero-fill playbook promotion: `execution-watchlist-playbook`.
 - observation source priority: `exact_public intraday -> documented research intraday -> METAR fallback`, target-day only.
 - station dashboard loop: `station-dashboard`, `station-dashboard-daemon`.
-- station dashboard consumes `artifacts/signals/v2/execution_watchlist_playbook.json` when present and raises Tier A ask-threshold alerts without changing live guardrails.
+- station dashboard consumes `artifacts/workspaces/ops_daily/signals/v2/execution_watchlist_playbook.json` when present and raises Tier A ask-threshold alerts without changing live guardrails.
 - station orchestrator loop: `station-cycle`, `station-daemon`.
-- revenue gate / station cycle default benchmark input: `artifacts/benchmarks/v2/benchmark_summary.json`
-- Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
+- revenue gate / station cycle default benchmark input: `artifacts/workspaces/ops_daily/benchmarks/v2/benchmark_summary.json`
+- Public champion alias lives at `artifacts/public_models/champion.json`.
 - Previous fast variants (ultra_high_neighbor_fast 등) had σ=0.5 collapse — scale clip floor raised to 2.0.
 - Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
 
@@ -48,15 +48,16 @@ Use this skill for the research and trading simulation loop.
   `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of`
 
 ## Focus
-- gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`
-- model artifacts: `artifacts/models/v2/`
-- champion alias: `artifacts/models/v2/champion.json`
-- daily signals: `artifacts/signals/v2/scan_edge_latest.json`
-- observation queue: `artifacts/signals/v2/live_pilot_queue.json`
-- paper trades: `artifacts/signals/v2/forward_paper_trades.json`
+- historical-real dataset: `data/workspaces/historical_real/parquet/gold/historical_training_set.parquet`
+- research-synth dataset: `data/workspaces/research_synth/parquet/gold/historical_training_set.parquet`
+- workspace-local model artifacts: `artifacts/workspaces/<workspace>/models/v2/`
+- public champion alias: `artifacts/public_models/champion.json`
+- daily signals: `artifacts/workspaces/ops_daily/signals/v2/scan_edge_latest.json`
+- observation queue: `artifacts/workspaces/ops_daily/signals/v2/live_pilot_queue.json`
+- paper trades: `artifacts/workspaces/ops_daily/signals/v2/forward_paper_trades.json`
 - cron log: `logs/daily_experiment.log`
 - 2-hour cron wrapper: `scripts/run_price_check.sh`
 - 2-hour price check log: `logs/price_check.log`
 - paper exploration preset: `configs/paper-exploration.yaml`
 - paper all-supported horizon policy: `configs/paper-all-supported-horizon-policy.yaml`
-- execution watchlist playbook: `artifacts/signals/v2/execution_watchlist_playbook.json`
+- execution watchlist playbook: `artifacts/workspaces/ops_daily/signals/v2/execution_watchlist_playbook.json`

@@ -89,14 +89,14 @@ def test_load_alias_metadata_repairs_missing_alias_artifacts(tmp_path: Path, mon
     models_dir.mkdir(parents=True, exist_ok=True)
     (models_dir / "det2prob_nn.pkl").write_bytes(b"model")
     (models_dir / "det2prob_nn.calibrator.pkl").write_bytes(b"calibrator")
-    metadata_path = models_dir / "trading_champion.json"
+    metadata_path = models_dir / "champion.json"
     metadata_path.write_text(
         json.dumps(
             {
-                "alias_name": "trading_champion",
+                "alias_name": "champion",
                 "model_name": "det2prob_nn",
-                "alias_path": "/tmp/broken/trading_champion.pkl",
-                "alias_calibration_path": "/tmp/broken/trading_champion.calibrator.pkl",
+                "alias_path": "/tmp/broken/champion.pkl",
+                "alias_calibration_path": "/tmp/broken/champion.calibrator.pkl",
                 "source_model_path": "/tmp/broken/det2prob_nn.pkl",
                 "source_calibration_path": "/tmp/broken/det2prob_nn.calibrator.pkl",
                 "contract_version": "v2",
@@ -112,14 +112,19 @@ def test_load_alias_metadata_repairs_missing_alias_artifacts(tmp_path: Path, mon
         lambda alias_name: models_dir / f"{alias_name}.json",
     )
 
-    payload = _load_alias_metadata("trading_champion")
+    payload = _load_alias_metadata("champion")
 
-    assert payload["alias_path"] == str(models_dir / "trading_champion.pkl")
-    assert payload["alias_calibration_path"] == str(models_dir / "trading_champion.calibrator.pkl")
+    assert payload["alias_path"] == str(models_dir / "champion.pkl")
+    assert payload["alias_calibration_path"] == str(models_dir / "champion.calibrator.pkl")
     assert payload["source_model_path"] == str(models_dir / "det2prob_nn.pkl")
     assert payload["source_calibration_path"] == str(models_dir / "det2prob_nn.calibrator.pkl")
     assert Path(payload["alias_path"]).exists()
     assert Path(payload["alias_calibration_path"]).exists()
+
+
+def test_load_alias_metadata_rejects_unknown_alias() -> None:
+    with pytest.raises(Exception, match="does not exist"):
+        _load_alias_metadata("invalid_alias")
 
 
 def test_collection_preflight_defaults_to_public_archive_for_wu_markets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1610,7 +1615,7 @@ def test_revenue_gate_report_writes_combined_summary(tmp_path: Path) -> None:
 
     payload = json.loads(output.read_text())
     assert payload["decision"] == "GO"
-    assert payload["required_model_alias"] == "trading_champion"
+    assert payload["required_model_alias"] == "champion"
     assert payload["opportunity_shadow_gate"]["decision"] == "GO"
 
 
@@ -1705,7 +1710,7 @@ def test_station_dashboard_command_writes_json_and_html(tmp_path: Path) -> None:
                 "decision": "GO",
                 "decision_reason": "x",
                 "eligible_for_live_pilot": True,
-                "required_model_alias": "trading_champion",
+                "required_model_alias": "champion",
             }
         )
     )

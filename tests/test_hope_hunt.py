@@ -267,7 +267,7 @@ def test_hope_hunt_report_and_daemon_write_outputs(
     monkeypatch.setattr("pmtmax.cli.main.load_settings", lambda: (RepoConfig(), EnvSettings()))
     monkeypatch.setattr(
         "pmtmax.cli.main._resolve_model_path",
-        lambda model_path, model_name: (Path("artifacts/models/v2/trading_champion.pkl"), "gaussian_emos"),
+        lambda model_path, model_name: (Path("artifacts/public_models/champion.pkl"), "gaussian_emos"),
     )
 
     captured: dict[str, Path] = {}

@@ -1,21 +1,22 @@
 """Merge existing historical training set with the synthetic historical training set.
 
 Creates:
-  data/parquet/gold/v2/expanded_training_set.parquet
-  data/parquet/gold/v2/expanded_backtest_panel.parquet
+  $PMTMAX_PARQUET_DIR/gold/expanded_training_set.parquet
+  $PMTMAX_PARQUET_DIR/gold/expanded_backtest_panel.parquet
 
 Does NOT overwrite canonical files.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PARQUET_DIR = REPO_ROOT / "data/parquet/gold/v2"
+PARQUET_DIR = Path(os.environ.get("PMTMAX_PARQUET_DIR", str(REPO_ROOT / "data/parquet"))) / "gold"
 
 
 def merge_frames(existing_path: Path, synthetic_path: Path, output_path: Path) -> int:

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
+import typer
 
-from pmtmax.cli.main import benchmark_ablations, benchmark_models
-from pmtmax.storage.schemas import ModelArtifact
+from pmtmax.cli.main import benchmark_ablations, benchmark_models, publish_champion
 
 
-def test_benchmark_models_writes_leaderboard_and_publishes_champion(
+def test_benchmark_models_writes_leaderboard_without_publishing_alias(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -46,7 +46,7 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
         "_Config",
         (),
         {
-            "app": type("_App", (), {"random_seed": 7})(),
+            "app": type("_App", (), {"random_seed": 7, "workspace_name": "historical_real", "dataset_profile": "real_market"})(),
             "models": type("_Models", (), {"benchmark_ladder": ["gaussian_emos", "det2prob_nn"]})(),
             "execution": type("_Exec", (), {"default_fee_bps": 30.0})(),
         },
@@ -117,42 +117,8 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
             [],
         )
 
-    def _fake_train_model(model_name, frame, artifacts_dir, *, split_policy, seed):
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        model_path = artifacts_dir / f"{model_name}.pkl"
-        calibrator_path = artifacts_dir / f"{model_name}.calibrator.pkl"
-        model_path.write_bytes(b"model")
-        calibrator_path.write_bytes(b"calibrator")
-        return ModelArtifact(
-            model_name=model_name,
-            version="0.1.0",
-            trained_at=datetime.now(tz=UTC),
-            features=["model_daily_max"],
-            metrics={"fit_rows": float(len(frame))},
-            path=str(model_path),
-            contract_version="v2",
-            seed=seed,
-            dataset_signature="sig",
-            split_policy=split_policy,
-            calibration_path=str(calibrator_path),
-            status="stable",
-        )
-
     monkeypatch.setattr("pmtmax.cli.main._run_real_history_backtest", _fake_real_history_backtest)
     monkeypatch.setattr("pmtmax.cli.main._run_quote_proxy_backtest", _fake_quote_proxy_backtest)
-    monkeypatch.setattr("pmtmax.cli.main.train_model", _fake_train_model)
-    monkeypatch.setattr(
-        "pmtmax.cli.main._default_model_path",
-        lambda model_name: tmp_path / "models" / f"{model_name}.pkl",
-    )
-    monkeypatch.setattr(
-        "pmtmax.cli.main._default_champion_metadata_path",
-        lambda: tmp_path / "models" / "champion.json",
-    )
-    monkeypatch.setattr(
-        "pmtmax.cli.main._default_alias_metadata_path",
-        lambda alias_name: tmp_path / "models" / f"{alias_name}.json",
-    )
 
     leaderboard_output = tmp_path / "benchmarks" / "leaderboard.json"
     leaderboard_csv_output = tmp_path / "benchmarks" / "leaderboard.csv"
@@ -171,22 +137,113 @@ def test_benchmark_models_writes_leaderboard_and_publishes_champion(
 
     leaderboard = json.loads(leaderboard_output.read_text())
     summary = json.loads(summary_output.read_text())
-    champion_metadata = json.loads((tmp_path / "models" / "champion.json").read_text())
-    trading_metadata = json.loads((tmp_path / "models" / "trading_champion.json").read_text())
 
     assert leaderboard[0]["model_name"] == "det2prob_nn"
-    assert "trading_champion_score" in leaderboard[0]
+    assert "execution_candidate_score" in leaderboard[0]
     assert summary["champion_model_name"] == "det2prob_nn"
-    assert summary["trading_champion_model_name"] == "det2prob_nn"
-    assert champion_metadata["model_name"] == "det2prob_nn"
-    assert champion_metadata["alias_name"] == "champion"
-    assert trading_metadata["model_name"] == "det2prob_nn"
-    assert trading_metadata["alias_name"] == "trading_champion"
-    assert Path(champion_metadata["alias_path"]).exists()
-    assert Path(champion_metadata["alias_calibration_path"]).exists()
-    assert Path(trading_metadata["alias_path"]).exists()
-    assert Path(trading_metadata["alias_calibration_path"]).exists()
+    assert summary["execution_candidate_model_name"] == "det2prob_nn"
+    assert summary["champion_published"] is False
     assert leaderboard_csv_output.exists()
+
+
+def test_publish_champion_copies_public_alias_after_recent_core_go(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    model_path = tmp_path / "workspace_models" / "lgbm_emos__candidate_alpha.pkl"
+    calibrator_path = model_path.with_name("lgbm_emos__candidate_alpha.calibrator.pkl")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"model")
+    calibrator_path.write_bytes(b"cal")
+
+    recent_core_summary_path = tmp_path / "recent_core_benchmark_summary.json"
+    recent_core_summary_path.write_text(
+        json.dumps(
+            {
+                "decision": "GO",
+                "decision_reason": "positive_policy_pnl_in_real_and_proxy_with_city_gates",
+                "sample_adequacy": {"passes": True},
+                "city_gate_details": {
+                    "Seoul": {"passes": True},
+                    "NYC": {"passes": True},
+                    "London": {"passes": True},
+                },
+                "aggregate_policy_real_history_metrics": {"pnl": 12.0},
+                "aggregate_policy_quote_proxy_metrics": {"pnl": 9.0},
+                "aggregate_panel_coverage": {"ok_ratio": 0.31},
+            }
+        )
+    )
+
+    config = type(
+        "_Config",
+        (),
+        {"app": type("_App", (), {"workspace_name": "recent_core_eval", "dataset_profile": "real_market"})()},
+    )()
+    monkeypatch.setattr("pmtmax.cli.main.load_settings", lambda: (config, None))
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_model_path",
+        lambda model_name: tmp_path / "public_models" / f"{model_name}.pkl",
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_alias_metadata_path",
+        lambda alias_name: tmp_path / "public_models" / f"{alias_name}.json",
+    )
+
+    publish_champion(
+        model_path=model_path,
+        model_name="lgbm_emos",
+        recent_core_summary_path=recent_core_summary_path,
+    )
+
+    metadata = json.loads((tmp_path / "public_models" / "champion.json").read_text())
+    assert metadata["alias_name"] == "champion"
+    assert metadata["model_name"] == "lgbm_emos"
+    assert metadata["workspace_name"] == "recent_core_eval"
+    assert metadata["dataset_profile"] == "real_market"
+    assert metadata["publish_gate"]["decision"] == "GO"
+    assert metadata["variant"] == "candidate_alpha"
+    assert Path(metadata["alias_path"]).exists()
+    assert Path(metadata["alias_calibration_path"]).exists()
+
+
+def test_publish_champion_rejects_diagnostic_reduced_core_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    model_path = tmp_path / "workspace_models" / "lgbm_emos__candidate_alpha.pkl"
+    calibrator_path = model_path.with_name("lgbm_emos__candidate_alpha.calibrator.pkl")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"model")
+    calibrator_path.write_bytes(b"cal")
+
+    recent_core_summary_path = tmp_path / "recent_core_benchmark_summary.json"
+    recent_core_summary_path.write_text(
+        json.dumps(
+            {
+                "decision": "INCONCLUSIVE",
+                "decision_reason": "city_panel_coverage_inadequate",
+                "sample_adequacy": {"passes": True},
+                "city_gate_details": {
+                    "Seoul": {"passes": True},
+                    "NYC": {"passes": True},
+                    "London": {"passes": False},
+                },
+                "reduced_core_candidate": {
+                    "decision": "GO",
+                    "publish_eligible": False,
+                    "coverage_eligible_cities": ["Seoul", "NYC"],
+                },
+            }
+        )
+    )
+
+    with pytest.raises(typer.BadParameter, match="diagnostic only and cannot be published"):
+        publish_champion(
+            model_path=model_path,
+            model_name="lgbm_emos",
+            recent_core_summary_path=recent_core_summary_path,
+        )
 
 
 def test_benchmark_ablations_writes_variant_leaderboard(

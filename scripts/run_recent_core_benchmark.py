@@ -20,7 +20,7 @@ from pmtmax.utils import dump_json, load_json, load_yaml_with_extends
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")
 DEFAULT_CONFIG = Path("configs/recent-core-benchmark.yaml")
 DEFAULT_HORIZON_POLICY = Path("configs/recent-core-horizon-policy.yaml")
-DEFAULT_OUTPUT_ROOT = Path("artifacts/recent_core_benchmark")
+DEFAULT_OUTPUT_ROOT = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts")) / "recent_core_benchmark"
 DEFAULT_CITIES = ["Seoul", "NYC", "London"]
 
 
@@ -35,6 +35,8 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
 def _city_env(city_root: Path, config_path: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PMTMAX_CONFIG"] = str(config_path.resolve())
+    env["PMTMAX_WORKSPACE_NAME"] = env.get("PMTMAX_WORKSPACE_NAME", "recent_core_eval")
+    env["PMTMAX_DATASET_PROFILE"] = env.get("PMTMAX_DATASET_PROFILE", "real_market")
     env["PMTMAX_DATA_DIR"] = str((city_root / "data").resolve())
     env["PMTMAX_CACHE_DIR"] = str((city_root / "cache").resolve())
     env["PMTMAX_RAW_DIR"] = str((city_root / "raw").resolve())
@@ -43,6 +45,10 @@ def _city_env(city_root: Path, config_path: Path) -> dict[str, str]:
     env["PMTMAX_MANIFEST_DIR"] = str((city_root / "manifests").resolve())
     env["PMTMAX_DUCKDB_PATH"] = str((city_root / "duckdb" / "warehouse.duckdb").resolve())
     env["PMTMAX_PARQUET_DIR"] = str((city_root / "parquet").resolve())
+    env["PMTMAX_ARTIFACTS_DIR"] = str((city_root / "artifacts").resolve())
+    env["PMTMAX_PUBLIC_MODEL_DIR"] = str(
+        Path(env.get("PMTMAX_PUBLIC_MODEL_DIR", "artifacts/public_models")).resolve()
+    )
     return env
 
 
@@ -345,6 +351,16 @@ def main() -> None:
                 aggregate_policy_quote_proxy_metrics=(
                     proxy_trade_metrics if policy_allowed else {"num_trades": 0.0, "pnl": 0.0}
                 ),
+                aggregate_panel_coverage={
+                    "rows": float(horizon_panel_summary["rows"]),
+                    "coverage": dict(horizon_panel_summary["coverage"]),
+                    "ok_ratio": (
+                        float(horizon_panel_summary["coverage"].get("ok", 0)) / float(horizon_panel_summary["rows"])
+                        if float(horizon_panel_summary["rows"]) > 0
+                        else 0.0
+                    ),
+                },
+                min_priced_decision_rows=40.0,
             )
             horizons[horizon] = {
                 "policy_allowed": policy_allowed,

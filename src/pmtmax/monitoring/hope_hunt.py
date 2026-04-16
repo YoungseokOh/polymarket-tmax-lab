@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import time
 from collections import Counter
@@ -21,6 +22,11 @@ from pmtmax.storage.schemas import HopeHuntObservation
 from pmtmax.utils import dump_json
 
 LOGGER = get_logger(__name__)
+
+
+def _signal_path(filename: str) -> Path:
+    artifacts_root = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts"))
+    return artifacts_root / "signals" / "v2" / filename
 
 
 def summarize_hope_hunt_history(history_path: Path) -> dict[str, Any]:
@@ -131,10 +137,10 @@ class HopeHuntRunner:
     config: RepoConfig
     interval_seconds: int = 300
     max_cycles: int = 0
-    state_path: Path = Path("artifacts/signals/v2/hope_hunt_state.json")
-    latest_output_path: Path = Path("artifacts/signals/v2/hope_hunt_latest.json")
-    history_output_path: Path = Path("artifacts/signals/v2/hope_hunt_history.jsonl")
-    summary_output_path: Path = Path("artifacts/signals/v2/hope_hunt_summary.json")
+    state_path: Path = field(default_factory=lambda: _signal_path("hope_hunt_state.json"))
+    latest_output_path: Path = field(default_factory=lambda: _signal_path("hope_hunt_latest.json"))
+    history_output_path: Path = field(default_factory=lambda: _signal_path("hope_hunt_history.jsonl"))
+    summary_output_path: Path = field(default_factory=lambda: _signal_path("hope_hunt_summary.json"))
 
     snapshot_fetcher: Callable[[], list[Any]] | None = None
     evaluator: Callable[[list[Any], datetime], list[HopeHuntObservation]] | None = None

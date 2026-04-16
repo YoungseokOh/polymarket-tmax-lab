@@ -7,14 +7,16 @@ CLOB-based silver_price_timeseries.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 
 def main() -> None:
-    markets_path = Path("artifacts/discovered_markets.json")
-    log_path = Path("artifacts/signals/v2/gamma_price_log.jsonl")
+    artifacts_root = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts"))
+    markets_path = artifacts_root / "discovered_markets.json"
+    log_path = artifacts_root / "signals" / "v2" / "gamma_price_log.jsonl"
 
     if not markets_path.exists():
         print(f"[error] {markets_path} not found — run scan-markets first", file=sys.stderr)

@@ -16,4 +16,8 @@ export PMTMAX_READY_MODEL_NAME="${MODEL_NAME}"
 
 "${SCRIPT_DIR}/ensure_local_research_ready.sh"
 
+if [[ "${PMTMAX_WORKSPACE_NAME:-}" != "recent_core_eval" ]]; then
+  exec "${SCRIPT_DIR}/pmtmax-workspace" recent_core_eval uv run python scripts/run_recent_core_benchmark.py "$@"
+fi
+
 exec uv run python scripts/run_recent_core_benchmark.py "$@"

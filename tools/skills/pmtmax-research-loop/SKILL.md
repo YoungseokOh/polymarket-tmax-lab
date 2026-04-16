@@ -27,16 +27,16 @@ Use this skill for the research and trading simulation loop.
 - observation source priority: `exact_public intraday -> documented research intraday -> METAR fallback`, target-day only.
 - station dashboard loop: `station-dashboard`, `station-dashboard-daemon`.
 - station orchestrator loop: `station-cycle`, `station-daemon`.
-- Champion is `recency_neighbor_oof` (CRPS 0.7463 honest, MAE 0.591, σ calibrated 2–5°).
+- Public champion promotion is explicit and separate from workspace-local benchmark ranking.
 - Use `pmtmax-autoresearch` when you are exploring new `lgbm_emos` candidates around `recency_neighbor_oof`.
 
 ## Focus
-- gold dataset: `data/parquet/gold/v2/historical_training_set.parquet`
-- model artifacts: `artifacts/models/v2/`
-- champion alias: `artifacts/models/v2/champion.json`
-- daily signals: `artifacts/signals/v2/scan_edge_latest.json`
-- observation queue: `artifacts/signals/v2/live_pilot_queue.json`
-- paper trades: `artifacts/signals/v2/forward_paper_trades.json`
+- gold dataset: `data/workspaces/historical_real/parquet/gold/historical_training_set.parquet`
+- model artifacts: `artifacts/workspaces/<workspace>/models/v2/`
+- champion alias: `artifacts/public_models/champion.json`
+- daily signals: `artifacts/workspaces/ops_daily/signals/v2/scan_edge_latest.json`
+- observation queue: `artifacts/workspaces/ops_daily/signals/v2/live_pilot_queue.json`
+- paper trades: `artifacts/workspaces/ops_daily/signals/v2/forward_paper_trades.json`
 - cron log: `logs/daily_experiment.log`
 - 2-hour cron wrapper: `scripts/run_price_check.sh`
 - 2-hour price check log: `logs/price_check.log`

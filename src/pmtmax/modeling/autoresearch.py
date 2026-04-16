@@ -10,13 +10,14 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pmtmax.config.settings import EnvSettings
 from pmtmax.modeling.advanced.lgbm_emos import (
     LgbmEMOSVariantConfig,
     resolve_lgbm_emos_variant,
 )
 from pmtmax.utils import load_yaml_with_extends, stable_hash
 
-DEFAULT_AUTORESEARCH_ROOT = Path("artifacts/autoresearch")
+DEFAULT_AUTORESEARCH_ROOT = EnvSettings().artifacts_dir / "autoresearch"
 PROMOTED_LGBM_EMOS_DIR = Path("configs/autoresearch/lgbm_emos/promoted")
 
 
@@ -46,6 +47,8 @@ class LgbmAutoresearchParams(BaseModel):
     use_city_month: bool | None = None
     use_clim_anomaly: bool | None = None
     use_forecast_bias: bool | None = None
+    use_bin_position: bool | None = None
+    use_bin_boundary_dist: bool | None = None
     quantile_center_alpha: float | None = None
 
     def override_payload(self) -> dict[str, Any]:
@@ -103,7 +106,6 @@ class AutoresearchManifest(BaseModel):
     panel_signature: str
     created_at: datetime
     current_champion_variant: str | None = None
-    current_trading_variant: str | None = None
 
 
 class AutoresearchStepResult(BaseModel):
@@ -242,9 +244,9 @@ def render_autoresearch_program(manifest: AutoresearchManifest) -> str:
         "2. Keep the baseline fixed unless the human explicitly changes the manifest.\n"
         "3. Use `uv run pmtmax autoresearch-step --spec-path ...` for quick keep/discard decisions.\n"
         "4. Use `uv run pmtmax autoresearch-gate --spec-path ...` before any promotion.\n"
-        "5. Use `uv run pmtmax autoresearch-analyze-paper --spec-path ...` before any alias publish.\n"
+        "5. Use `uv run pmtmax autoresearch-analyze-paper --spec-path ...` before any champion publish review.\n"
         "6. Promotion means copying the winning YAML into `configs/autoresearch/lgbm_emos/promoted/`.\n"
-        "7. Champion/trading alias publish is always explicit and never automatic.\n\n"
+        "7. Public champion publish is always explicit and never automatic.\n\n"
         "## Candidate design hints\n"
         "- Prefer one or two meaningful hyperparameter changes per candidate.\n"
         "- Optimize CRPS first, then Brier, then MAE.\n"

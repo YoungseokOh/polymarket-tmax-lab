@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import time
 from collections import Counter
@@ -20,6 +21,11 @@ from pmtmax.storage.schemas import ObservationOpportunity
 from pmtmax.utils import dump_json
 
 LOGGER = get_logger(__name__)
+
+
+def _signal_path(filename: str) -> Path:
+    artifacts_root = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts"))
+    return artifacts_root / "signals" / "v2" / filename
 
 
 def summarize_observation_history(history_path: Path) -> dict[str, Any]:
@@ -210,12 +216,12 @@ class ObservationShadowRunner:
     config: RepoConfig
     interval_seconds: int = 300
     max_cycles: int = 0
-    state_path: Path = Path("artifacts/signals/v2/observation_shadow_state.json")
-    latest_output_path: Path = Path("artifacts/signals/v2/observation_shadow_latest.json")
-    history_output_path: Path = Path("artifacts/signals/v2/observation_shadow.jsonl")
-    summary_output_path: Path = Path("artifacts/signals/v2/observation_shadow_summary.json")
-    alerts_output_path: Path = Path("artifacts/signals/v2/observation_alerts_latest.json")
-    queue_output_path: Path = Path("artifacts/signals/v2/live_pilot_queue.json")
+    state_path: Path = field(default_factory=lambda: _signal_path("observation_shadow_state.json"))
+    latest_output_path: Path = field(default_factory=lambda: _signal_path("observation_shadow_latest.json"))
+    history_output_path: Path = field(default_factory=lambda: _signal_path("observation_shadow.jsonl"))
+    summary_output_path: Path = field(default_factory=lambda: _signal_path("observation_shadow_summary.json"))
+    alerts_output_path: Path = field(default_factory=lambda: _signal_path("observation_alerts_latest.json"))
+    queue_output_path: Path = field(default_factory=lambda: _signal_path("live_pilot_queue.json"))
 
     snapshot_fetcher: Callable[[], list[Any]] | None = None
     evaluator: Callable[[list[Any], datetime], list[ObservationOpportunity]] | None = None

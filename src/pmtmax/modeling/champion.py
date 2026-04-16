@@ -17,7 +17,7 @@ _RESEARCH_HIGHER_IS_BETTER_WEIGHTS = {
     "real_history_pnl_mean": 0.05,
     "quote_proxy_pnl_mean": 0.05,
 }
-_TRADING_LOWER_IS_BETTER_WEIGHTS = {
+_EXECUTION_CANDIDATE_LOWER_IS_BETTER_WEIGHTS = {
     "calibration_gap_mean": 0.2,
     "avg_crps_mean": 0.1,
     "avg_brier_mean": 0.1,
@@ -25,7 +25,7 @@ _TRADING_LOWER_IS_BETTER_WEIGHTS = {
     "rmse_mean": 0.05,
     "nll_mean": 0.05,
 }
-_TRADING_HIGHER_IS_BETTER_WEIGHTS = {
+_EXECUTION_CANDIDATE_HIGHER_IS_BETTER_WEIGHTS = {
     "quote_proxy_pnl_mean": 0.2,
     "real_history_pnl_mean": 0.15,
     "quote_proxy_avg_edge_mean": 0.04,
@@ -72,19 +72,19 @@ def score_leaderboard(results: pd.DataFrame) -> pd.DataFrame:
     return scored.sort_values(["champion_score", "model_name"], ignore_index=True)
 
 
-def score_trading_leaderboard(results: pd.DataFrame) -> pd.DataFrame:
-    """Attach benchmark-based trading champion scores to a leaderboard."""
+def score_execution_candidate_leaderboard(results: pd.DataFrame) -> pd.DataFrame:
+    """Attach benchmark-based execution-candidate scores to a leaderboard."""
 
     scored = results.copy()
     if "sample_adequacy_passed" in scored.columns and scored["sample_adequacy_passed"].astype(bool).any():
         scored = scored.loc[scored["sample_adequacy_passed"].astype(bool)].copy()
     scored = _score_ranked_leaderboard(
         scored,
-        lower_is_better_weights=_TRADING_LOWER_IS_BETTER_WEIGHTS,
-        higher_is_better_weights=_TRADING_HIGHER_IS_BETTER_WEIGHTS,
-        score_column="trading_champion_score",
+        lower_is_better_weights=_EXECUTION_CANDIDATE_LOWER_IS_BETTER_WEIGHTS,
+        higher_is_better_weights=_EXECUTION_CANDIDATE_HIGHER_IS_BETTER_WEIGHTS,
+        score_column="execution_candidate_score",
     )
-    return scored.sort_values(["trading_champion_score", "model_name"], ignore_index=True)
+    return scored.sort_values(["execution_candidate_score", "model_name"], ignore_index=True)
 
 
 def select_champion(results: pd.DataFrame) -> str:
@@ -96,10 +96,10 @@ def select_champion(results: pd.DataFrame) -> str:
     return str(scored.iloc[0]["model_name"])
 
 
-def select_trading_champion(results: pd.DataFrame) -> str:
-    """Select the trading-focused champion model from an aggregated leaderboard."""
+def select_execution_candidate(results: pd.DataFrame) -> str:
+    """Select the execution-focused model from an aggregated leaderboard."""
 
     if results.empty:
-        raise ValueError("Cannot select a trading champion from an empty leaderboard.")
-    scored = score_trading_leaderboard(results)
+        raise ValueError("Cannot select an execution candidate from an empty leaderboard.")
+    scored = score_execution_candidate_leaderboard(results)
     return str(scored.iloc[0]["model_name"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import time
 from collections import Counter
@@ -27,6 +28,11 @@ _TIMESTAMP_KEYS = (
     "created_at",
     "deployingTimestamp",
 )
+
+
+def _signal_path(filename: str) -> Path:
+    artifacts_root = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts"))
+    return artifacts_root / "signals" / "v2" / filename
 
 
 def open_phase_age_bucket(age_hours: float | None) -> str:
@@ -225,10 +231,10 @@ class OpenPhaseShadowRunner:
     config: RepoConfig
     interval_seconds: int = 60
     max_cycles: int = 0
-    state_path: Path = Path("artifacts/open_phase_shadow_state.json")
-    latest_output_path: Path = Path("artifacts/open_phase_shadow_latest.json")
-    history_output_path: Path = Path("artifacts/open_phase_shadow.jsonl")
-    summary_output_path: Path = Path("artifacts/open_phase_shadow_summary.json")
+    state_path: Path = field(default_factory=lambda: _signal_path("open_phase_shadow_state.json"))
+    latest_output_path: Path = field(default_factory=lambda: _signal_path("open_phase_shadow_latest.json"))
+    history_output_path: Path = field(default_factory=lambda: _signal_path("open_phase_shadow.jsonl"))
+    summary_output_path: Path = field(default_factory=lambda: _signal_path("open_phase_shadow_summary.json"))
 
     snapshot_fetcher: Callable[[], list[Any]] | None = None
     evaluator: Callable[[list[Any], datetime], list[OpenPhaseObservation]] | None = None

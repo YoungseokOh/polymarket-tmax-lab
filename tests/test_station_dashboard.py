@@ -64,7 +64,7 @@ def test_build_station_dashboard_groups_panels_and_breakdowns() -> None:
             "decision": "GO",
             "decision_reason": "benchmark_go_with_live_path_confirmation",
             "eligible_for_live_pilot": True,
-            "required_model_alias": "trading_champion",
+            "required_model_alias": "champion",
             "observation_source_breakdown": {
                 "official_intraday": {
                     "markets_evaluated": 1,
@@ -177,7 +177,7 @@ def test_render_station_dashboard_html_contains_panel_tables() -> None:
             "overview": {"revenue_gate_decision": "GO", "queue_size": 2, "observation_tradable_count": 1, "opportunity_tradable_count": 1, "manual_review_count": 1, "open_phase_count": 1, "revenue_gate_reason": "x"},
             "discovery_panel": {"gate_decision": "INCONCLUSIVE", "gate_reason": "x", "open_phase_count": 1, "top_markets": []},
             "observation_panel": {"gate_decision": "GO", "gate_reason": "x", "queue_counts": {"tradable": 1}, "source_family_breakdown": [], "observation_source_breakdown": [], "top_candidates": [], "top_after_cost_edges": [], "top_price_vs_observation_gaps": []},
-            "execution_panel": {"required_model_alias": "trading_champion", "eligible_for_live_pilot": False, "queue_preview": [], "top_opportunities": [], "observation_source_breakdown": []},
+            "execution_panel": {"required_model_alias": "champion", "eligible_for_live_pilot": False, "queue_preview": [], "top_opportunities": [], "observation_source_breakdown": []},
             "watchlist_panel": {"tier_a_cities": ["Taipei"], "tier_b_cities": [], "triggered_alert_count": 1, "triggered_alerts": [], "top_rules": []},
         }
     )

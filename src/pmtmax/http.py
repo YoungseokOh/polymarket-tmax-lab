@@ -51,7 +51,7 @@ class CachedHttpClient:
     @retry(
         retry=retry_if_exception(_is_retriable_http_error),
         stop=stop_after_attempt(6),
-        wait=wait_exponential(multiplier=2, min=2, max=60),
+        wait=wait_exponential(multiplier=2, min=4, max=120),
         reraise=True,
     )
     def get_json(self, url: str, params: dict[str, Any] | None = None, use_cache: bool = True, cache_ttl_seconds: float | None = None) -> Any:

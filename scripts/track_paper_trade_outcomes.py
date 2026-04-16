@@ -1,8 +1,8 @@
 """Track outcomes for forward paper trades recorded in forward_paper_trades.json.
 
 For each trade, checks whether the market has settled by consulting:
-  1. data/parquet/silver/silver_price_timeseries.parquet (historical settlement prices)
-  2. artifacts/signals/v2/gamma_price_log.jsonl (daily Gamma price snapshots)
+  1. `PMTMAX_PARQUET_DIR`/silver/silver_price_timeseries.parquet
+  2. `PMTMAX_ARTIFACTS_DIR`/signals/v2/gamma_price_log.jsonl
 
 A market outcome is considered settled when the latest observed price for that
 (city, target_date, outcome_label) tuple is:
@@ -21,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,9 +29,11 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-TRADES_PATH = REPO_ROOT / "artifacts/signals/v2/forward_paper_trades.json"
-GAMMA_LOG_PATH = REPO_ROOT / "artifacts/signals/v2/gamma_price_log.jsonl"
-SILVER_PARQUET_PATH = REPO_ROOT / "data/parquet/silver/silver_price_timeseries.parquet"
+ARTIFACTS_ROOT = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", str(REPO_ROOT / "artifacts")))
+PARQUET_ROOT = Path(os.environ.get("PMTMAX_PARQUET_DIR", str(REPO_ROOT / "data/parquet")))
+TRADES_PATH = ARTIFACTS_ROOT / "signals" / "v2" / "forward_paper_trades.json"
+GAMMA_LOG_PATH = ARTIFACTS_ROOT / "signals" / "v2" / "gamma_price_log.jsonl"
+SILVER_PARQUET_PATH = PARQUET_ROOT / "silver" / "silver_price_timeseries.parquet"
 
 WINNER_THRESHOLD = 0.95
 LOSER_THRESHOLD = 0.02
@@ -278,7 +281,7 @@ def _settle_all_signals_log(
     silver_prices: dict,
 ) -> None:
     """Update outcome field in all_signals_log.jsonl for settled markets."""
-    log_path = REPO_ROOT / "artifacts/signals/v2/all_signals_log.jsonl"
+    log_path = ARTIFACTS_ROOT / "signals" / "v2" / "all_signals_log.jsonl"
     if not log_path.exists():
         return
 

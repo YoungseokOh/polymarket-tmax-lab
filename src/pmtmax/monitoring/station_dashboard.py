@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import signal
 import time
 from collections.abc import Callable, Mapping
@@ -17,6 +18,11 @@ from pmtmax.logging_utils import get_logger
 from pmtmax.utils import dump_json
 
 LOGGER = get_logger(__name__)
+
+
+def _signal_path(filename: str) -> Path:
+    artifacts_root = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", "artifacts"))
+    return artifacts_root / "signals" / "v2" / filename
 
 
 def build_station_dashboard(
@@ -90,7 +96,7 @@ def build_station_dashboard(
             ],
         },
         "execution_panel": {
-            "required_model_alias": str((revenue_gate_summary or {}).get("required_model_alias", "trading_champion")),
+            "required_model_alias": str((revenue_gate_summary or {}).get("required_model_alias", "champion")),
             "eligible_for_live_pilot": bool((revenue_gate_summary or {}).get("eligible_for_live_pilot", False)),
             "queue_preview": [_compact_observation_row(row) for row in queue_rows[:5]],
             "top_opportunities": [_compact_market_row(row) for row in opportunity_rows[:8]],
@@ -328,9 +334,9 @@ class StationDashboardRunner:
     config: RepoConfig
     interval_seconds: int = 60
     max_cycles: int = 0
-    state_path: Path = Path("artifacts/signals/v2/station_dashboard_state.json")
-    json_output_path: Path = Path("artifacts/signals/v2/station_dashboard.json")
-    html_output_path: Path = Path("artifacts/signals/v2/station_dashboard.html")
+    state_path: Path = field(default_factory=lambda: _signal_path("station_dashboard_state.json"))
+    json_output_path: Path = field(default_factory=lambda: _signal_path("station_dashboard.json"))
+    html_output_path: Path = field(default_factory=lambda: _signal_path("station_dashboard.html"))
     data_loader: Callable[[], dict[str, Any]] | None = None
 
     _running: bool = field(default=True, init=False, repr=False)

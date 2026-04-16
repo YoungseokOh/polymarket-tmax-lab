@@ -184,6 +184,8 @@ class ContextualFeatureBuilder:
     use_city_month: bool = False  # True → add city×month interaction dummies (city×12 months)
     use_clim_anomaly: bool = False  # True → add clim_delta / clim_zscore (NWP forecast vs city×month normal)
     use_forecast_bias: bool = False  # True → add forecast_bias / bias_corrected_nwp (city×month systematic error)
+    use_bin_position: bool = False  # True → add bin_rank / n_bins / tail / boundary distance features
+    use_bin_boundary_dist: bool = False  # True → add only bin_boundary_dist (min dist to nearest bin edge)
     # Fitted climate normals: {(city, month) → (mean, std)} — populated by fit(), used in transform()
     clim_normals: dict = field(default_factory=dict)
     # Fitted forecast bias: {(city, month) → mean_bias} — populated by fit(), used in transform()
@@ -382,6 +384,126 @@ class ContextualFeatureBuilder:
                     forecast_bias[i] = self.forecast_bias_normals[key]
             data["forecast_bias"] = forecast_bias
             data["bias_corrected_nwp"] = nwp_for_bias + forecast_bias
+
+        # Bin position features: encode where the NWP forecast sits within the outcome schema.
+        # bin_rank       = 0-indexed bin the forecast falls in (0 = lowest bin)
+        # bin_rank_norm  = bin_rank / (n_bins - 1), normalised to [0, 1]
+        # n_bins         = total number of outcome bins for this market
+        # is_lower_tail_bin = 1 if forecast is in the open-lower boundary bin
+        # is_upper_tail_bin = 1 if forecast is in the open-upper boundary bin
+        # bin_boundary_dist = min distance to either bin boundary (in degrees); 0 = right on the edge
+        if self.use_bin_position and "market_spec_json" in frame.columns:
+            nwp_vals = np.asarray(data.get("ecmwf_ifs025_model_daily_max", np.zeros(len(frame))), dtype=float)
+            bin_rank_arr = np.zeros(len(frame), dtype=float)
+            bin_rank_norm_arr = np.zeros(len(frame), dtype=float)
+            n_bins_arr = np.zeros(len(frame), dtype=float)
+            is_lower_tail_arr = np.zeros(len(frame), dtype=float)
+            is_upper_tail_arr = np.zeros(len(frame), dtype=float)
+            bin_boundary_dist_arr = np.zeros(len(frame), dtype=float)
+            _schema_cache: dict[str, list] = {}
+            spec_jsons = frame["market_spec_json"].tolist()
+            for i, (spec_raw, x) in enumerate(zip(spec_jsons, nwp_vals)):
+                if spec_raw not in _schema_cache:
+                    try:
+                        spec_dict = json.loads(spec_raw) if isinstance(spec_raw, str) else spec_raw
+                        _schema_cache[spec_raw] = spec_dict.get("outcome_schema", [])
+                    except Exception:
+                        _schema_cache[spec_raw] = []
+                schema = _schema_cache[spec_raw]
+                n = len(schema)
+                if n == 0:
+                    continue
+                n_bins_arr[i] = float(n)
+                matched = -1
+                for j, bin_spec in enumerate(schema):
+                    lo = bin_spec.get("lower")
+                    up = bin_spec.get("upper")
+                    lo_f = -np.inf if lo is None else float(lo)
+                    up_f = np.inf if up is None else float(up)
+                    # For point bins (lower == upper) use a ±0.5 window
+                    if lo is not None and up is not None and lo_f == up_f:
+                        lo_f -= 0.5
+                        up_f += 0.5
+                    if lo_f <= x <= up_f:
+                        matched = j
+                        break
+                if matched < 0:
+                    # Assign to closest bin by midpoint
+                    best, best_dist = 0, np.inf
+                    for j, bin_spec in enumerate(schema):
+                        lo = bin_spec.get("lower")
+                        up = bin_spec.get("upper")
+                        lo_f = 0.0 if lo is None else float(lo)
+                        up_f = lo_f if up is None else float(up)
+                        mid = (lo_f + up_f) / 2.0
+                        d = abs(x - mid)
+                        if d < best_dist:
+                            best, best_dist = j, d
+                    matched = best
+                bin_rank_arr[i] = float(matched)
+                bin_rank_norm_arr[i] = float(matched) / max(n - 1, 1)
+                is_lower_tail_arr[i] = 1.0 if matched == 0 else 0.0
+                is_upper_tail_arr[i] = 1.0 if matched == n - 1 else 0.0
+                # Distance to nearest boundary
+                bin_spec = schema[matched]
+                lo = bin_spec.get("lower")
+                up = bin_spec.get("upper")
+                d_lo = abs(x - float(lo)) if lo is not None else 999.0
+                d_up = abs(float(up) - x) if up is not None else 999.0
+                bin_boundary_dist_arr[i] = min(d_lo, d_up)
+            data["bin_rank"] = bin_rank_arr
+            data["bin_rank_norm"] = bin_rank_norm_arr
+            data["n_bins"] = n_bins_arr
+            data["is_lower_tail_bin"] = is_lower_tail_arr
+            data["is_upper_tail_bin"] = is_upper_tail_arr
+            data["bin_boundary_dist"] = bin_boundary_dist_arr
+
+        # Standalone boundary-distance feature: min(dist_to_lower_bound, dist_to_upper_bound).
+        # Skipped if use_bin_position already computed it above.
+        if self.use_bin_boundary_dist and not self.use_bin_position and "market_spec_json" in frame.columns:
+            nwp_vals = np.asarray(data.get("ecmwf_ifs025_model_daily_max", np.zeros(len(frame))), dtype=float)
+            bin_boundary_dist_arr = np.zeros(len(frame), dtype=float)
+            _schema_cache2: dict[str, list] = {}
+            for i, (spec_raw, x) in enumerate(zip(frame["market_spec_json"].tolist(), nwp_vals)):
+                if spec_raw not in _schema_cache2:
+                    try:
+                        spec_dict = json.loads(spec_raw) if isinstance(spec_raw, str) else spec_raw
+                        _schema_cache2[spec_raw] = spec_dict.get("outcome_schema", [])
+                    except Exception:
+                        _schema_cache2[spec_raw] = []
+                schema = _schema_cache2[spec_raw]
+                if not schema:
+                    continue
+                # Find best matching bin (same logic as use_bin_position)
+                matched = 0
+                best_dist = float("inf")
+                for j, b in enumerate(schema):
+                    lo = b.get("lower")
+                    up = b.get("upper")
+                    if lo is None and up is None:
+                        continue
+                    if lo is not None and up is not None and float(lo) == float(up):
+                        lo_f = float(lo) - 0.5
+                        up_f = float(up) + 0.5
+                    else:
+                        lo_f = float(lo) if lo is not None else -999.0
+                        up_f = float(up) if up is not None else 999.0
+                    if lo_f <= x < up_f:
+                        matched = j
+                        best_dist = 0.0
+                        break
+                    mid = (lo_f + up_f) / 2.0
+                    d = abs(x - mid)
+                    if d < best_dist:
+                        matched = j
+                        best_dist = d
+                bin_spec = schema[matched]
+                lo = bin_spec.get("lower")
+                up = bin_spec.get("upper")
+                d_lo = abs(x - float(lo)) if lo is not None else 999.0
+                d_up = abs(float(up) - x) if up is not None else 999.0
+                bin_boundary_dist_arr[i] = min(d_lo, d_up)
+            data["bin_boundary_dist"] = bin_boundary_dist_arr
 
         # Weather interaction features derived from the primary NWP model.
         # These encode known meteorological relationships as explicit features so

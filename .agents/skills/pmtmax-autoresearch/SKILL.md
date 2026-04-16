@@ -19,10 +19,10 @@ Use this skill for the agent-driven autoresearch loop around `lgbm_emos`.
 - create or edit one candidate YAML at a time under `artifacts/autoresearch/<run_tag>/candidates/`.
 - use `autoresearch-step` for quick keep/discard/crash, then `autoresearch-gate`, then `autoresearch-analyze-paper`.
 - canonical `historical_training_set*` / `historical_backtest_panel` stay immutable unless explicitly promoted elsewhere.
-- `champion` / `trading_champion` publish is never implicit; `autoresearch-promote` only publishes aliases when explicitly requested.
+- public `champion` publish is never implicit; `autoresearch-promote` only promotes YAML specs and `publish-champion` is the separate public-alias command.
 
 ## Focus
-- run scaffold: `artifacts/autoresearch/<run_tag>/`
+- run scaffold: `artifacts/workspaces/research_synth/autoresearch/<run_tag>/`
 - promoted spec registry: `configs/autoresearch/lgbm_emos/promoted/`
-- candidate artifacts: `artifacts/autoresearch/<run_tag>/models/`
-- shared program: `artifacts/autoresearch/<run_tag>/program.md`
+- candidate artifacts: `artifacts/workspaces/research_synth/autoresearch/<run_tag>/models/`
+- shared program: `artifacts/workspaces/research_synth/autoresearch/<run_tag>/program.md`

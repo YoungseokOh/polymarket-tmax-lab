@@ -1,13 +1,14 @@
 """Quick fixed-split evaluation of saved models — no retraining.
 
-Loads each saved pkl from artifacts/models/v2/, runs predict() on the held-out
-last 20% of the dataset, and prints a comparison table.
+Loads each saved pkl from the current workspace's `models/v2/`, runs predict()
+on the held-out last 20% of the dataset, and prints a comparison table.
 
 Usage:
     uv run python scripts/quick_eval.py
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -15,8 +16,11 @@ import pandas as pd
 from pmtmax.modeling.quick_eval import evaluate_saved_model, quick_eval_holdout
 from pmtmax.modeling.train import sanitize_model_frame
 
-MODELS_DIR = Path("artifacts/models/v2")
-DATASET = Path("data/parquet/gold/v2/historical_training_set.parquet")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ARTIFACTS_ROOT = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", str(REPO_ROOT / "artifacts")))
+PARQUET_ROOT = Path(os.environ.get("PMTMAX_PARQUET_DIR", str(REPO_ROOT / "data/parquet")))
+MODELS_DIR = ARTIFACTS_ROOT / "models" / "v2"
+DATASET = PARQUET_ROOT / "gold" / "historical_training_set.parquet"
 
 
 def main() -> None:

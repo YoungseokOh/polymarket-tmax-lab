@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -28,6 +29,15 @@ from pmtmax.weather.truth_sources import make_truth_source
 from pmtmax.weather.truth_sources.base import TruthSourceLagError
 
 LOGGER = get_logger(__name__)
+
+# Earliest target date for which each model has archived single-run data on
+# the open-meteo single-runs API.  Requests for dates before these cutoffs are
+# guaranteed to fail — skip them without making any API call.
+SINGLE_RUN_MODEL_MIN_DATE: dict[str, dt.date] = {
+    "gfs_seamless": dt.date(2021, 7, 1),
+    "ecmwf_ifs025": dt.date(2024, 3, 1),
+    "kma_gdps": dt.date(2025, 1, 1),
+}
 
 DEFAULT_HOURLY = [
     "temperature_2m",
@@ -428,19 +438,11 @@ class BackfillPipeline:
                         sr_key: ForecastRequestKey = (mid, model, "single_run", "single_run", dh, date_str)
                         states.setdefault(sr_key, synthetic_ok)
 
-                # For markets with historical_forecast in silver but no single_run data,
-                # add placeholder skip-states for all config horizons so that
-                # _backfill_single_run_requests does not attempt API calls.
-                # Horizons are read from config at runtime; we use a fixed list of the
-                # three standard decision horizons since that is what build-dataset passes.
-                _std_horizons = ("market_open", "previous_evening", "morning_of")
-                for mid, model in hf_pairs:
-                    date_str = market_date.get(mid)
-                    if date_str is None:
-                        continue
-                    for horizon in _std_horizons:
-                        sr_key = (mid, model, "single_run", "single_run", horizon, date_str)
-                        states.setdefault(sr_key, synthetic_skip)
+                # NOTE: We intentionally do NOT pre-mark single_run horizons as skipped
+                # for markets that only have historical_forecast in silver. Those markets
+                # need single_run API calls to collect genuine NWP diversity data.
+                # single_run skip-states are only set above (lines 426-429) when the
+                # single_run data itself is already present in silver.
 
         return frame, states
 
@@ -470,10 +472,14 @@ class BackfillPipeline:
         silver_rows: list[dict[str, object]] = []
         model_rows: list[dict[str, object]] = []
         source_rows: list[dict[str, object]] = []
-        checkpoint_snapshots = 250
+        checkpoint_snapshots = 10
+        parquet_export_every = 100  # export parquet every N markets (safety snapshot)
         processed_since_checkpoint = 0
+        processed_since_parquet_export = 0
         bronze_count = self.warehouse.table_row_count("bronze_forecast_requests")
         silver_count = self.warehouse.table_row_count("silver_forecast_runs_hourly")
+        total_snapshots = len(snapshots)
+        processed_total = 0
 
         def flush_buffers(*, force: bool = False) -> None:
             nonlocal bronze_count, silver_count
@@ -513,6 +519,9 @@ class BackfillPipeline:
             silver_rows.clear()
             model_rows.clear()
             source_rows.clear()
+
+        single_run_ok_total = 0
+        single_run_err_total = 0
 
         for snapshot in snapshots:
             spec = snapshot.spec
@@ -662,6 +671,25 @@ class BackfillPipeline:
                             missing_only=missing_only,
                             existing_request_states=existing_request_states,
                         )
+                        _sr_ok = sum(1 for r in single_run_bronze if r.get("status") == "ok")
+                        _sr_err = sum(1 for r in single_run_bronze if r.get("status") == "error")
+                        single_run_ok_total += _sr_ok
+                        single_run_err_total += _sr_err
+                        if single_run_bronze:
+                            LOGGER.info(
+                                "single_run market done",
+                                extra={
+                                    "market_id": spec.market_id,
+                                    "city": spec.city,
+                                    "model": model,
+                                    "target_date": str(spec.target_local_date),
+                                    "ok": _sr_ok,
+                                    "err": _sr_err,
+                                    "cumulative_ok": single_run_ok_total,
+                                    "cumulative_err": single_run_err_total,
+                                    "market_progress": f"{processed_total + 1}/{total_snapshots}",
+                                },
+                            )
                         bronze_rows.extend(single_run_bronze)
                         silver_rows.extend(single_run_silver)
                     continue
@@ -798,6 +826,25 @@ class BackfillPipeline:
                         missing_only=missing_only,
                         existing_request_states=existing_request_states,
                     )
+                    _sr_ok = sum(1 for r in single_run_bronze if r.get("status") == "ok")
+                    _sr_err = sum(1 for r in single_run_bronze if r.get("status") == "error")
+                    single_run_ok_total += _sr_ok
+                    single_run_err_total += _sr_err
+                    if single_run_bronze:
+                        LOGGER.info(
+                            "single_run market done",
+                            extra={
+                                "market_id": spec.market_id,
+                                "city": spec.city,
+                                "model": model,
+                                "target_date": str(spec.target_local_date),
+                                "ok": _sr_ok,
+                                "err": _sr_err,
+                                "cumulative_ok": single_run_ok_total,
+                                "cumulative_err": single_run_err_total,
+                                "market_progress": f"{processed_total + 1}/{total_snapshots}",
+                            },
+                        )
                     bronze_rows.extend(single_run_bronze)
                     silver_rows.extend(single_run_silver)
                 source_rows.append(
@@ -822,11 +869,30 @@ class BackfillPipeline:
                     }
                 )
             processed_since_checkpoint += 1
+            processed_since_parquet_export += 1
+            processed_total += 1
             # Checkpoint long runs so city/batch shards do not lose all progress on interruption.
             if processed_since_checkpoint >= checkpoint_snapshots:
-                flush_buffers()
+                export_parquet = processed_since_parquet_export >= parquet_export_every
+                flush_buffers(force=export_parquet)
                 self.warehouse.write_manifest()
                 processed_since_checkpoint = 0
+                if export_parquet:
+                    processed_since_parquet_export = 0
+                pct = 100.0 * processed_total / total_snapshots if total_snapshots else 0.0
+                LOGGER.info(
+                    "backfill_forecasts checkpoint",
+                    extra={
+                        "processed": processed_total,
+                        "total": total_snapshots,
+                        "pct": round(pct, 1),
+                        "bronze_rows": bronze_count,
+                        "silver_rows": silver_count,
+                        "single_run_ok": single_run_ok_total,
+                        "single_run_err": single_run_err_total,
+                        "parquet_exported": export_parquet,
+                    },
+                )
 
         flush_buffers(force=True)
         self.warehouse.write_manifest()
@@ -2183,9 +2249,23 @@ class BackfillPipeline:
         strict_archive: bool,
         missing_only: bool = False,
         existing_request_states: dict[ForecastRequestKey, ForecastRequestState] | None = None,
+        request_delay_seconds: float = 1.0,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
+        # Skip entirely if the target date is before this model's archive coverage.
+        min_date = SINGLE_RUN_MODEL_MIN_DATE.get(model)
+        if min_date is not None and spec.target_local_date < min_date:
+            LOGGER.debug(
+                "single_run skip (before model availability)",
+                extra={
+                    "market_id": spec.market_id,
+                    "model": model,
+                    "target_date": str(spec.target_local_date),
+                    "model_min_date": str(min_date),
+                },
+            )
+            return bronze_rows, silver_rows
         for horizon in horizons:
             request_key = self._forecast_request_key(
                 spec=spec,
@@ -2195,10 +2275,31 @@ class BackfillPipeline:
                 decision_horizon=horizon,
             )
             if missing_only and existing_request_states is not None and request_key in existing_request_states:
+                LOGGER.debug(
+                    "single_run skip (already collected)",
+                    extra={
+                        "market_id": spec.market_id,
+                        "city": spec.city,
+                        "model": model,
+                        "horizon": horizon,
+                        "target_date": str(spec.target_local_date),
+                    },
+                )
                 continue
             decision_point = self._decision_point(spec, horizon)
             requested_run_time = pd.Timestamp(decision_point["issue_time_utc"])
             fetched_at = dt.datetime.now(tz=dt.UTC)
+            LOGGER.debug(
+                "single_run fetch",
+                extra={
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "model": model,
+                    "horizon": horizon,
+                    "run_time": requested_run_time.isoformat(),
+                    "target_date": str(spec.target_local_date),
+                },
+            )
             try:
                 payload, variables = self._fetch_single_run_with_variable_fallback(
                     spec=spec,
@@ -2214,11 +2315,34 @@ class BackfillPipeline:
                 http_status: int | None = 200
                 reason = None
                 error_message = None
+                LOGGER.info(
+                    "single_run ok",
+                    extra={
+                        "market_id": spec.market_id,
+                        "city": spec.city,
+                        "model": model,
+                        "horizon": horizon,
+                        "target_date": str(spec.target_local_date),
+                    },
+                )
             except Exception as exc:  # noqa: BLE001
                 http_status, reason = self._error_details(exc)
                 availability_status = self._availability_status(http_status, reason)
                 status = "error"
                 error_message = str(exc)
+                LOGGER.warning(
+                    "single_run error",
+                    extra={
+                        "market_id": spec.market_id,
+                        "city": spec.city,
+                        "model": model,
+                        "horizon": horizon,
+                        "target_date": str(spec.target_local_date),
+                        "http_status": http_status,
+                        "availability_status": availability_status,
+                        "error": str(exc)[:200],
+                    },
+                )
                 bronze_rows.append(
                     self._forecast_request_row(
                         spec=spec,
@@ -2303,6 +2427,8 @@ class BackfillPipeline:
                     requested_run_time_utc=requested_run_time.to_pydatetime(),
                 )
             )
+            if request_delay_seconds > 0:
+                time.sleep(request_delay_seconds)
         return bronze_rows, silver_rows
 
     def _forecast_request_row(

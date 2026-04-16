@@ -7,8 +7,9 @@ trading filter. Used to:
   - Find optimal filter thresholds from data rather than gut feel
   - Measure model accuracy independently of trading decisions
 
-Output: artifacts/signals/v2/all_signals_log.jsonl  (append-only)
-        artifacts/signals/v2/all_signals_latest.json (latest snapshot)
+Output root follows `PMTMAX_ARTIFACTS_DIR` (default: repo `artifacts/`):
+        signals/v2/all_signals_log.jsonl   (append-only)
+        signals/v2/all_signals_latest.json (latest snapshot)
 
 Usage:
     uv run python scripts/record_all_signals.py
@@ -18,14 +19,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCAN_EDGE_PATH = REPO_ROOT / "artifacts/signals/v2/scan_edge_latest.json"
-LOG_PATH = REPO_ROOT / "artifacts/signals/v2/all_signals_log.jsonl"
-LATEST_PATH = REPO_ROOT / "artifacts/signals/v2/all_signals_latest.json"
+ARTIFACTS_ROOT = Path(os.environ.get("PMTMAX_ARTIFACTS_DIR", str(REPO_ROOT / "artifacts")))
+SCAN_EDGE_PATH = ARTIFACTS_ROOT / "signals" / "v2" / "scan_edge_latest.json"
+LOG_PATH = ARTIFACTS_ROOT / "signals" / "v2" / "all_signals_log.jsonl"
+LATEST_PATH = ARTIFACTS_ROOT / "signals" / "v2" / "all_signals_latest.json"
 
 
 def _dedup_key(sig: dict) -> str:

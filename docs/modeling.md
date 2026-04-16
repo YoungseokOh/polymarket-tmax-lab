@@ -21,7 +21,7 @@ The model target is not generic “city temperature.” It is the official sourc
 - `det2prob_nn`: standalone mixture-density neural network that emits Gaussian-mixture daily-max forecasts
 
 ## Contract
-- canonical datasets live under `data/parquet/gold/v2/`
+- workspace datasets live under `data/workspaces/<workspace>/parquet/gold/`
 - backtests use grouped leakage-safe splits with `market_day` or `target_day`
 - artifacts carry `contract_version`, `dataset_signature`, `split_policy`, `seed`, and optional `calibration_path`
 - paper/live/opportunity paths consume calibrated probabilities when available and fail closed as `missing_calibrator` when a calibrator is absent
@@ -34,8 +34,9 @@ The model target is not generic “city temperature.” It is the official sourc
 - advanced models may emit `gaussian_mixture` forecasts; calibration still happens on mapped outcome probabilities rather than on component weights directly
 
 ## Champion Selection
-- `benchmark-models` writes leaderboard artifacts under `artifacts/benchmarks/v2/`
-- the active research champion alias is published to `artifacts/models/v2/champion.pkl`
-- the active trading alias is published to `artifacts/models/v2/trading_champion.pkl`
+- `benchmark-models` writes leaderboard artifacts under `artifacts/workspaces/<workspace>/benchmarks/v2/`
+- the single public champion alias is published to `artifacts/public_models/champion.pkl`
+- `benchmark-models` ranks workspace-local candidates only; it does not publish the public alias
+- `publish-champion` is the explicit promotion command and requires a recent-core `GO` summary before copying the alias
 - research champion scoring still blends forecast skill and trading-like PnL
-- trading champion scoring is stricter on `quote_proxy` / `real_history` profitability and only considers sample-adequate candidates when available
+- execution-candidate scoring is stricter on `quote_proxy` / `real_history` profitability and only considers sample-adequate candidates when available

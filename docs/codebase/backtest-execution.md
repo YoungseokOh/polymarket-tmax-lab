@@ -39,7 +39,8 @@ from signal generation and broker behavior.
 - `hope-hunt-report` / `hope-hunt-daemon` sit on top of the same execution diagnostics but constrain discovery to supported Wunderground-family `research_public` cities and rank fresh listings without placing orders.
 - Execution diagnostics should distinguish `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, and `after_cost_positive_but_spread_too_wide` instead of collapsing everything into a generic “no edge”.
 - `backtest --pricing-source quote_proxy` still is not exact replay. It keeps official historical last-price coverage but overlays a configurable half-spread proxy so execution assumptions are stricter than raw `real_history`.
-- `benchmark-models` is the canonical model-selection path. It writes the leaderboard under `artifacts/benchmarks/v2/` and publishes both the research `champion` alias and the execution-oriented `trading_champion` alias for consumer commands.
+- `benchmark-models` is the workspace-local model-selection path. It writes the leaderboard under the active workspace benchmark root and does not mutate the public alias.
+- `publish-champion` is the only public-alias promotion path. It copies one calibrated artifact into `artifacts/public_models/champion.*` only after the recent-core benchmark summary is `GO`.
 - `revenue-gate-report` is the promotion checkpoint that combines recent-core benchmark results with shadow/open-phase viability before any small live pilot.
 
 ## Change Checklist

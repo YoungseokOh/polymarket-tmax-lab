@@ -71,7 +71,6 @@ uv run pmtmax train-baseline --model-name gaussian_emos
 ```bash
 uv run pmtmax benchmark-models
 uv run pmtmax backtest --model-name champion
-uv run pmtmax backtest --model-name trading_champion
 ```
 
 To evaluate against official historical Polymarket prices instead of the synthetic
@@ -93,7 +92,7 @@ uv run pmtmax backtest --pricing-source quote_proxy --quote-proxy-half-spread 0.
 6. Emit paper-trading signals:
 
 ```bash
-uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax paper-trader --core-recent-only --model-name champion
 ```
 
 `paper-trader` defaults to `--horizon policy`, which applies the checked-in
@@ -106,32 +105,32 @@ Paper-only diagnostics can override that policy without touching the live path:
 
 ```bash
 uv run pmtmax paper-trader \
-    --model-name trading_champion \
+    --model-name champion \
     --market-scope default \
     --horizon-policy-path configs/paper-all-supported-horizon-policy.yaml
 uv run pmtmax paper-multimodel-report --markets-path artifacts/discovered_markets.json
 uv run pmtmax execution-sensitivity-report --markets-path artifacts/discovered_markets.json
 uv run pmtmax market-bottleneck-report \
-    --input-path artifacts/signals/v2/paper_signals.json \
-    --opportunity-summary-path artifacts/signals/v2/opportunity_shadow_summary.json \
-    --observation-summary-path artifacts/signals/v2/observation_shadow_summary.json
+    --input-path artifacts/workspaces/ops_daily/signals/v2/paper_signals.json \
+    --opportunity-summary-path artifacts/workspaces/ops_daily/signals/v2/opportunity_shadow_summary.json \
+    --observation-summary-path artifacts/workspaces/ops_daily/signals/v2/observation_shadow_summary.json
 uv run pmtmax execution-watchlist-playbook \
-    --champion-bottleneck-path artifacts/signals/v2/market_bottleneck_report__champion_alias.json \
-    --challenger-bottleneck-path artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
-    --fee-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
-    --policy-watchlist-summary-path artifacts/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
-    --sensitivity-summary-path artifacts/signals/v2/execution_sensitivity/<run_tag>/summary.json
+    --champion-bottleneck-path artifacts/workspaces/ops_daily/signals/v2/market_bottleneck_report__champion_alias.json \
+    --challenger-bottleneck-path artifacts/workspaces/ops_daily/signals/v2/market_bottleneck_report__mega_neighbor_oof.json \
+    --fee-watchlist-summary-path artifacts/workspaces/ops_daily/signals/v2/paper_multimodel/<run_tag>_fee_watchlist/summary.json \
+    --policy-watchlist-summary-path artifacts/workspaces/ops_daily/signals/v2/paper_multimodel/<run_tag>_policy_watchlist/summary.json \
+    --sensitivity-summary-path artifacts/workspaces/ops_daily/signals/v2/execution_sensitivity/<run_tag>/summary.json
 ```
 
-- `paper-multimodel-report` compares the active champion against the current top challenger pool and writes per-model JSON, `summary.json`, and `leaderboard.csv` under `artifacts/signals/v2/paper_multimodel/`
+- `paper-multimodel-report` compares the active champion against the current top challenger pool and writes per-model JSON, `summary.json`, and `leaderboard.csv` under `artifacts/workspaces/ops_daily/signals/v2/paper_multimodel/`
 - `execution-sensitivity-report` sweeps paper-only `min_edge / max_spread_bps / min_liquidity / market_scope / horizon_policy` combinations from `configs/paper-exploration.yaml`
 - `market-bottleneck-report` rolls one row-oriented report up into `fee_sensitive_watchlist`, `raw_edge_desert_watchlist`, and `policy_blocked_watchlist`
-- `execution-watchlist-playbook` converts those reports into `artifacts/signals/v2/execution_watchlist_playbook.json` plus a Markdown playbook and computes Tier A ask-threshold rules for the dashboard
+- `execution-watchlist-playbook` converts those reports into `artifacts/workspaces/ops_daily/signals/v2/execution_watchlist_playbook.json` plus a Markdown playbook and computes Tier A ask-threshold rules for the dashboard
 
 7. Audit active markets for executable opportunities with explicit book status:
 
 ```bash
-uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax opportunity-report --core-recent-only --model-name champion
 ```
 
 `opportunity-report`, `opportunity-shadow`, `scan-daemon`, and `live-trader`
@@ -145,14 +144,14 @@ If you want to run the observation-driven watcher that zeros out already-impossi
 lower bins using the strongest target-day lower bound, run:
 
 ```bash
-uv run pmtmax observation-report --model-name trading_champion
-uv run pmtmax observation-shadow --model-name trading_champion --max-cycles 1
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-report --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax observation-shadow --model-name champion --max-cycles 1
 uv run pmtmax station-dashboard
-uv run pmtmax station-cycle --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax station-cycle --model-name champion
 ```
 
 `observation-report` and `observation-shadow` write the latest candidate table,
-manual-review alerts, and `live_pilot_queue.json` under `artifacts/signals/v2/`.
+manual-review alerts, and `live_pilot_queue.json` under `artifacts/workspaces/ops_daily/signals/v2/`.
 The queue is still manual-approval-only; candidates are classified as
 `tradable`, `manual_review`, or `blocked`.
 The live source stack is layered and fail-closed:
@@ -166,8 +165,8 @@ The live source stack is layered and fail-closed:
 can see which source layer is actually generating after-cost candidates and which
 markets are dying on fee/spread/policy.
 `station-dashboard` reads the latest opportunity / observation / open-phase / revenue-gate
-artifacts plus `execution_watchlist_playbook.json` and writes `artifacts/signals/v2/station_dashboard.json` plus
-`artifacts/signals/v2/station_dashboard.html`. `station-dashboard-daemon` keeps the
+artifacts plus `execution_watchlist_playbook.json` and writes `artifacts/workspaces/ops_daily/signals/v2/station_dashboard.json` plus
+`artifacts/workspaces/ops_daily/signals/v2/station_dashboard.html`. `station-dashboard-daemon` keeps the
 same outputs refreshed on one host for the Discovery / Observation / Execution view.
 When Tier A fee-sensitive rows revisit the same `market_id / outcome_label / horizon`
 with `best_ask <= watch_rule_threshold_ask`, the dashboard raises a watchlist alert
@@ -193,16 +192,16 @@ Wunderground-family listings by open-phase age, target-day distance, volume, and
 after-cost edge, run:
 
 ```bash
-uv run pmtmax hope-hunt-report --model-name trading_champion
-uv run pmtmax hope-hunt-daemon --model-name trading_champion --max-cycles 1
+scripts/pmtmax-workspace ops_daily uv run pmtmax hope-hunt-report --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax hope-hunt-daemon --model-name champion --max-cycles 1
 ```
 
 `hope-hunt-report` and `hope-hunt-daemon` default to
 `--market-scope supported_wu_open_phase`, which keeps only supported
 Wunderground-family `research_public` cities and writes ranked outputs to
-`artifacts/signals/v2/hope_hunt_latest.json`,
-`artifacts/signals/v2/hope_hunt_history.jsonl`, and
-`artifacts/signals/v2/hope_hunt_summary.json`. `opportunity-report`,
+`artifacts/workspaces/ops_daily/signals/v2/hope_hunt_latest.json`,
+`artifacts/workspaces/ops_daily/signals/v2/hope_hunt_history.jsonl`, and
+`artifacts/workspaces/ops_daily/signals/v2/hope_hunt_summary.json`. `opportunity-report`,
 `opportunity-shadow`, and `open-phase-shadow` also accept
 `--market-scope supported_wu_open_phase` when you want the same filtered market
 universe without the ranking wrapper.
@@ -217,7 +216,7 @@ uv run pmtmax revenue-gate-report
 The revenue gate now also reads `observation_shadow_summary.json` when present, so
 benchmark `GO` can be confirmed by the near-term opportunity path, the open-phase
 path, or the observation-station path. The default benchmark input is the checked-in
-`artifacts/benchmarks/v2/benchmark_summary.json`; if you have a richer recent-core
+`artifacts/workspaces/historical_real/benchmarks/v2/benchmark_summary.json`; if you have a richer recent-core
 benchmark summary, pass it explicitly with `--benchmark-summary-path`.
 
 To run the all-supported small live pilot preset with explicit manual approval,
@@ -233,7 +232,7 @@ The default observation-only preset is `configs/observation-station.yaml`.
 The canonical engine is now v2-only:
 
 - grouped backtest splits (`market_day` by default) replace row-level replay
-- dataset/model/backtest/signal artifacts live under `data/parquet/gold/v2/`, `artifacts/models/v2/`, `artifacts/backtests/v2/`, and `artifacts/signals/v2/`
+- dataset/model/backtest/signal artifacts live under `data/workspaces/historical_real/parquet/gold/`, `artifacts/models/v2/`, `artifacts/workspaces/historical_real/backtests/v2/`, and `artifacts/workspaces/ops_daily/signals/v2/`
 - paper/live/opportunity paths require calibrated probabilities and fail closed as `missing_calibrator`
 
 ## Install
@@ -303,14 +302,16 @@ uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
 uv run pmtmax train-baseline --model-name gaussian_emos
 uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
 uv run pmtmax benchmark-models
-uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
+scripts/run_recent_core_benchmark_local.sh
+uv run pmtmax publish-champion /path/to/workspace/model.pkl --recent-core-summary-path artifacts/workspaces/recent_core_eval/recent_core_benchmark/recent_core_benchmark_summary.json
+scripts/pmtmax-workspace ops_daily uv run pmtmax paper-trader --core-recent-only --model-name champion
 ```
 
 Canonical research paths are now v2-only.
 Public model support is `gaussian_emos`, `tuned_ensemble`, `det2prob_nn`, and `lgbm_emos`.
-The current active aliases point to `lgbm_emos / recency_neighbor_oof`, while `benchmark-models` still remains the canonical publish path for public aliases.
-`benchmark-models` writes the leaderboard under `artifacts/benchmarks/v2/` and publishes both the research `champion` alias and the trading-focused `trading_champion` alias under `artifacts/models/v2/`.
-`benchmark-ablations` is internal research tooling for variant-level grouped-holdout diagnostics and writes family-specific leaderboards under `artifacts/benchmarks/v2/`.
+The single public alias lives in `artifacts/public_models/champion.*`.
+`benchmark-models` writes workspace-local leaderboards only. Public alias promotion now goes through `publish-champion` after the recent-core benchmark summary is `GO`.
+`benchmark-ablations` is internal research tooling for variant-level grouped-holdout diagnostics and writes family-specific leaderboards under `artifacts/workspaces/historical_real/benchmarks/v2/`.
 
 ## Autoresearch Workflow
 `karpathy/autoresearch`-style exploration is wired into the repo as a YAML candidate loop around `lgbm_emos / recency_neighbor_oof`.
@@ -326,7 +327,7 @@ uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/
 ```
 
 `scripts/autoresearch.sh` is a thin wrapper over the same commands.
-The loop never rewrites canonical datasets or aliases unless promotion explicitly asks to publish them.
+The loop never rewrites canonical datasets or public aliases. Promotion copies the winning YAML only; public alias changes still require `publish-champion`.
 
 ## Real Historical Collection
 Use the curated inventory workflow when you want real historical temperature markets instead of bundled examples.
@@ -418,7 +419,7 @@ uv run pmtmax materialize-training-set \
   --allow-canonical-overwrite
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel \
-  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --allow-canonical-overwrite
 uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/historical_temperature_snapshots.json
@@ -500,7 +501,7 @@ uv run pmtmax archive-legacy-runs --execute
 ## Backtest Workflow
 ```bash
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet \
   --model-name champion
 ```
 
@@ -510,12 +511,12 @@ dataset against official Polymarket prices, build the panel first:
 ```bash
 uv run pmtmax backfill-price-history --markets-path configs/market_inventory/historical_temperature_snapshots.json
 uv run pmtmax materialize-backtest-panel \
-  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
+  --dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
   --allow-canonical-overwrite
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
-  --panel-path data/parquet/gold/v2/historical_backtest_panel.parquet \
+  --dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet \
+  --panel-path data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet \
   --pricing-source real_history \
   --model-name champion
 ```
@@ -525,19 +526,19 @@ switch the pricing source and set an explicit half-spread penalty:
 
 ```bash
 uv run pmtmax backtest \
-  --dataset-path data/parquet/gold/v2/historical_training_set.parquet \
-  --panel-path data/parquet/gold/v2/historical_backtest_panel.parquet \
+  --dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet \
+  --panel-path data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet \
   --pricing-source quote_proxy \
   --quote-proxy-half-spread 0.02 \
   --model-name champion
 ```
 
-Synthetic outputs are written to `artifacts/backtests/v2/backtest_metrics.json` and
-`artifacts/backtests/v2/backtest_trades.json`. Official-price runs write
-`artifacts/backtests/v2/backtest_metrics_real_history.json` and
-`artifacts/backtests/v2/backtest_trades_real_history.json`. Quote-proxy runs write
-`artifacts/backtests/v2/backtest_metrics_quote_proxy.json` and
-`artifacts/backtests/v2/backtest_trades_quote_proxy.json`.
+Synthetic outputs are written to `artifacts/workspaces/historical_real/backtests/v2/backtest_metrics.json` and
+`artifacts/workspaces/historical_real/backtests/v2/backtest_trades.json`. Official-price runs write
+`artifacts/workspaces/historical_real/backtests/v2/backtest_metrics_real_history.json` and
+`artifacts/workspaces/historical_real/backtests/v2/backtest_trades_real_history.json`. Quote-proxy runs write
+`artifacts/workspaces/historical_real/backtests/v2/backtest_metrics_quote_proxy.json` and
+`artifacts/workspaces/historical_real/backtests/v2/backtest_trades_quote_proxy.json`.
 
 Backtests record `contract_version`, `split_policy`, and `leakage_audit_passed`
 in the metrics artifact.
@@ -545,7 +546,7 @@ in the metrics artifact.
 To rerun the current recent `Seoul` / `NYC` / `London` benchmark end-to-end into isolated per-city directories, use:
 
 ```bash
-uv run python scripts/run_recent_core_benchmark.py
+scripts/run_recent_core_benchmark_local.sh
 ```
 
 The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy deltas into `recent_core_benchmark_summary.json`. It also applies `configs/recent-core-horizon-policy.yaml`, records policy-filtered metrics for the currently recommended horizons, and adds both top-level aggregate profitability fields and nested `cities.<city>.horizons.<horizon>` summaries. Use `--reuse-existing` when you only want to recompute the summary from existing city runs.
@@ -553,7 +554,9 @@ The runner writes per-city metrics plus `city x horizon` real-versus-quote-proxy
 ## Paper Trading Workflow
 ```bash
 uv run pmtmax benchmark-models
-uv run pmtmax paper-trader --core-recent-only --model-name trading_champion
+scripts/run_recent_core_benchmark_local.sh
+uv run pmtmax publish-champion /path/to/workspace/model.pkl --recent-core-summary-path artifacts/workspaces/recent_core_eval/recent_core_benchmark/recent_core_benchmark_summary.json
+scripts/pmtmax-workspace ops_daily uv run pmtmax paper-trader --core-recent-only --model-name champion
 uv run pmtmax revenue-gate-report
 ```
 
@@ -563,17 +566,17 @@ Paper trading uses active discovered markets when available. If no active max-te
 also default to the checked-in recent horizon policy. The current recommended
 set is `Seoul=market_open+previous_evening+morning_of`,
 `NYC=market_open+previous_evening`, and `London=previous_evening`.
-Paper/live/opportunity paths use the v2 forecast contract, write outputs under `artifacts/signals/v2/`, and reject uncalibrated forecasts as `missing_calibrator`. For revenue-first operation, the preferred loop is `benchmark-models -> paper/opportunity/open-phase shadow -> revenue-gate-report`.
+Paper/live/opportunity paths use the v2 forecast contract, write outputs under the active workspace signal root, and reject uncalibrated forecasts as `missing_calibrator`. For revenue-first operation, the preferred loop is `benchmark-models -> recent_core_benchmark -> publish-champion -> paper/opportunity/open-phase shadow -> revenue-gate-report`.
 If recent-core remains `NO_GO`, the exploratory follow-up loop is
 `hope-hunt-report -> hope-hunt-daemon` on `supported_wu_open_phase` rather than
 loosening the live gate.
 
 ## Opportunity Workflow
 ```bash
-uv run pmtmax opportunity-report --core-recent-only --model-name trading_champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax opportunity-report --core-recent-only --model-name champion
 ```
 
-This writes `artifacts/signals/v2/opportunity_report.json` and separates `tradable`,
+This writes `artifacts/workspaces/ops_daily/signals/v2/opportunity_report.json` and separates `tradable`,
 `missing_book`, `raw_gap_non_positive`, `fee_killed_edge`,
 `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`, and other
 skip reasons so “no trade” and “no live book” are not conflated.
@@ -587,7 +590,7 @@ tradable over time before wiring alerts, run the shadow watcher:
 ```bash
 uv run pmtmax opportunity-shadow \
   --core-recent-only \
-  --model-name trading_champion \
+  --model-name champion \
   --interval 60
 ```
 
@@ -600,9 +603,9 @@ scripts/run_opportunity_shadow_watch.sh --city Seoul --interval 60
 ```
 
 This keeps a near-term (`today` / `tomorrow` in each market timezone) append-only
- audit trail in `artifacts/signals/v2/opportunity_shadow.jsonl`, plus latest and summary views
-under `artifacts/signals/v2/opportunity_shadow_latest.json` and
-`artifacts/signals/v2/opportunity_shadow_summary.json`.
+ audit trail in `artifacts/workspaces/ops_daily/signals/v2/opportunity_shadow.jsonl`, plus latest and summary views
+under `artifacts/workspaces/ops_daily/signals/v2/opportunity_shadow_latest.json` and
+`artifacts/workspaces/ops_daily/signals/v2/opportunity_shadow_summary.json`.
 
 If you want to watch the hypothesis that taker alpha exists right after listing,
 use the open-phase watcher instead:
@@ -610,13 +613,13 @@ use the open-phase watcher instead:
 ```bash
 uv run pmtmax open-phase-shadow \
   --market-scope supported_wu_open_phase \
-  --model-name trading_champion \
+  --model-name champion \
   --open-window-hours 24 \
   --interval 60
 ```
 
-This writes `artifacts/signals/v2/open_phase_shadow.jsonl`, `artifacts/signals/v2/open_phase_shadow_latest.json`,
-and `artifacts/signals/v2/open_phase_shadow_summary.json`. The watcher keys off
+This writes `artifacts/workspaces/ops_daily/signals/v2/open_phase_shadow.jsonl`, `artifacts/workspaces/ops_daily/signals/v2/open_phase_shadow_latest.json`,
+and `artifacts/workspaces/ops_daily/signals/v2/open_phase_shadow_summary.json`. The watcher keys off
 `componentMarkets[*].acceptingOrdersTimestamp` when available and falls back to
 market creation/deploy timestamps, so it can test whether spreads or raw gaps
 look different immediately after listing.
@@ -624,8 +627,8 @@ look different immediately after listing.
 For a ranked, no-order search loop over the same market family, use:
 
 ```bash
-uv run pmtmax hope-hunt-report --model-name trading_champion
-uv run pmtmax hope-hunt-daemon --model-name trading_champion --interval 300
+scripts/pmtmax-workspace ops_daily uv run pmtmax hope-hunt-report --model-name champion
+scripts/pmtmax-workspace ops_daily uv run pmtmax hope-hunt-daemon --model-name champion --interval 300
 ```
 
 This keeps a scope-limited candidate board for supported WU-family active
@@ -636,7 +639,7 @@ blocked solely by spread width.
 ```bash
 uv run pmtmax live-trader \
   --core-recent-only \
-  --model-name trading_champion \
+  --model-name champion \
   --dry-run
 ```
 

@@ -40,6 +40,8 @@ class LgbmEMOSVariantConfig:
     use_city_month: bool = False  # True → add city×month interaction dummies to design matrix
     use_clim_anomaly: bool = False  # True → add clim_delta/clim_zscore (NWP forecast vs city×month historical normal)
     use_forecast_bias: bool = False  # True → add forecast_bias/bias_corrected_nwp (city×month systematic model error)
+    use_bin_position: bool = False  # True → add bin_rank/n_bins/tail/boundary_dist (forecast position within outcome schema)
+    use_bin_boundary_dist: bool = False  # True → add only bin_boundary_dist (min dist to nearest bin edge)
     quantile_center_alpha: float = 0.5  # Center quantile alpha (0.5=median, 0.4=40th pct → systematic downshift)
 
 
@@ -572,7 +574,7 @@ class LgbmEMOSModel:
                 f for f in self.feature_names
                 if not any(f.startswith(p) for p in _dead_prefixes)
             ]
-        self.builder = ContextualFeatureBuilder(active_feature_names, use_city_lat=cfg.use_city_lat, use_city_month=cfg.use_city_month, use_clim_anomaly=cfg.use_clim_anomaly, use_forecast_bias=cfg.use_forecast_bias)
+        self.builder = ContextualFeatureBuilder(active_feature_names, use_city_lat=cfg.use_city_lat, use_city_month=cfg.use_city_month, use_clim_anomaly=cfg.use_clim_anomaly, use_forecast_bias=cfg.use_forecast_bias, use_bin_position=cfg.use_bin_position, use_bin_boundary_dist=cfg.use_bin_boundary_dist)
         self.builder.fit(ordered)
         x_base = self.builder.transform(ordered)
         x_extra = _nwp_spread_features(ordered)

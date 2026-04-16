@@ -13,7 +13,12 @@ export PATH="/home/seok436/.local/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-mkdir -p logs artifacts/signals/v2
+if [[ "${PMTMAX_WORKSPACE_NAME:-}" != "ops_daily" ]]; then
+    exec "${REPO_ROOT}/scripts/pmtmax-workspace" ops_daily "${REPO_ROOT}/scripts/run_price_check.sh" "$@"
+fi
+
+ARTIFACTS_ROOT="${PMTMAX_ARTIFACTS_DIR:-${REPO_ROOT}/artifacts}"
+mkdir -p logs "${ARTIFACTS_ROOT}/signals/v2"
 
 LOCK_FILE="${REPO_ROOT}/logs/price_check.lock"
 LOG_PREFIX="[price_check $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"

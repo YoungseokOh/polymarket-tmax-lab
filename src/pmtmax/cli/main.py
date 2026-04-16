@@ -79,9 +79,9 @@ from pmtmax.modeling.autoresearch import (
 )
 from pmtmax.modeling.champion import (
     score_leaderboard,
-    score_trading_leaderboard,
+    score_execution_candidate_leaderboard,
     select_champion,
-    select_trading_champion,
+    select_execution_candidate,
 )
 from pmtmax.modeling.design_matrix import group_id_series
 from pmtmax.modeling.evaluation import (
@@ -148,14 +148,8 @@ console = Console()
 DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
 DEFAULT_PAPER_ALL_SUPPORTED_HORIZON_POLICY_PATH = Path("configs/paper-all-supported-horizon-policy.yaml")
 DEFAULT_PAPER_EXPLORATION_CONFIG_PATH = Path("configs/paper-exploration.yaml")
-DEFAULT_PAPER_MULTIMODEL_ROOT = Path("artifacts/signals/v2/paper_multimodel")
-DEFAULT_EXECUTION_SENSITIVITY_ROOT = Path("artifacts/signals/v2/execution_sensitivity")
-DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_PATH = Path("artifacts/signals/v2/execution_watchlist_playbook.json")
-DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_MD_PATH = Path("artifacts/signals/v2/execution_watchlist_playbook.md")
-DEFAULT_BENCHMARK_SUMMARY_PATH = Path("artifacts/benchmarks/v2/benchmark_summary.json")
 DEFAULT_MODEL_NAME = "champion"
-TRADING_MODEL_ALIAS = "trading_champion"
-PUBLIC_MODEL_ALIASES = {DEFAULT_MODEL_NAME, TRADING_MODEL_ALIAS}
+PUBLIC_MODEL_ALIASES = {DEFAULT_MODEL_NAME}
 RECENT_CORE_CITIES = ("Seoul", "NYC", "London")
 MARKET_SCOPE_CHOICES = ("default", "recent_core", "supported_wu_open_phase")
 
@@ -169,57 +163,91 @@ def _resolve_option_value(value: Any, fallback: Any = None) -> Any:
     return value
 
 
-def _default_dataset_path(*, sequence: bool = False, panel: bool = False) -> Path:
-    """Return the canonical v2 dataset or panel path."""
+def _path_env() -> EnvSettings:
+    """Load environment-only path settings for CLI defaults."""
 
+    return EnvSettings()
+
+
+def _default_artifacts_root() -> Path:
+    """Return the active workspace artifact root."""
+
+    return _path_env().artifacts_dir
+
+
+def _default_public_model_dir() -> Path:
+    """Return the shared public model registry root."""
+
+    return _path_env().public_model_dir
+
+
+def _default_private_models_dir() -> Path:
+    """Return the workspace-private trained model artifact directory."""
+
+    return _default_artifacts_root() / "models" / "v2"
+
+
+def _default_dataset_path(*, sequence: bool = False, panel: bool = False) -> Path:
+    """Return the active workspace dataset or panel path."""
+
+    gold_dir = _path_env().parquet_dir / "gold"
     if panel:
-        return Path("data/parquet/gold/v2/historical_backtest_panel.parquet")
+        return gold_dir / "historical_backtest_panel.parquet"
     suffix = "historical_training_set_sequence.parquet" if sequence else "historical_training_set.parquet"
-    return Path("data/parquet/gold/v2") / suffix
+    return gold_dir / suffix
 
 
 def _default_artifacts_dir() -> Path:
-    """Return the canonical v2 model artifact directory."""
+    """Return the workspace-private v2 model artifact directory."""
 
-    return Path("artifacts/models/v2")
+    return _default_private_models_dir()
 
 
 def _default_champion_metadata_path() -> Path:
-    """Return the canonical champion metadata path."""
+    """Return the public champion metadata path."""
 
-    return _default_artifacts_dir() / "champion.json"
+    return _default_public_model_dir() / "champion.json"
 
 
 def _default_alias_metadata_path(alias_name: str) -> Path:
-    """Return the canonical metadata path for one public model alias."""
+    """Return the public metadata path for one alias."""
 
     if alias_name == DEFAULT_MODEL_NAME:
         return _default_champion_metadata_path()
-    return _default_artifacts_dir() / f"{alias_name}.json"
+    return _default_public_model_dir() / f"{alias_name}.json"
 
 
 def _default_model_path(model_name: str) -> Path:
-    """Return the canonical v2 model artifact path."""
+    """Return the workspace or public model artifact path."""
 
-    return _default_artifacts_dir() / f"{model_name}.pkl"
+    if model_name in PUBLIC_MODEL_ALIASES:
+        return _default_public_model_dir() / f"{model_name}.pkl"
+    return _default_private_models_dir() / f"{model_name}.pkl"
 
 
 def _default_backtest_output(filename: str) -> Path:
-    """Return the canonical v2 backtest output path."""
+    """Return the active workspace backtest output path."""
 
-    return Path("artifacts/backtests/v2") / filename
+    return _default_artifacts_root() / "backtests" / "v2" / filename
 
 
 def _default_benchmark_output(filename: str) -> Path:
-    """Return the canonical v2 benchmark output path."""
+    """Return the active workspace benchmark output path."""
 
-    return Path("artifacts/benchmarks/v2") / filename
+    return _default_artifacts_root() / "benchmarks" / "v2" / filename
 
 
 def _default_signal_output(filename: str) -> Path:
-    """Return the canonical v2 signal/report output path."""
+    """Return the active workspace signal/report output path."""
 
-    return Path("artifacts/signals/v2") / filename
+    return _default_artifacts_root() / "signals" / "v2" / filename
+
+
+DEFAULT_PAPER_MULTIMODEL_ROOT = _default_signal_output("paper_multimodel")
+DEFAULT_EXECUTION_SENSITIVITY_ROOT = _default_signal_output("execution_sensitivity")
+DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_PATH = _default_signal_output("execution_watchlist_playbook.json")
+DEFAULT_EXECUTION_WATCHLIST_PLAYBOOK_MD_PATH = _default_signal_output("execution_watchlist_playbook.md")
+DEFAULT_BENCHMARK_SUMMARY_PATH = _default_benchmark_output("benchmark_summary.json")
 
 
 def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
@@ -383,7 +411,7 @@ def _load_alias_metadata(alias_name: str = DEFAULT_MODEL_NAME, path: Path | None
     if not metadata_path.exists():
         msg = (
             f"Model alias metadata does not exist: {metadata_path}. "
-            "Run `uv run pmtmax benchmark-models` first."
+            "Run `uv run pmtmax publish-champion` first."
         )
         raise typer.BadParameter(msg)
     payload = load_json(metadata_path)
@@ -2041,7 +2069,7 @@ def _default_paper_multimodel_specs() -> list[dict[str, object]]:
     """Return the default champion-vs-top-challenger comparison pool."""
 
     champion_path, champion_model_name = _resolve_model_path(
-        Path("artifacts/models/v2/champion.pkl"),
+        _default_model_path(DEFAULT_MODEL_NAME),
         DEFAULT_MODEL_NAME,
     )
     candidate_path = _find_autoresearch_model_artifact("neighbor_oof_half_life20")
@@ -2062,22 +2090,22 @@ def _default_paper_multimodel_specs() -> list[dict[str, object]]:
         },
         {
             "label": "high_neighbor_oof",
-            "model_path": Path("artifacts/models/v2/lgbm_emos__high_neighbor_oof.pkl"),
+            "model_path": _default_model_path("lgbm_emos__high_neighbor_oof"),
             "model_name": "lgbm_emos",
         },
         {
             "label": "ultra_high_neighbor_oof",
-            "model_path": Path("artifacts/models/v2/lgbm_emos__ultra_high_neighbor_oof.pkl"),
+            "model_path": _default_model_path("lgbm_emos__ultra_high_neighbor_oof"),
             "model_name": "lgbm_emos",
         },
         {
             "label": "mega_neighbor_oof",
-            "model_path": Path("artifacts/models/v2/lgbm_emos__mega_neighbor_oof.pkl"),
+            "model_path": _default_model_path("lgbm_emos__mega_neighbor_oof"),
             "model_name": "lgbm_emos",
         },
         {
             "label": "ultra_high_neighbor_fast",
-            "model_path": Path("artifacts/models/v2/lgbm_emos__ultra_high_neighbor_fast.pkl"),
+            "model_path": _default_model_path("lgbm_emos__ultra_high_neighbor_fast"),
             "model_name": "lgbm_emos",
         },
     ]
@@ -3442,7 +3470,7 @@ def scan_markets(
     output: Annotated[
         Path,
         typer.Option("--output", "--output-json", help="Where to persist discovered market snapshots."),
-    ] = Path("artifacts/discovered_markets.json"),
+    ] = _default_artifacts_root() / "discovered_markets.json",
 ) -> None:
     """Discover Polymarket maximum-temperature markets and persist parsed snapshots."""
 
@@ -3487,12 +3515,12 @@ def scan_markets(
 
 @app.command("scan-edge")
 def scan_edge(
-    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_path: Path = _default_model_path(DEFAULT_MODEL_NAME),
     model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Annotated[
         Path,
         typer.Option("--markets-path", help="Discovered markets snapshot file (run scan-markets first)."),
-    ] = Path("artifacts/discovered_markets.json"),
+    ] = _default_artifacts_root() / "discovered_markets.json",
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     horizon: str = "policy",
     min_edge: float = 0.01,
@@ -3501,10 +3529,11 @@ def scan_edge(
     min_market_price: float = typer.Option(0.0, help="Skip outcome bins where Gamma mid-price is below this threshold (e.g. 0.10 filters out <10% bins where model edge is typically spurious)."),
     min_gamma: float = typer.Option(0.0, help="Skip bins where gamma_price < min_gamma. Use 0.15 to exclude near-zero bins where market is almost certainly right."),
     max_gamma: float = typer.Option(1.0, help="Skip bins where gamma_price > max_gamma. Use 0.85 to exclude near-certain bins where market is almost certainly right."),
+    max_no_gamma: float = typer.Option(1.0, help="Skip NO-direction bets where gamma_price > threshold. Use 0.70 to avoid betting NO against markets that are highly confident in YES (empirically: NO wins avg gamma=0.576, NO losses avg gamma=0.892)."),
     output: Annotated[
         Path,
         typer.Option("--output", "--output-json"),
-    ] = Path("artifacts/edge_scan.json"),
+    ] = _default_artifacts_root() / "edge_scan.json",
 ) -> None:
     """Scan every outcome bin across discovered markets for YES and NO edge.
 
@@ -3584,6 +3613,8 @@ def scan_edge(
             if abs(best_edge) < min_edge:
                 continue
             direction = "yes" if yes_edge >= no_edge else "no"
+            if direction == "no" and max_no_gamma < 1.0 and gamma_price > max_no_gamma:
+                continue
             rows.append(
                 {
                     "city": spec.city,
@@ -4009,7 +4040,7 @@ def summarize_dataset_readiness(
 
 @app.command("materialize-backtest-panel")
 def materialize_backtest_panel(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     output_name: str = "historical_backtest_panel",
@@ -4510,9 +4541,9 @@ def sync_firebase(
 
 @app.command("train-baseline")
 def train_baseline(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     model_name: str = "gaussian_emos",
-    artifacts_dir: Path = Path("artifacts/models/v2"),
+    artifacts_dir: Path = _default_artifacts_dir(),
 ) -> None:
     """Train a baseline probabilistic model."""
 
@@ -4530,15 +4561,17 @@ def train_baseline(
 
 @app.command("train-advanced")
 def train_advanced(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     model_name: str = "det2prob_nn",
-    artifacts_dir: Path = Path("artifacts/models/v2"),
+    artifacts_dir: Path = _default_artifacts_dir(),
     variant: str | None = None,
     variant_spec: Path | None = None,
     publish_champion: bool = False,
 ) -> None:
-    """Train an advanced probabilistic model, optionally publish the champion alias."""
+    """Train an advanced probabilistic model inside the active workspace."""
 
+    if publish_champion:
+        raise typer.BadParameter("`train-advanced` no longer publishes the public alias. Use `uv run pmtmax publish-champion` after recent-core validation.")
     config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
     resolved_variant, resolved_variant_config, _ = _resolve_lgbm_variant_inputs(
@@ -4556,35 +4589,16 @@ def train_advanced(
         variant_config=resolved_variant_config,
     )
     console.print(f"Trained {model_name} -> {artifact.path}")
-    if publish_champion:
-        champion_path = _default_model_path(DEFAULT_MODEL_NAME)
-        champion_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(Path(artifact.path), champion_path)
-        if artifact.calibration_path is not None:
-            champion_cal_path = champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")
-            shutil.copyfile(Path(artifact.calibration_path), champion_cal_path)
-        metadata: dict[str, object] = {
-            "model_name": model_name,
-            "alias_path": str(champion_path),
-            "alias_calibration_path": str(champion_path.with_name(f"{champion_path.stem}.calibrator.pkl")),
-            "source_model_path": artifact.path,
-            "source_calibration_path": artifact.calibration_path,
-            "variant": artifact.variant,
-            "contract_version": "v2",
-            "published_at": datetime.now(tz=UTC).isoformat(),
-        }
-        dump_json(_default_champion_metadata_path(), metadata)
-        console.print(f"Champion alias published: {champion_path}")
 
 
 @app.command("backtest")
 def backtest(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     model_name: str = DEFAULT_MODEL_NAME,
-    artifacts_dir: Path = Path("artifacts/models/v2"),
+    artifacts_dir: Path = _default_artifacts_dir(),
     bankroll: float = 10_000.0,
     pricing_source: Literal["synthetic", "real_history", "quote_proxy"] = "synthetic",
-    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    panel_path: Path = _default_dataset_path(panel=True),
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
@@ -5106,13 +5120,13 @@ def _publish_model_alias(
 
 @app.command("benchmark-ablations")
 def benchmark_ablations(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
-    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    dataset_path: Path = _default_dataset_path(),
+    panel_path: Path = _default_dataset_path(panel=True),
     model_name: str = "tuned_ensemble",
     variants: Annotated[list[str] | None, typer.Option("--variant")] = None,
     split_policies: Annotated[list[str] | None, typer.Option("--split-policy")] = None,
     seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
-    artifacts_dir: Path = Path("artifacts/models/v2/ablations"),
+    artifacts_dir: Path = _default_artifacts_dir() / "ablations",
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
     leaderboard_output: Path | None = None,
@@ -5221,22 +5235,24 @@ def benchmark_ablations(
 
 @app.command("benchmark-models")
 def benchmark_models(
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
-    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    dataset_path: Path = _default_dataset_path(),
+    panel_path: Path = _default_dataset_path(panel=True),
     models: Annotated[list[str] | None, typer.Option("--model")] = None,
     seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
-    artifacts_dir: Path = Path("artifacts/models/v2"),
+    artifacts_dir: Path = _default_artifacts_dir(),
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
     split_policy: Literal["market_day", "target_day"] = "market_day",
-    publish_champion: bool = True,
-    publish_trading_champion: bool = True,
-    leaderboard_output: Path = Path("artifacts/benchmarks/v2/leaderboard.json"),
-    leaderboard_csv_output: Path = Path("artifacts/benchmarks/v2/leaderboard.csv"),
-    summary_output: Path = Path("artifacts/benchmarks/v2/benchmark_summary.json"),
+    publish_champion: bool = False,
+    leaderboard_output: Path = _default_benchmark_output("leaderboard.json"),
+    leaderboard_csv_output: Path = _default_benchmark_output("leaderboard.csv"),
+    summary_output: Path = _default_benchmark_output("benchmark_summary.json"),
     retrain_stride: int = 30,
 ) -> None:
-    """Benchmark the canonical v2 models and optionally publish the champion alias."""
+    """Benchmark workspace-local candidates without mutating the public champion alias."""
+
+    if publish_champion:
+        raise typer.BadParameter("`benchmark-models` no longer publishes public aliases. Use `uv run pmtmax publish-champion` after the recent-core gate passes.")
 
     config, _ = load_settings()
     frame = pd.read_parquet(dataset_path)
@@ -5295,55 +5311,125 @@ def benchmark_models(
 
     results_frame = pd.DataFrame(rows)
     leaderboard_frame = score_leaderboard(results_frame)
-    trading_scores = score_trading_leaderboard(results_frame)[["model_name", "trading_champion_score"]]
-    leaderboard_frame = leaderboard_frame.merge(trading_scores, on="model_name", how="left")
+    execution_scores = score_execution_candidate_leaderboard(results_frame)[["model_name", "execution_candidate_score"]]
+    leaderboard_frame = leaderboard_frame.merge(execution_scores, on="model_name", how="left")
     champion_name = select_champion(results_frame)
-    trading_champion_name = select_trading_champion(results_frame)
+    execution_candidate_name = select_execution_candidate(results_frame)
     leaderboard_rows = leaderboard_frame.to_dict(orient="records")
     dump_json(leaderboard_output, leaderboard_rows)
     _write_leaderboard_csv(leaderboard_csv_output, leaderboard_rows)
 
-    champion_metadata: dict[str, object] | None = None
-    if publish_champion:
-        champion_metadata = _publish_model_alias(
-            alias_name=DEFAULT_MODEL_NAME,
-            selected_model_name=champion_name,
-            frame=frame,
-            artifacts_dir=artifacts_dir,
-            split_policy=split_policy,
-            seed=benchmark_seeds[0],
-            leaderboard_path=leaderboard_output,
-        )
-    trading_champion_metadata: dict[str, object] | None = None
-    if publish_trading_champion:
-        trading_champion_metadata = _publish_model_alias(
-            alias_name=TRADING_MODEL_ALIAS,
-            selected_model_name=trading_champion_name,
-            frame=frame,
-            artifacts_dir=artifacts_dir,
-            split_policy=split_policy,
-            seed=benchmark_seeds[0],
-            leaderboard_path=leaderboard_output,
-        )
-
     summary = {
         "contract_version": "v2",
         "split_policy": split_policy,
+        "workspace_name": config.app.workspace_name,
+        "dataset_profile": config.app.dataset_profile,
         "candidate_models": ordered_models,
         "supported_models": list(supported_model_names()),
         "seeds": benchmark_seeds,
         "leaderboard_path": str(leaderboard_output),
         "leaderboard_csv_path": str(leaderboard_csv_output),
         "champion_model_name": champion_name,
-        "champion_published": publish_champion,
-        "champion_metadata": champion_metadata,
-        "trading_champion_model_name": trading_champion_name,
-        "trading_champion_published": publish_trading_champion,
-        "trading_champion_metadata": trading_champion_metadata,
+        "champion_published": False,
+        "execution_candidate_model_name": execution_candidate_name,
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     dump_json(summary_output, summary)
     console.print_json(data=summary)
+
+
+@app.command("publish-champion")
+def publish_champion(
+    model_path: Path = typer.Argument(..., help="Workspace-local trained model artifact to publish"),
+    model_name: str | None = typer.Option(None, help="Trainable model family name; inferred from artifact when omitted"),
+    variant: str | None = typer.Option(None, help="Optional model variant label to record in alias metadata"),
+    calibration_path: Path | None = typer.Option(None, help="Optional calibrator path; defaults to sibling .calibrator.pkl"),
+    recent_core_summary_path: Path = typer.Option(
+        _default_benchmark_output("recent_core_benchmark_summary.json"),
+        help="Recent-core benchmark summary JSON with GO decision",
+    ),
+) -> None:
+    """Publish the single public `champion` alias after the recent-core gate passes."""
+
+    model_path = Path(_resolve_option_value(model_path))
+    variant = _resolve_option_value(variant)
+    if not model_path.exists():
+        raise typer.BadParameter(f"Model artifact does not exist: {model_path}")
+    recent_core_summary_path = _resolve_option_value(
+        recent_core_summary_path,
+        _default_benchmark_output("recent_core_benchmark_summary.json"),
+    )
+    if not Path(recent_core_summary_path).exists():
+        raise typer.BadParameter(f"Recent-core summary does not exist: {recent_core_summary_path}")
+
+    summary = load_json(Path(recent_core_summary_path))
+    if not isinstance(summary, dict):
+        raise typer.BadParameter(f"Recent-core summary is malformed: {recent_core_summary_path}")
+    decision = str(summary.get("decision", "INCONCLUSIVE"))
+    decision_reason = str(summary.get("decision_reason", "missing_decision"))
+    reduced_core_candidate = dict(summary.get("reduced_core_candidate", {}))
+    reduced_core_note = ""
+    if (
+        str(reduced_core_candidate.get("decision", "INCONCLUSIVE")) == "GO"
+        and not bool(reduced_core_candidate.get("publish_eligible", False))
+    ):
+        reduced_core_note = " Reduced-core candidate results are diagnostic only and cannot be published."
+    if decision != "GO":
+        raise typer.BadParameter(
+            f"Recent-core gate did not pass ({decision_reason}). Run `scripts/run_recent_core_benchmark_local.sh` and publish only on GO.{reduced_core_note}"
+        )
+
+    sample_adequacy = dict(summary.get("sample_adequacy", {}))
+    if not bool(sample_adequacy.get("passes", False)):
+        raise typer.BadParameter("Recent-core sample adequacy did not pass.")
+    city_gate_details = dict(summary.get("city_gate_details", {}))
+    failing_cities = [city for city, details in city_gate_details.items() if not bool(dict(details).get("passes", False))]
+    if failing_cities:
+        raise typer.BadParameter(
+            f"Recent-core city gates failed for: {', '.join(sorted(failing_cities))}."
+        )
+
+    resolved_model_name = require_supported_model_name(
+        _resolve_option_value(model_name, _infer_model_name_from_artifact(model_path))
+    )
+    if variant is None and model_path.stem.startswith(f"{resolved_model_name}__"):
+        variant = model_path.stem.split("__", 1)[1]
+    source_calibration_path = _resolve_option_value(calibration_path)
+    if source_calibration_path is None:
+        source_calibration_path = _artifact_calibration_path(model_path)
+    source_calibration_path = Path(source_calibration_path)
+    if not source_calibration_path.exists():
+        raise typer.BadParameter(
+            f"Calibrator artifact does not exist: {source_calibration_path}. Champion publish requires a calibrator."
+        )
+
+    config, _ = load_settings()
+    metadata = _publish_existing_model_alias(
+        alias_name=DEFAULT_MODEL_NAME,
+        model_name=resolved_model_name,
+        variant=variant,
+        source_model_path=model_path,
+        source_calibration_path=source_calibration_path,
+        leaderboard_path=Path(recent_core_summary_path),
+    )
+    metadata.update(
+        {
+            "workspace_name": config.app.workspace_name,
+            "dataset_profile": config.app.dataset_profile,
+            "publish_gate": {
+                "decision": decision,
+                "decision_reason": decision_reason,
+                "sample_adequacy": sample_adequacy,
+                "city_gate_details": city_gate_details,
+                "aggregate_policy_real_history_metrics": dict(summary.get("aggregate_policy_real_history_metrics", {})),
+                "aggregate_policy_quote_proxy_metrics": dict(summary.get("aggregate_policy_quote_proxy_metrics", {})),
+                "aggregate_panel_coverage": dict(summary.get("aggregate_panel_coverage", {})),
+                "recent_core_summary_path": str(recent_core_summary_path),
+            },
+        }
+    )
+    dump_json(_default_alias_metadata_path(DEFAULT_MODEL_NAME), metadata)
+    console.print_json(data=metadata)
 
 
 def _quick_eval_deltas(
@@ -5410,8 +5496,8 @@ def _paper_overall_gate_decision(
 @app.command("autoresearch-init")
 def autoresearch_init(
     run_tag: str | None = None,
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
-    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    dataset_path: Path = _default_dataset_path(),
+    panel_path: Path = _default_dataset_path(panel=True),
     baseline_variant: str = "recency_neighbor_oof",
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
     force: bool = False,
@@ -5419,8 +5505,8 @@ def autoresearch_init(
     """Create one autoresearch run scaffold plus the shared program.md."""
 
     run_tag = str(_resolve_option_value(run_tag, default_autoresearch_run_tag()))
-    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
-    panel_path = _resolve_option_value(panel_path, Path("data/parquet/gold/v2/historical_backtest_panel.parquet"))
+    dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
+    panel_path = _resolve_option_value(panel_path, _default_dataset_path(panel=True))
     baseline_variant = str(_resolve_option_value(baseline_variant, "recency_neighbor_oof"))
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     force = bool(_resolve_option_value(force, False))
@@ -5445,7 +5531,6 @@ def autoresearch_init(
         panel_signature=path_signature(panel_path),
         created_at=datetime.now(tz=UTC),
         current_champion_variant=_current_alias_variant(DEFAULT_MODEL_NAME),
-        current_trading_variant=_current_alias_variant(TRADING_MODEL_ALIAS),
     )
     dump_json(autoresearch_manifest_path(run_tag, root_dir=root_dir), manifest.model_dump(mode="json"))
     autoresearch_program_path(run_tag, root_dir=root_dir).write_text(render_autoresearch_program(manifest))
@@ -5460,13 +5545,13 @@ def autoresearch_init(
 @app.command("autoresearch-step")
 def autoresearch_step(
     spec_path: Path,
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
 ) -> None:
     """Train one candidate spec, run quick eval, and append keep/discard/crash to the ledger."""
 
     spec_path = _resolve_option_value(spec_path)
-    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     spec = load_lgbm_autoresearch_spec(spec_path)
     manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
@@ -5545,8 +5630,8 @@ def autoresearch_step(
 @app.command("autoresearch-gate")
 def autoresearch_gate(
     spec_path: Path,
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
-    panel_path: Path = Path("data/parquet/gold/v2/historical_backtest_panel.parquet"),
+    dataset_path: Path = _default_dataset_path(),
+    panel_path: Path = _default_dataset_path(panel=True),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
     split_policies: Annotated[list[str] | None, typer.Option("--split-policy")] = None,
     seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
@@ -5556,8 +5641,8 @@ def autoresearch_gate(
     """Run grouped-holdout benchmark gates for one baseline/candidate pair."""
 
     spec_path = _resolve_option_value(spec_path)
-    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
-    panel_path = _resolve_option_value(panel_path, Path("data/parquet/gold/v2/historical_backtest_panel.parquet"))
+    dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
+    panel_path = _resolve_option_value(panel_path, _default_dataset_path(panel=True))
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     split_policies = _resolve_option_value(split_policies)
     seeds = _resolve_option_value(seeds)
@@ -5672,13 +5757,13 @@ def autoresearch_gate(
 @app.command("autoresearch-analyze-paper")
 def autoresearch_analyze_paper(
     spec_path: Path,
-    dataset_path: Path = Path("data/parquet/gold/v2/historical_training_set.parquet"),
+    dataset_path: Path = _default_dataset_path(),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
 ) -> None:
     """Run paper and live-shadow diagnostics for one autoresearch candidate artifact."""
 
     spec_path = _resolve_option_value(spec_path)
-    dataset_path = _resolve_option_value(dataset_path, Path("data/parquet/gold/v2/historical_training_set.parquet"))
+    dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     spec = load_lgbm_autoresearch_spec(spec_path)
     manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
@@ -5799,7 +5884,6 @@ def autoresearch_promote(
     spec_path: Path,
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
     publish_champion: bool = False,
-    publish_trading_champion: bool = False,
     force: bool = False,
 ) -> None:
     """Promote one gated candidate into the persistent promoted-spec registry."""
@@ -5807,8 +5891,11 @@ def autoresearch_promote(
     spec_path = _resolve_option_value(spec_path)
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     publish_champion = bool(_resolve_option_value(publish_champion, False))
-    publish_trading_champion = bool(_resolve_option_value(publish_trading_champion, False))
     force = bool(_resolve_option_value(force, False))
+    if publish_champion:
+        raise typer.BadParameter(
+            "`autoresearch-promote` no longer publishes public aliases. Promote the YAML only, then run `uv run pmtmax publish-champion` after recent-core validation."
+        )
     spec = load_lgbm_autoresearch_spec(spec_path)
 
     gate_summary_path = autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"gate_summary__{spec.candidate_name}.json"
@@ -5837,32 +5924,12 @@ def autoresearch_promote(
     model_path = autoresearch_models_dir(spec.run_tag, root_dir=root_dir) / f"lgbm_emos__{spec.candidate_name}.pkl"
     if not model_path.exists():
         raise typer.BadParameter(f"Candidate artifact does not exist: {model_path}")
-    calibration_path = _artifact_calibration_path(model_path)
-    published: dict[str, object] = {}
-    if publish_champion:
-        published["champion"] = _publish_existing_model_alias(
-            alias_name=DEFAULT_MODEL_NAME,
-            model_name="lgbm_emos",
-            variant=spec.candidate_name,
-            source_model_path=model_path,
-            source_calibration_path=calibration_path if calibration_path.exists() else None,
-            leaderboard_path=gate_summary_path,
-        )
-    if publish_trading_champion:
-        published["trading_champion"] = _publish_existing_model_alias(
-            alias_name=TRADING_MODEL_ALIAS,
-            model_name="lgbm_emos",
-            variant=spec.candidate_name,
-            source_model_path=model_path,
-            source_calibration_path=calibration_path if calibration_path.exists() else None,
-            leaderboard_path=gate_summary_path,
-        )
 
     summary = {
         "run_tag": spec.run_tag,
         "candidate_name": spec.candidate_name,
         "promoted_spec_path": str(target_path),
-        "published_aliases": published,
+        "published_aliases": {},
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     dump_json(
@@ -5910,23 +5977,23 @@ def revenue_gate_report(
         help="Recent-core benchmark summary JSON",
     ),
     opportunity_summary_path: Path = typer.Option(
-        Path("artifacts/signals/v2/shadow_summary.json"),
+        _default_signal_output("shadow_summary.json"),
         help="Opportunity shadow summary JSON",
     ),
     open_phase_summary_path: Path = typer.Option(
-        Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
+        _default_signal_output("open_phase_shadow_summary.json"),
         help="Open-phase shadow summary JSON",
     ),
     observation_summary_path: Path = typer.Option(
-        Path("artifacts/signals/v2/observation_shadow_summary.json"),
+        _default_signal_output("observation_shadow_summary.json"),
         help="Observation-station shadow summary JSON",
     ),
     output: Path = typer.Option(
-        Path("artifacts/signals/v2/revenue_gate_summary.json"),
+        _default_signal_output("revenue_gate_summary.json"),
         help="Combined revenue gate JSON output",
     ),
-    trading_alias_name: str = typer.Option(
-        TRADING_MODEL_ALIAS,
+    required_model_alias: str = typer.Option(
+        DEFAULT_MODEL_NAME,
         help="Required model alias for live pilot promotion",
     ),
     market_scope: str = typer.Option(
@@ -5939,21 +6006,21 @@ def revenue_gate_report(
     benchmark_summary_path = _resolve_option_value(benchmark_summary_path, DEFAULT_BENCHMARK_SUMMARY_PATH)
     opportunity_summary_path = _resolve_option_value(
         opportunity_summary_path,
-        Path("artifacts/signals/v2/shadow_summary.json"),
+        _default_signal_output("shadow_summary.json"),
     )
     open_phase_summary_path = _resolve_option_value(
         open_phase_summary_path,
-        Path("artifacts/signals/v2/open_phase_shadow_summary.json"),
+        _default_signal_output("open_phase_shadow_summary.json"),
     )
     observation_summary_path = _resolve_option_value(
         observation_summary_path,
-        Path("artifacts/signals/v2/observation_shadow_summary.json"),
+        _default_signal_output("observation_shadow_summary.json"),
     )
-    output = _resolve_option_value(output, Path("artifacts/signals/v2/revenue_gate_summary.json"))
-    trading_alias_name = _resolve_option_value(trading_alias_name, TRADING_MODEL_ALIAS)
+    output = _resolve_option_value(output, _default_signal_output("revenue_gate_summary.json"))
+    required_model_alias = _resolve_option_value(required_model_alias, DEFAULT_MODEL_NAME)
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "recent_core"), core_recent_only=False)
-    if market_scope == "supported_wu_open_phase" and open_phase_summary_path == Path(
-        "artifacts/signals/v2/open_phase_shadow_summary.json"
+    if market_scope == "supported_wu_open_phase" and open_phase_summary_path == _default_signal_output(
+        "open_phase_shadow_summary.json"
     ):
         open_phase_summary_path = _default_signal_output("hope_hunt_summary.json")
     benchmark_summary = _load_optional_json(benchmark_summary_path)
@@ -5965,7 +6032,7 @@ def revenue_gate_report(
         opportunity_summary=opportunity_summary,
         open_phase_summary=open_phase_summary,
         observation_summary=observation_summary,
-        trading_alias_name=trading_alias_name,
+        required_model_alias=required_model_alias,
         pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
         market_scope=market_scope,
     )
@@ -6301,7 +6368,7 @@ def _run_station_cycle(
             opportunity_summary=_load_optional_json(opportunity_shadow_summary_path),
             open_phase_summary=_load_optional_json(open_phase_summary_path),
             observation_summary=_load_optional_json(observation_summary_path),
-            trading_alias_name=TRADING_MODEL_ALIAS,
+            required_model_alias=DEFAULT_MODEL_NAME,
             pilot_constraints=DEFAULT_PILOT_CONSTRAINTS,
             market_scope=market_scope,
         )
@@ -6465,8 +6532,8 @@ def station_dashboard_daemon(
 
 @app.command("station-cycle")
 def station_cycle(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     market_scope: str = typer.Option("default", help="Market scope preset"),
@@ -6500,8 +6567,8 @@ def station_cycle(
     observation_config = config.observation_station
     orchestrator_config = config.station_orchestrator
     summary = _run_station_cycle(
-        model_path=_resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl")),
-        model_name=_resolve_option_value(model_name, TRADING_MODEL_ALIAS),
+        model_path=_resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME)),
+        model_name=_resolve_option_value(model_name, DEFAULT_MODEL_NAME),
         cities=_resolve_option_value(cities),
         core_recent_only=bool(_resolve_option_value(core_recent_only, False)),
         market_scope=_resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only),
@@ -6540,8 +6607,8 @@ def station_cycle(
 
 @app.command("station-daemon")
 def station_daemon(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     market_scope: str = typer.Option("default", help="Market scope preset"),
@@ -6582,8 +6649,8 @@ def station_daemon(
     effective_interval = _resolve_option_value(interval, orchestrator_config.interval_seconds)
     effective_max_cycles = _resolve_option_value(max_cycles, orchestrator_config.max_cycles) or 0
     effective_state_path = _path_or_default(state_path, orchestrator_config.state_path)
-    resolved_model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    resolved_model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    resolved_model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    resolved_model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     resolved_cities = _resolve_option_value(cities)
     resolved_core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     resolved_market_scope = _resolve_market_scope(
@@ -6782,8 +6849,8 @@ def _build_observation_station_runner(
 
 @app.command("observation-report")
 def observation_report(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     market_scope: str = typer.Option("default", help="Market scope preset"),
@@ -6801,8 +6868,8 @@ def observation_report(
 ) -> None:
     """Generate one observation-driven opportunity snapshot across active markets."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
@@ -6920,8 +6987,8 @@ def observation_report(
 
 @app.command("observation-shadow")
 def observation_shadow(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
     market_scope: str = typer.Option("default", help="Market scope preset"),
@@ -6943,8 +7010,8 @@ def observation_shadow(
 ) -> None:
     """Continuously validate observation-driven edges without posting orders."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=core_recent_only)
@@ -6997,8 +7064,8 @@ def observation_shadow(
 
 @app.command("observation-daemon")
 def observation_daemon(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     market_scope: str = typer.Option("default", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
@@ -7032,10 +7099,10 @@ def observation_daemon(
 @app.command("approve-live-candidate")
 def approve_live_candidate(
     manual_approval_token: str = typer.Argument(..., help="Manual approval token from live_pilot_queue.json"),
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     queue_path: Path = typer.Option(
-        Path("artifacts/signals/v2/live_pilot_queue.json"),
+        _default_signal_output("live_pilot_queue.json"),
         help="Manual approval queue JSON path",
     ),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
@@ -7046,9 +7113,9 @@ def approve_live_candidate(
     """Revalidate one queued observation candidate and create a live order preview."""
 
     manual_approval_token = str(_resolve_option_value(manual_approval_token))
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
-    queue_path = _resolve_option_value(queue_path, Path("artifacts/signals/v2/live_pilot_queue.json"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
+    queue_path = _resolve_option_value(queue_path, _default_signal_output("live_pilot_queue.json"))
     markets_path = _resolve_option_value(markets_path)
     market_scope = _resolve_market_scope(_resolve_option_value(market_scope, "default"), core_recent_only=False)
     dry_run = bool(_resolve_option_value(dry_run, True))
@@ -7184,7 +7251,7 @@ def approve_live_candidate(
 
 @app.command("paper-trader")
 def paper_trader(
-    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_path: Path = _default_model_path(DEFAULT_MODEL_NAME),
     model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
@@ -7204,11 +7271,11 @@ def paper_trader(
     max_city_exposure: float | None = typer.Option(None, help="Max notional per city (default: config value $500). Scale down with bankroll, e.g. --max-city-exposure 30 for $200 bankroll."),
     global_max_exposure: float | None = typer.Option(None, help="Max total notional across all cities (default: config value $2000). Set to bankroll for full deployment, e.g. --global-max-exposure 200."),
     kelly_cap: float = typer.Option(0.05, help="Kelly fraction cap per trade (default 0.05 = flat 5%%). Use 0.30 for proportional portfolio sizing — high-edge trades get more capital, normalized to bankroll total."),
-    output: Path = Path("artifacts/signals/v2/paper_signals.json"),
+    output: Path = _default_signal_output("paper_signals.json"),
 ) -> None:
     """Run paper trading over active discovered markets or bundled history."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     markets_path = _resolve_option_value(markets_path)
     cities = _resolve_option_value(cities)
@@ -7225,7 +7292,7 @@ def paper_trader(
     max_city_exposure = _resolve_option_value(max_city_exposure)
     global_max_exposure = _resolve_option_value(global_max_exposure)
     kelly_cap = float(_resolve_option_value(kelly_cap, 0.05))
-    output = _resolve_option_value(output, Path("artifacts/signals/v2/paper_signals.json"))
+    output = _resolve_option_value(output, _default_signal_output("paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
@@ -7439,7 +7506,7 @@ def paper_multimodel_report(
 
 @app.command("execution-sensitivity-report")
 def execution_sensitivity_report(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
@@ -7459,7 +7526,7 @@ def execution_sensitivity_report(
 ) -> None:
     """Sweep paper-only execution thresholds and horizon policies without touching live guards."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     markets_path = _resolve_option_value(markets_path)
     cities = _resolve_option_value(cities)
@@ -7981,17 +8048,17 @@ def _render_execution_watchlist_playbook_markdown(playbook: Mapping[str, object]
 
 @app.command("market-bottleneck-report")
 def market_bottleneck_report(
-    input_path: Path = typer.Option(Path("artifacts/signals/v2/paper_signals.json"), help="Row-oriented report JSON or JSONL"),
+    input_path: Path = typer.Option(_default_signal_output("paper_signals.json"), help="Row-oriented report JSON or JSONL"),
     opportunity_summary_path: Path | None = typer.Option(None, help="Opportunity shadow summary JSON"),
     observation_summary_path: Path | None = typer.Option(None, help="Observation shadow summary JSON"),
-    output: Path = typer.Option(Path("artifacts/signals/v2/market_bottleneck_report.json"), help="Output JSON"),
+    output: Path = typer.Option(_default_signal_output("market_bottleneck_report.json"), help="Output JSON"),
 ) -> None:
     """Summarize the dominant blockers for one paper/opportunity/observation result set."""
 
-    input_path = _resolve_option_value(input_path, Path("artifacts/signals/v2/paper_signals.json"))
+    input_path = _resolve_option_value(input_path, _default_signal_output("paper_signals.json"))
     opportunity_summary_path = _resolve_option_value(opportunity_summary_path)
     observation_summary_path = _resolve_option_value(observation_summary_path)
-    output = _resolve_option_value(output, Path("artifacts/signals/v2/market_bottleneck_report.json"))
+    output = _resolve_option_value(output, _default_signal_output("market_bottleneck_report.json"))
 
     rows = _load_report_rows(input_path)
     summary = _summarize_result_rows(rows)
@@ -8019,11 +8086,11 @@ def market_bottleneck_report(
 @app.command("execution-watchlist-playbook")
 def execution_watchlist_playbook(
     champion_bottleneck_path: Path = typer.Option(
-        Path("artifacts/signals/v2/market_bottleneck_report__champion_alias.json"),
+        _default_signal_output("market_bottleneck_report__champion_alias.json"),
         help="Champion market-bottleneck-report JSON",
     ),
     challenger_bottleneck_path: Path = typer.Option(
-        Path("artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json"),
+        _default_signal_output("market_bottleneck_report__mega_neighbor_oof.json"),
         help="Challenger market-bottleneck-report JSON",
     ),
     fee_watchlist_summary_path: Path = typer.Option(
@@ -8051,11 +8118,11 @@ def execution_watchlist_playbook(
 
     champion_bottleneck_path = _resolve_option_value(
         champion_bottleneck_path,
-        Path("artifacts/signals/v2/market_bottleneck_report__champion_alias.json"),
+        _default_signal_output("market_bottleneck_report__champion_alias.json"),
     )
     challenger_bottleneck_path = _resolve_option_value(
         challenger_bottleneck_path,
-        Path("artifacts/signals/v2/market_bottleneck_report__mega_neighbor_oof.json"),
+        _default_signal_output("market_bottleneck_report__mega_neighbor_oof.json"),
     )
     fee_watchlist_summary_path = _resolve_option_value(fee_watchlist_summary_path)
     policy_watchlist_summary_path = _resolve_option_value(policy_watchlist_summary_path)
@@ -8103,7 +8170,7 @@ def execution_watchlist_playbook(
 
 @app.command("live-trader")
 def live_trader(
-    model_path: Path = Path("artifacts/models/v2/champion.pkl"),
+    model_path: Path = _default_model_path(DEFAULT_MODEL_NAME),
     model_name: str = DEFAULT_MODEL_NAME,
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
@@ -8114,7 +8181,7 @@ def live_trader(
 ) -> None:
     """Run live preflight and signed-order previews, with optional posting."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     markets_path = _resolve_option_value(markets_path)
     cities = _resolve_option_value(cities)
@@ -8243,7 +8310,7 @@ def live_trader(
 def collect_l2(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
-    output: Path = Path("artifacts/l2_snapshot.json"),
+    output: Path = _default_artifacts_root() / "l2_snapshot.json",
 ) -> None:
     """Archive one current book snapshot for discovered active markets."""
 
@@ -8534,7 +8601,7 @@ def monitor_l2(
 @app.command("analyze-l2")
 def analyze_l2(
     data_dir: Path = typer.Option(Path("data/l2_timeseries"), help="L2 data directory"),
-    output: Path = typer.Option(Path("artifacts/l2_analysis.json"), help="Output analysis JSON"),
+    output: Path = typer.Option(_default_artifacts_root() / "l2_analysis.json", help="Output analysis JSON"),
 ) -> None:
     """Analyze collected L2 time-series data by hours-to-settlement buckets."""
 
@@ -8574,14 +8641,14 @@ def analyze_l2(
 
 @app.command("forecast-report")
 def forecast_report(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
     horizon: str = typer.Option("morning_of", help="Forecast horizon"),
     telegram: bool = typer.Option(False, help="Send to Telegram"),
     firebase: bool = typer.Option(False, help="Publish to Firebase"),
-    output: Path = typer.Option(Path("artifacts/forecast_report.json"), help="Output JSON"),
+    output: Path = typer.Option(_default_artifacts_root() / "forecast_report.json", help="Output JSON"),
 ) -> None:
     """Generate a one-shot forecast report with optional Telegram/Firebase delivery."""
 
@@ -8648,7 +8715,7 @@ def forecast_report(
 
 @app.command("opportunity-report")
 def opportunity_report(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
@@ -8660,11 +8727,11 @@ def opportunity_report(
         help="City-level horizon policy YAML",
     ),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
-    output: Path = typer.Option(Path("artifacts/signals/v2/opportunity_report.json"), help="Output JSON"),
+    output: Path = typer.Option(_default_signal_output("opportunity_report.json"), help="Output JSON"),
 ) -> None:
     """Generate a one-shot active-market opportunity report with explicit book status."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
@@ -8673,7 +8740,7 @@ def opportunity_report(
     horizon = _resolve_option_value(horizon, "policy")
     horizon_policy_path = _resolve_option_value(horizon_policy_path, DEFAULT_RECENT_HORIZON_POLICY_PATH)
     min_edge = _resolve_option_value(min_edge)
-    output = _resolve_option_value(output, Path("artifacts/signals/v2/opportunity_report.json"))
+    output = _resolve_option_value(output, _default_signal_output("opportunity_report.json"))
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
@@ -8766,7 +8833,7 @@ def opportunity_report(
 
 @app.command("opportunity-shadow")
 def opportunity_shadow(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
@@ -8786,7 +8853,7 @@ def opportunity_shadow(
 ) -> None:
     """Continuously validate whether the live opportunity path ever becomes tradable."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
@@ -8900,7 +8967,7 @@ def opportunity_shadow(
 
 @app.command("open-phase-shadow")
 def open_phase_shadow(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     core_recent_only: bool = typer.Option(False, help="Restrict to Seoul/NYC/London recent-core cities"),
@@ -8911,14 +8978,14 @@ def open_phase_shadow(
     open_window_hours: float = typer.Option(24.0, help="Only include markets opened within this many hours"),
     horizon: str = typer.Option("market_open", help="Forecast horizon for open-phase evaluation"),
     min_edge: float | None = typer.Option(None, help="Minimum edge threshold override"),
-    output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow.jsonl"), help="Append-only JSONL output"),
-    latest_output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_latest.json"), help="Latest cycle JSON output"),
-    summary_output: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_summary.json"), help="Summary JSON output"),
-    state_path: Path = typer.Option(Path("artifacts/signals/v2/open_phase_shadow_state.json"), help="State JSON path"),
+    output: Path = typer.Option(_default_signal_output("open_phase_shadow.jsonl"), help="Append-only JSONL output"),
+    latest_output: Path = typer.Option(_default_signal_output("open_phase_shadow_latest.json"), help="Latest cycle JSON output"),
+    summary_output: Path = typer.Option(_default_signal_output("open_phase_shadow_summary.json"), help="Summary JSON output"),
+    state_path: Path = typer.Option(_default_signal_output("open_phase_shadow_state.json"), help="State JSON path"),
 ) -> None:
     """Continuously watch newly listed markets and score them at listing/open phase."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/champion.pkl"))
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
     model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     core_recent_only = bool(_resolve_option_value(core_recent_only, False))
@@ -8929,10 +8996,10 @@ def open_phase_shadow(
     open_window_hours = float(_resolve_option_value(open_window_hours, 24.0))
     horizon = _resolve_option_value(horizon, "market_open")
     min_edge = _resolve_option_value(min_edge)
-    output = _resolve_option_value(output, Path("artifacts/signals/v2/open_phase_shadow.jsonl"))
-    latest_output = _resolve_option_value(latest_output, Path("artifacts/signals/v2/open_phase_shadow_latest.json"))
-    summary_output = _resolve_option_value(summary_output, Path("artifacts/signals/v2/open_phase_shadow_summary.json"))
-    state_path = _resolve_option_value(state_path, Path("artifacts/signals/v2/open_phase_shadow_state.json"))
+    output = _resolve_option_value(output, _default_signal_output("open_phase_shadow.jsonl"))
+    latest_output = _resolve_option_value(latest_output, _default_signal_output("open_phase_shadow_latest.json"))
+    summary_output = _resolve_option_value(summary_output, _default_signal_output("open_phase_shadow_summary.json"))
+    state_path = _resolve_option_value(state_path, _default_signal_output("open_phase_shadow_state.json"))
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
@@ -9041,8 +9108,8 @@ def open_phase_shadow(
 
 @app.command("hope-hunt-report")
 def hope_hunt_report(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     market_scope: str = typer.Option("supported_wu_open_phase", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
@@ -9054,8 +9121,8 @@ def hope_hunt_report(
 ) -> None:
     """Generate one ranked hope-hunt snapshot across supported WU-family active markets."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     market_scope = _resolve_market_scope(
         _resolve_option_value(market_scope, "supported_wu_open_phase"),
@@ -9128,8 +9195,8 @@ def hope_hunt_report(
 
 @app.command("hope-hunt-daemon")
 def hope_hunt_daemon(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/trading_champion.pkl"), help="Model artifact path"),
-    model_name: str = typer.Option(TRADING_MODEL_ALIAS, help="Model name"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
+    model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     market_scope: str = typer.Option("supported_wu_open_phase", help="Market scope preset"),
     markets_path: Path | None = typer.Option(None, help="Offline JSON snapshot file"),
@@ -9144,8 +9211,8 @@ def hope_hunt_daemon(
 ) -> None:
     """Continuously score open-phase hope candidates without placing orders."""
 
-    model_path = _resolve_option_value(model_path, Path("artifacts/models/v2/trading_champion.pkl"))
-    model_name = _resolve_option_value(model_name, TRADING_MODEL_ALIAS)
+    model_path = _resolve_option_value(model_path, _default_model_path(DEFAULT_MODEL_NAME))
+    model_name = _resolve_option_value(model_name, DEFAULT_MODEL_NAME)
     cities = _resolve_option_value(cities)
     market_scope = _resolve_market_scope(
         _resolve_option_value(market_scope, "supported_wu_open_phase"),
@@ -9203,7 +9270,7 @@ def hope_hunt_daemon(
 
 @app.command("forecast-daemon")
 def forecast_daemon(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     interval: int = typer.Option(21600, help="Seconds between forecast cycles (default 6h)"),
     max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),
@@ -9246,7 +9313,7 @@ def forecast_daemon(
             summaries = build_forecast_summaries(snapshots, model_path, resolved_model_name, clob, builder, horizon=horizon)
 
             payload = [s.model_dump(mode="json") for s in summaries]
-            out = Path("artifacts/forecast_report.json")
+            out = _default_artifacts_root() / "forecast_report.json"
             dump_json(out, payload)
             console.print(f"Cycle {cycle}: {len(summaries)} forecasts → {out}")
 
@@ -9285,7 +9352,7 @@ def forecast_daemon(
 
 @app.command("paper-mm")
 def paper_mm(
-    model_path: Path = typer.Option(Path("artifacts/models/v2/champion.pkl"), help="Model artifact path"),
+    model_path: Path = typer.Option(_default_model_path(DEFAULT_MODEL_NAME), help="Model artifact path"),
     model_name: str = typer.Option(DEFAULT_MODEL_NAME, help="Model name"),
     interval: int = typer.Option(60, help="Seconds between MM cycles"),
     max_cycles: int = typer.Option(0, help="Max cycles (0 = infinite)"),

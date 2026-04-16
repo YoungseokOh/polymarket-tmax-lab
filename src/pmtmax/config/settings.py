@@ -16,6 +16,8 @@ class AppConfig(BaseModel):
     env: Literal["research", "paper", "live"] = "research"
     random_seed: int = 42
     supported_cities: list[str] = Field(default_factory=catalog_supported_cities)
+    workspace_name: str = "default"
+    dataset_profile: Literal["real_market", "synthetic"] = "real_market"
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")
@@ -24,6 +26,8 @@ class AppConfig(BaseModel):
     archive_dir: Path = Path("data/archive")
     manifest_dir: Path = Path("data/manifests")
     duckdb_path: Path = Path("data/duckdb/warehouse.duckdb")
+    artifacts_dir: Path = Path("artifacts")
+    public_model_dir: Path = Path("artifacts/public_models")
     llm_rule_parser: bool = False
 
 
@@ -198,6 +202,8 @@ class EnvSettings(BaseSettings):
 
     env: str = "research"
     config: Path = Path("configs/research.yaml")
+    workspace_name: str = "default"
+    dataset_profile: Literal["real_market", "synthetic"] = "real_market"
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")
@@ -206,6 +212,8 @@ class EnvSettings(BaseSettings):
     manifest_dir: Path = Path("data/manifests")
     duckdb_path: Path = Path("data/duckdb/warehouse.duckdb")
     parquet_dir: Path = Path("data/parquet")
+    artifacts_dir: Path = Path("artifacts")
+    public_model_dir: Path = Path("artifacts/public_models")
     log_level: str = "INFO"
     random_seed: int = 42
     live_trading: bool = False
@@ -233,6 +241,18 @@ class EnvSettings(BaseSettings):
     telegram_chat_id: str = ""
 
 
+def _rebase_rooted_path(path: Path, *, source_root: str, target_root: Path) -> Path:
+    """Move one repo-relative rooted path under a workspace-specific root."""
+
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if not parts or parts[0] != source_root:
+        return path
+    relative = Path(*parts[1:]) if len(parts) > 1 else Path()
+    return target_root / relative
+
+
 def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSettings]:
     """Load layered repo config plus environment settings."""
 
@@ -241,6 +261,8 @@ def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSetti
     payload = load_yaml_with_extends(final_config_path)
     config = RepoConfig.model_validate(payload)
 
+    config.app.workspace_name = env.workspace_name
+    config.app.dataset_profile = env.dataset_profile
     config.app.data_dir = env.data_dir
     config.app.cache_dir = env.cache_dir
     config.app.raw_dir = env.raw_dir
@@ -249,6 +271,8 @@ def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSetti
     config.app.manifest_dir = env.manifest_dir
     config.app.duckdb_path = env.duckdb_path
     config.app.parquet_dir = env.parquet_dir
+    config.app.artifacts_dir = env.artifacts_dir
+    config.app.public_model_dir = env.public_model_dir
     config.app.llm_rule_parser = env.llm_rule_parser or config.app.llm_rule_parser
     config.app.random_seed = env.random_seed
     config.polymarket.gamma_base_url = env.poly_host
@@ -267,4 +291,137 @@ def load_settings(config_path: Path | None = None) -> tuple[RepoConfig, EnvSetti
     config.telegram.chat_id = env.telegram_chat_id or config.telegram.chat_id
     if config.telegram.bot_token and config.telegram.chat_id:
         config.telegram.enabled = True
+
+    config.scanner.state_path = _rebase_rooted_path(config.scanner.state_path, source_root="artifacts", target_root=env.artifacts_dir)
+    config.opportunity_shadow.state_path = _rebase_rooted_path(
+        config.opportunity_shadow.state_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.opportunity_shadow.latest_output_path = _rebase_rooted_path(
+        config.opportunity_shadow.latest_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.opportunity_shadow.history_output_path = _rebase_rooted_path(
+        config.opportunity_shadow.history_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.opportunity_shadow.summary_output_path = _rebase_rooted_path(
+        config.opportunity_shadow.summary_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.hope_hunt.state_path = _rebase_rooted_path(config.hope_hunt.state_path, source_root="artifacts", target_root=env.artifacts_dir)
+    config.hope_hunt.latest_output_path = _rebase_rooted_path(
+        config.hope_hunt.latest_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.hope_hunt.history_output_path = _rebase_rooted_path(
+        config.hope_hunt.history_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.hope_hunt.summary_output_path = _rebase_rooted_path(
+        config.hope_hunt.summary_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.state_path = _rebase_rooted_path(
+        config.observation_station.state_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.latest_output_path = _rebase_rooted_path(
+        config.observation_station.latest_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.history_output_path = _rebase_rooted_path(
+        config.observation_station.history_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.summary_output_path = _rebase_rooted_path(
+        config.observation_station.summary_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.alerts_output_path = _rebase_rooted_path(
+        config.observation_station.alerts_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.observation_station.queue_output_path = _rebase_rooted_path(
+        config.observation_station.queue_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.opportunity_report_path = _rebase_rooted_path(
+        config.station_dashboard.opportunity_report_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.observation_latest_path = _rebase_rooted_path(
+        config.station_dashboard.observation_latest_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.observation_summary_path = _rebase_rooted_path(
+        config.station_dashboard.observation_summary_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.queue_output_path = _rebase_rooted_path(
+        config.station_dashboard.queue_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.open_phase_latest_path = _rebase_rooted_path(
+        config.station_dashboard.open_phase_latest_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.open_phase_summary_path = _rebase_rooted_path(
+        config.station_dashboard.open_phase_summary_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.revenue_gate_summary_path = _rebase_rooted_path(
+        config.station_dashboard.revenue_gate_summary_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.watchlist_playbook_path = _rebase_rooted_path(
+        config.station_dashboard.watchlist_playbook_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.json_output_path = _rebase_rooted_path(
+        config.station_dashboard.json_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.html_output_path = _rebase_rooted_path(
+        config.station_dashboard.html_output_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_dashboard.state_path = _rebase_rooted_path(
+        config.station_dashboard.state_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.station_orchestrator.state_path = _rebase_rooted_path(
+        config.station_orchestrator.state_path,
+        source_root="artifacts",
+        target_root=env.artifacts_dir,
+    )
+    config.monitoring.l2_output_dir = _rebase_rooted_path(
+        config.monitoring.l2_output_dir,
+        source_root="data",
+        target_root=env.data_dir,
+    )
     return config, env

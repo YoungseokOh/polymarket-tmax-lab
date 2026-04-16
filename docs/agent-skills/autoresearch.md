@@ -15,20 +15,20 @@
 
 ## Workflow
 ```bash
-uv run pmtmax autoresearch-init
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-init
 
-# edit one YAML candidate under artifacts/autoresearch/<run_tag>/candidates/
-uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-gate --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+# edit one YAML candidate under artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-step --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-gate --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace research_synth uv run pmtmax autoresearch-promote --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
 ```
 
 `scripts/autoresearch.sh` is a thin wrapper around the same CLI:
 
 ```bash
 bash scripts/autoresearch.sh init
-bash scripts/autoresearch.sh step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+bash scripts/autoresearch.sh step --spec-path artifacts/workspaces/research_synth/autoresearch/<run_tag>/candidates/my_candidate.yaml
 ```
 
 ## Candidate Spec
@@ -74,10 +74,10 @@ Champion is selected by **paper-trading win rate + PnL**, NOT CRPS alone.
 - benchmark gate compares candidate vs baseline on grouped holdout under both `market_day` and `target_day`
 - paper analysis uses direct candidate `--model-path`, not public aliases
 - promotion copies the winning YAML into `configs/autoresearch/lgbm_emos/promoted/`
-- alias publish is explicit and optional
+- public alias publish is explicit and handled by `publish-champion` only
 
 ## Safety Rules
 - do not rewrite canonical `historical_training_set*` / `historical_backtest_panel`
-- do not rewrite `champion` / `trading_champion` during quick research loops
+- do not rewrite the public `champion` alias during quick research loops
 - prefer one small candidate YAML change over broad registry edits
 - if a promoted YAML exists, it becomes a supported `--variant` for later runs

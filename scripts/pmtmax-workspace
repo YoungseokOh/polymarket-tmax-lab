@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [[ $# -lt 2 ]]; then
+  echo "usage: scripts/pmtmax-workspace <ops_daily|historical_real|research_synth|recent_core_eval> <command...>" >&2
+  exit 2
+fi
+
+WORKSPACE="$1"
+shift
+
+case "${WORKSPACE}" in
+  ops_daily|historical_real|recent_core_eval)
+    DATASET_PROFILE="real_market"
+    ;;
+  research_synth)
+    DATASET_PROFILE="synthetic"
+    ;;
+  *)
+    echo "unknown workspace: ${WORKSPACE}" >&2
+    exit 2
+    ;;
+esac
+
+DATA_ROOT="${REPO_ROOT}/data/workspaces/${WORKSPACE}"
+ARTIFACTS_ROOT="${REPO_ROOT}/artifacts/workspaces/${WORKSPACE}"
+PUBLIC_MODEL_ROOT="${REPO_ROOT}/artifacts/public_models"
+
+export PMTMAX_WORKSPACE_NAME="${WORKSPACE}"
+export PMTMAX_DATASET_PROFILE="${DATASET_PROFILE}"
+export PMTMAX_DATA_DIR="${DATA_ROOT}"
+export PMTMAX_CACHE_DIR="${DATA_ROOT}/cache"
+export PMTMAX_RAW_DIR="${DATA_ROOT}/raw"
+export PMTMAX_PARQUET_DIR="${DATA_ROOT}/parquet"
+export PMTMAX_RUN_DIR="${DATA_ROOT}/runs"
+export PMTMAX_ARCHIVE_DIR="${DATA_ROOT}/archive"
+export PMTMAX_MANIFEST_DIR="${DATA_ROOT}/manifests"
+export PMTMAX_DUCKDB_PATH="${DATA_ROOT}/duckdb/warehouse.duckdb"
+export PMTMAX_ARTIFACTS_DIR="${ARTIFACTS_ROOT}"
+export PMTMAX_PUBLIC_MODEL_DIR="${PUBLIC_MODEL_ROOT}"
+
+mkdir -p \
+  "${PMTMAX_CACHE_DIR}" \
+  "${PMTMAX_RAW_DIR}" \
+  "${PMTMAX_PARQUET_DIR}" \
+  "${PMTMAX_RUN_DIR}" \
+  "${PMTMAX_ARCHIVE_DIR}" \
+  "${PMTMAX_MANIFEST_DIR}" \
+  "$(dirname "${PMTMAX_DUCKDB_PATH}")" \
+  "${PMTMAX_ARTIFACTS_DIR}" \
+  "${PMTMAX_PUBLIC_MODEL_DIR}"
+
+exec "$@"

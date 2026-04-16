@@ -62,7 +62,7 @@ def test_build_revenue_gate_report_requires_benchmark_and_one_live_path() -> Non
     assert report["decision_reason"] == "benchmark_go_with_live_path_confirmation"
     assert report["eligible_for_live_pilot"] is True
     assert report["market_scope"] == "recent_core"
-    assert report["required_model_alias"] == "trading_champion"
+    assert report["required_model_alias"] == "champion"
     assert report["pilot_constraints"]["bankroll"] == 500.0
 
 
@@ -103,11 +103,11 @@ def test_build_revenue_gate_report_accepts_observation_shadow_as_live_confirmati
     assert report["observation_source_breakdown"]["official_intraday"]["markets_evaluated"] == 3
 
 
-def test_build_revenue_gate_report_accepts_published_trading_champion_summary_shape() -> None:
+def test_build_revenue_gate_report_accepts_published_champion_summary_shape() -> None:
     report = build_revenue_gate_report(
         benchmark_summary={
-            "trading_champion_published": True,
-            "trading_champion_model_name": "lgbm_emos",
+            "champion_published": True,
+            "champion_model_name": "lgbm_emos",
         },
         opportunity_summary={
             "cycles": 3,
@@ -124,5 +124,5 @@ def test_build_revenue_gate_report_accepts_published_trading_champion_summary_sh
     )
 
     assert report["benchmark_gate"]["decision"] == "GO"
-    assert report["benchmark_gate"]["decision_reason"] == "published_trading_champion_alias"
+    assert report["benchmark_gate"]["decision_reason"] == "published_champion_alias"
     assert report["decision"] == "GO"
