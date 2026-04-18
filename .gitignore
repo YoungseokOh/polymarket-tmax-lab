@@ -16,6 +16,7 @@ data/parquet/
 data/runs/
 data/archive/
 data/manifests/
+data/workspaces/
 artifacts/
 .env
 .DS_Store
