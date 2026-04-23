@@ -23,19 +23,19 @@ shift
 
 case "${command}" in
     init)
-        uv run pmtmax autoresearch-init "$@"
+        scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-init "$@"
         ;;
     step)
-        uv run pmtmax autoresearch-step "$@"
+        scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-step "$@"
         ;;
     gate)
-        uv run pmtmax autoresearch-gate "$@"
+        scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-gate "$@"
         ;;
     analyze-paper)
-        uv run pmtmax autoresearch-analyze-paper "$@"
+        scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-analyze-paper "$@"
         ;;
     promote)
-        uv run pmtmax autoresearch-promote "$@"
+        scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-promote "$@"
         ;;
     *)
         echo "Unknown autoresearch command: ${command}" >&2

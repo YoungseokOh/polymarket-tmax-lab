@@ -55,4 +55,4 @@ Live trading is implemented but disabled by default.
 
 ## See Also
 - `docs/codebase/backtest-execution.md` for the execution folder split
-- `docs/commit-convention.md` for the `type: subject` commit convention used by trading-related changes
+- `docs/development/commit-convention.md` for the `type: subject` commit convention used by trading-related changes

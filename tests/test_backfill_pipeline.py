@@ -75,6 +75,7 @@ class _FakeClobClient:
     ) -> None:
         self.payloads = payloads
         self.last_trade_payloads = last_trade_payloads or {}
+        self.price_history_calls: list[tuple[str, bool]] = []
         self.last_trade_calls: list[str] = []
 
     def get_prices_history(
@@ -87,7 +88,7 @@ class _FakeClobClient:
     ) -> dict[str, object]:
         assert interval == "max"
         assert fidelity == 60
-        assert use_cache is True
+        self.price_history_calls.append((market, use_cache))
         return self.payloads.get(market, {"history": []})
 
     def get_last_trade_price(self, token_id: str) -> dict[str, object]:
@@ -246,6 +247,35 @@ def test_backfill_forecasts_can_skip_table_readback(tmp_path: Path) -> None:
     assert int(result["silver_forecast_runs_hourly_count"]) > 0
     assert (tmp_path / "parquet" / "silver" / "silver_forecast_runs_hourly.parquet").exists()
     assert (tmp_path / "manifests" / "warehouse_manifest.json").exists()
+
+
+def test_backfill_forecasts_parallel_worker_errors_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshots = bundled_market_snapshots(["Seoul", "NYC"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "parallel_error.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    def _raise_station_coords(_: object) -> tuple[float, float, str]:
+        raise RuntimeError("station lookup failed")
+
+    monkeypatch.setattr(pipeline, "_station_coords", _raise_station_coords)
+
+    with pytest.raises(RuntimeError, match="backfill_forecasts worker .* failed"):
+        pipeline.backfill_forecasts(snapshots, workers=2)
 
 
 def test_backfill_forecasts_missing_only_skips_existing_request_keys(tmp_path: Path) -> None:
@@ -717,3 +747,58 @@ def test_summarize_price_history_coverage_uses_latest_request_per_token(tmp_path
     empty_summary = summary["request_summary"].loc[summary["request_summary"]["status"].astype(str) == "empty"].iloc[0]
     assert int(empty_summary["history_empty_with_last_trade_count"]) == len(empty_token_ids)
     assert int(empty_summary["history_empty_without_last_trade_count"]) == 0
+
+
+def test_backfill_price_history_only_missing_skips_tokens_with_existing_points(tmp_path: Path) -> None:
+    snapshot = bundled_market_snapshots(["Seoul"])[0]
+    spec = snapshot.spec
+    assert spec is not None
+    token_ids = spec.token_ids
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "price_gaps.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+    first_clob = _FakeClobClient(
+        {
+            token_ids[0]: {
+                "history": [
+                    {"t": int(datetime(2025, 1, 1, 8, 0, tzinfo=UTC).timestamp()), "p": 0.42},
+                ]
+            }
+        }
+    )
+    pipeline.backfill_price_history([snapshot], clob=first_clob)
+
+    second_clob = _FakeClobClient(
+        {
+            token_id: {
+                "history": [
+                    {"t": int(datetime(2025, 1, 1, 9, 0, tzinfo=UTC).timestamp()), "p": 0.50},
+                ]
+            }
+            for token_id in token_ids
+        }
+    )
+    result = pipeline.backfill_price_history(
+        [snapshot],
+        clob=second_clob,
+        use_cache=False,
+        only_missing=True,
+    )
+
+    called_tokens = {token_id for token_id, _ in second_clob.price_history_calls}
+    assert token_ids[0] not in called_tokens
+    assert called_tokens == set(token_ids[1:])
+    assert all(use_cache is False for _, use_cache in second_clob.price_history_calls)
+    assert len(result["batch_bronze_price_history_requests"]) == len(token_ids) - 1

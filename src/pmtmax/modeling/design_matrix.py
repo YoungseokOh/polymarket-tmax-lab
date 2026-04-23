@@ -402,7 +402,7 @@ class ContextualFeatureBuilder:
             bin_boundary_dist_arr = np.zeros(len(frame), dtype=float)
             _schema_cache: dict[str, list] = {}
             spec_jsons = frame["market_spec_json"].tolist()
-            for i, (spec_raw, x) in enumerate(zip(spec_jsons, nwp_vals)):
+            for i, (spec_raw, x) in enumerate(zip(spec_jsons, nwp_vals, strict=True)):
                 if spec_raw not in _schema_cache:
                     try:
                         spec_dict = json.loads(spec_raw) if isinstance(spec_raw, str) else spec_raw
@@ -464,7 +464,9 @@ class ContextualFeatureBuilder:
             nwp_vals = np.asarray(data.get("ecmwf_ifs025_model_daily_max", np.zeros(len(frame))), dtype=float)
             bin_boundary_dist_arr = np.zeros(len(frame), dtype=float)
             _schema_cache2: dict[str, list] = {}
-            for i, (spec_raw, x) in enumerate(zip(frame["market_spec_json"].tolist(), nwp_vals)):
+            for i, (spec_raw, x) in enumerate(
+                zip(frame["market_spec_json"].tolist(), nwp_vals, strict=True)
+            ):
                 if spec_raw not in _schema_cache2:
                     try:
                         spec_dict = json.loads(spec_raw) if isinstance(spec_raw, str) else spec_raw

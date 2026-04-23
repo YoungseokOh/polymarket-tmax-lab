@@ -23,12 +23,29 @@
 - shared registry: `artifacts/public_models/champion.pkl`
 - metadata: `artifacts/public_models/champion.json`
 - promotion rule: only `uv run pmtmax publish-champion ...` may update the public alias
+- current published model family/variant: `lgbm_emos / high_neighbor_oof`
+- trusted training inventory is market-level; the latest audit was 1,834 markets
+  materialized into 5,478 training rows across supported horizons
 
-## Daily Data Collection (cron 00:00 UTC = 09:00 KST)
+## Daily Data Collection
 ```bash
 bash scripts/daily_experiment.sh
 ```
-Runs: scan-markets → backfill-truth → backfill-forecasts → log_gamma_prices → scan-edge → track_paper_trade_outcomes
+
+Runs in the `ops_daily` workspace:
+scan-markets → backfill-truth → backfill-forecasts `--strict-archive` →
+log_gamma_prices → scan-edge → record_paper_trades → paper-trader →
+track_paper_trade_outcomes.
+
+This loop does not retrain the model, mutate `historical_real`, or publish a
+champion. It collects active-market operational evidence and forward diagnostics
+only. On a KST host, schedule it after daily markets open:
+
+```bash
+0 9 * * * bash /home/seok436/projects/polymarket-tmax-lab/scripts/daily_experiment.sh >> /home/seok436/projects/polymarket-tmax-lab/logs/daily_experiment.log 2>&1
+```
+
+If the cron host is UTC, use `0 0 * * *` for the same 09:00 KST wall-clock time.
 
 ## 2-Hour Price Check (cron every 2 hours)
 ```bash
@@ -54,20 +71,57 @@ uv run pmtmax scan-edge \
 ```
 `--min-model-prob 0.05 --max-model-prob 0.95` is required — filters out overconfident 0%/100% predictions.
 
+## Trust Check
+Before long-running rebuilds or canonical overwrite, run:
+
+```bash
+uv run pmtmax trust-check --markets-path configs/market_inventory/full_training_set_snapshots.json
+```
+
+`trust-check` fails closed on synthetic inventories, `synthetic_` market ids,
+fixture forecasts, fabricated books, or non-`real_market` dataset profiles.
+For weather pretraining, run `scripts/pmtmax-workspace weather_train uv run pmtmax trust-check --workflow weather_training`; that workflow requires `weather_real` and forbids Polymarket inventories.
+
 ## Model Training
 ```bash
+# Weather-real pretrain, no Polymarket market ids or prices
+scripts/pmtmax-workspace weather_train uv run pmtmax collect-weather-training --city Seoul --date-from 2024-01-01 --date-to 2024-01-07 --http-timeout-seconds 15 --http-retries 1 --missing-only
+scripts/pmtmax-workspace weather_train uv run pmtmax train-weather-pretrain --model-name gaussian_emos
+
 # Train a specific lgbm_emos variant
-uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
+uv run pmtmax train-advanced --model-name lgbm_emos --variant high_neighbor_oof
 
 # Quick comparison (champion baseline + OOF family)
 uv run python scripts/quick_eval.py
 ```
 
+`collect-weather-training` now emits station/date progress lines on stderr by default and keeps the final machine-readable JSON on stdout. When Open-Meteo starts throttling, prefer shorter `--http-timeout-seconds` / `--http-retries` values and resumable date chunks over large silent runs.
+
+Observed weather-train state on April 24, 2026:
+- gold rows: `4,992`
+- full successful ranges: `2024-01-03..2024-05-24`, `2026-01-01..2026-01-14`
+- partial coverage extends through `2024-05-30`, `2026-01-21`
+- slow crawl test: `2026-01-22..2026-01-28` with daily chunks, `--rate-limit-profile free`, `--http-timeout-seconds 15`, `--http-retries 1`, and 20-second inter-day cooldown still returned only `retryable_error`
+- same-day older backfill test: `2024-05-25..2024-05-30` still added `130` rows
+
+So the current limit for newer dates is upstream Open-Meteo throttling, not silent local hangs. Keep recent-date retries resumable and do not assume a slower wrapper alone will break through that range.
+
+Use `checker/weather_train_runbook.md` as the operational checklist and keep
+`checker/weather_train_status.md` / `checker/weather_train_collection_log.md`
+updated after every collection or pretrain refresh.
+
+`quick_eval.py` sorts by Celsius-normalized CRPS and prints the raw market-unit
+CRPS beside it for audit. Promotion still requires benchmark, paper, or shadow evidence.
+`train-advanced --pretrained-weather-model <path>` records the weather pretrain
+lineage while fitting on `historical_real` Polymarket rows. Public promotion
+still requires a `real_history` recent-core `GO` summary.
+
 ## Dataset Build — SAFETY RULE
 ```bash
 # ALWAYS pass --markets-path. Never run without it.
-uv run pmtmax build-dataset \
+scripts/pmtmax-workspace historical_real uv run pmtmax build-dataset \
     --markets-path configs/market_inventory/full_training_set_snapshots.json \
+    --forecast-missing-only \
     --allow-canonical-overwrite
 ```
 ⚠️ Running without `--markets-path` will rebuild with only example data (12 rows).
@@ -89,33 +143,41 @@ parquet + manifest under `artifacts/recovery/` first.
 
 ## Benchmark (slow — use retrain_stride)
 ```bash
-uv run pmtmax benchmark-models --retrain-stride 30
+scripts/pmtmax-workspace historical_real uv run pmtmax benchmark-models --retrain-stride 30
 ```
 
 ## Default Workflow
 ```bash
-uv run pmtmax bootstrap-lab
-uv run pmtmax build-dataset \
+scripts/pmtmax-workspace historical_real uv run pmtmax trust-check \
+    --markets-path configs/market_inventory/full_training_set_snapshots.json
+scripts/pmtmax-workspace historical_real uv run pmtmax build-dataset \
+    --markets-path configs/market_inventory/full_training_set_snapshots.json \
+    --forecast-missing-only \
+    --allow-canonical-overwrite
+scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel \
     --markets-path configs/market_inventory/full_training_set_snapshots.json \
     --allow-canonical-overwrite
-uv run pmtmax materialize-backtest-panel --allow-canonical-overwrite
-uv run pmtmax train-advanced --model-name lgbm_emos --variant recency_neighbor_oof
+scripts/pmtmax-workspace historical_real uv run pmtmax train-advanced --model-name lgbm_emos --variant high_neighbor_oof
 uv run python scripts/quick_eval.py
-uv run pmtmax benchmark-models --retrain-stride 30
+scripts/pmtmax-workspace historical_real uv run pmtmax benchmark-models --retrain-stride 30
 ```
 
 ## Autoresearch Loop
-`karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `recency_neighbor_oof`.
+`karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `lgbm_emos`.
+Run it through the `historical_real` workspace wrapper so it cannot accidentally
+read legacy mixed/synthetic default v2 data.
 
 ```bash
-uv run pmtmax autoresearch-init
-uv run pmtmax autoresearch-step --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-gate --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
-uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-init --baseline-variant high_neighbor_oof
+scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-step --spec-path artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-gate --spec-path artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-analyze-paper --spec-path artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/my_candidate.yaml
+scripts/pmtmax-workspace historical_real uv run pmtmax autoresearch-promote --spec-path artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/my_candidate.yaml
 ```
 
 - candidate YAML is the only thing the agent should edit inside the loop
+- `autoresearch-promote` requires CLI-generated gate leaderboard JSON/CSV, matching dataset/panel signatures, a candidate calibrator, and paper `overall_gate_decision=GO`
+- `INCONCLUSIVE` is fail-closed for promotion
 - promoted winners are copied to `configs/autoresearch/lgbm_emos/promoted/`
 - alias publish remains explicit even after promotion; `autoresearch-promote` no longer mutates the public alias
 
@@ -123,7 +185,8 @@ uv run pmtmax autoresearch-promote --spec-path artifacts/autoresearch/<run_tag>/
 shadow watcher를 돌리고 싶으면 다음 래퍼를 사용한다.
 
 ```bash
-scripts/run_recent_core_benchmark_local.sh
+scripts/run_recent_core_benchmark_local.sh --model-name lgbm_emos --variant high_neighbor_oof --retrain-stride 1
+scripts/pmtmax-workspace recent_core_eval uv run python scripts/run_recent_core_benchmark.py --model-name lgbm_emos --variant high_neighbor_oof --retrain-stride 10 --backtest-last-n 60 --prebuilt-dataset-path data/workspaces/historical_real/parquet/gold/historical_training_set.parquet --prebuilt-panel-path data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet --prebuilt-last-n-market-days 90
 scripts/run_opportunity_shadow_watch.sh --max-cycles 1
 ```
 
@@ -139,12 +202,26 @@ uv run python scripts/recent_core_diagnostics.py
 ```
 
 `recent_core_benchmark_summary.json`의 top-level `decision`만 public `champion`
-publish gate로 인정된다. `reduced_core_candidate`는 coverage-thin city를 제외한
+publish gate로 인정되며 이 decision은 `real_history` official-price metrics를
+기준으로 한다. `reduced_core_candidate`는 coverage-thin city를 제외한
 축소 코어 진단 결과라서 `decision=GO`여도 publish에는 쓸 수 없다.
+LGBM 후보를 검증할 때는 `--model-name lgbm_emos --variant <variant>`로
+recent-core benchmark 대상과 `publish-champion`에 넘길 artifact variant를
+일치시킨다.
+도시별 split이 작은 benchmark에서는 `--retrain-stride 30`을 쓰지 않는다.
+runner는 available test split보다 큰 retrain stride를 fail-fast로 막는다.
 paper-only sweeps can override that with
 `--horizon-policy-path configs/paper-all-supported-horizon-policy.yaml`.
 The paper-only sweep grid lives in `configs/paper-exploration.yaml`.
 수익화 전용 루프에서는 `--core-recent-only`와 `--model-name champion` 조합을 기본으로 쓰되, `ops_daily` workspace에서만 운영한다.
+Forward paper evidence must come from real CLOB books. If `book_source` is
+missing or fixture-only, treat the run as a diagnostic and do not record it into
+`forward_paper_trades.json`.
+Current paper commands reject `book_source=fixture`; CLOB failures are represented
+as `missing_book` rows instead of tradable signals.
+The daily wrapper passes the just-scanned `discovered_markets.json` into
+`paper-trader` so CLOB diagnostics and Gamma scan-edge signals are tied to the
+same active-market snapshot.
 recent-core 바깥의 fresh listing 탐색은 `--market-scope supported_wu_open_phase`
 또는 전용 wrapper인 `hope-hunt-report` / `hope-hunt-daemon`을 쓴다.
 
@@ -199,8 +276,8 @@ scripts/pmtmax-workspace ops_daily uv run pmtmax station-daemon --model-name cha
 ```bash
 scripts/run_historical_refresh_pipeline.sh
 scripts/run_full_historical_batch.sh
-uv run pmtmax train-baseline --model-name gaussian_emos
-uv run pmtmax backtest --model-name gaussian_emos
+scripts/pmtmax-workspace historical_real uv run pmtmax train-baseline --model-name gaussian_emos
+scripts/pmtmax-workspace historical_real uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
 ```
 
 장기 closed-event refresh는 `run_historical_refresh_pipeline.sh`로 backlog를 계속 정산하고, warehouse rebuild가 필요할 때만 `run_full_historical_batch.sh`를 돌린다.
@@ -212,15 +289,17 @@ refresh manifest는 partial progress를 남기므로 source lag나 transient req
 uv run python scripts/refresh_historical_event_urls.py
 uv run python scripts/build_historical_market_inventory.py --truth-per-source-limit 1
 uv run python scripts/validate_historical_market_inventory.py --truth-per-source-limit 1
-uv run pmtmax build-dataset --markets-path configs/market_inventory/historical_temperature_snapshots.json --allow-canonical-overwrite
-uv run pmtmax train-baseline --model-name gaussian_emos
-uv run pmtmax backtest --model-name gaussian_emos
+scripts/pmtmax-workspace historical_real uv run pmtmax build-dataset --markets-path configs/market_inventory/historical_temperature_snapshots.json --allow-canonical-overwrite
+scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/historical_temperature_snapshots.json --allow-canonical-overwrite
+scripts/pmtmax-workspace historical_real uv run pmtmax train-baseline --model-name gaussian_emos
+scripts/pmtmax-workspace historical_real uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
 uv run python scripts/build_active_weather_watchlist.py
 ```
 
 ## Artifacts
+- weather-real pretrain dataset: `data/workspaces/weather_train/parquet/gold/weather_training_set.parquet`
+- weather pretrain artifacts: `artifacts/workspaces/weather_train/models/v2/`
 - historical-real dataset: `data/workspaces/historical_real/parquet/gold/historical_training_set.parquet`
-- research-synth dataset: `data/workspaces/research_synth/parquet/gold/historical_training_set.parquet`
 - workspace-local model artifacts: `artifacts/workspaces/<workspace>/models/v2/`
 - public champion alias: `artifacts/public_models/champion.pkl`, `artifacts/public_models/champion.json`
 - benchmark outputs: `artifacts/workspaces/<workspace>/benchmarks/v2/`
@@ -253,4 +332,4 @@ uv run python scripts/build_active_weather_watchlist.py
 - `revenue-gate-report`는 recent-core benchmark와 세 shadow summary를 합쳐 소액 live pilot 전환 가능 여부를 `GO / INCONCLUSIVE / NO_GO`로 출력한다
 - active opportunity 진단은 `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, `after_cost_positive_but_spread_too_wide`를 분리해서 봐야 한다
 - observation live pilot은 manual approval이 기본이며, `research_public` candidate는 exact-public과 같은 queue에 오르더라도 tier/risk flag를 숨기지 않는다
-- 현재 기본 horizon policy는 `Seoul=market_open+previous_evening+morning_of`, `NYC=market_open+previous_evening`, `London=previous_evening`이다
+- 현재 기본 horizon policy는 `Seoul=market_open+previous_evening+morning_of`, `NYC=market_open+previous_evening`, `London=market_open+previous_evening+morning_of`이다

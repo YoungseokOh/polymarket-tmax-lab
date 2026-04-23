@@ -21,21 +21,15 @@ def test_fetch_book_returns_missing_by_default_on_clob_error() -> None:
     assert book.asks == []
 
 
-def test_fetch_book_can_opt_into_synthetic_fallback() -> None:
+def test_fetch_book_does_not_fabricate_fallback_books() -> None:
     snapshot = MarketSnapshot(
         captured_at=datetime.now(tz=UTC),
         market={"id": "market-1"},
         outcome_prices={"11°C": 0.42},
     )
 
-    book = fetch_book(
-        _RaisingClob(),
-        snapshot,
-        "token-1",
-        "11°C",
-        allow_synthetic_fallback=True,
-    )
+    book = fetch_book(_RaisingClob(), snapshot, "token-1", "11°C")
 
-    assert book.source == "fixture"
-    assert book.best_bid() > 0.0
-    assert book.best_ask() < 1.0
+    assert book.source == "missing"
+    assert book.bids == []
+    assert book.asks == []

@@ -1,4 +1,4 @@
-Read `AGENTS.md`, `docs/live-trading.md`, and `docs/agent-skills/safety-and-rules.md`.
+Read `AGENTS.md`, `docs/operations/live-trading.md`, and `docs/agent-skills/safety-and-rules.md`.
 
 Focus on `${ARGUMENTS}` when provided.
 

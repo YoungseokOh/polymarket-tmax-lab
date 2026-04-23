@@ -9,7 +9,7 @@ import pytest
 from pmtmax.examples import example_market_specs
 from pmtmax.modeling.autoresearch import LgbmAutoresearchSpec
 from pmtmax.modeling.predict import load_model, predict_market
-from pmtmax.modeling.train import default_feature_names, train_model
+from pmtmax.modeling.train import default_feature_names, supported_ablation_variants, train_model
 
 
 def test_default_feature_names_excludes_metadata_and_constant_columns() -> None:
@@ -89,6 +89,14 @@ def test_train_model_rejects_removed_models(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported model: flexible_flow_nn"):
         train_model("flexible_flow_nn", frame, tmp_path)
+
+
+def test_promoted_lgbm_variants_resolve_outside_repo_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    variants = supported_ablation_variants("lgbm_emos")
+    assert "half_life15_high_cap" in variants
+    assert "p13_sub_q42reg" not in variants
 
 
 def test_train_model_persists_internal_variant_metadata(tmp_path: Path) -> None:

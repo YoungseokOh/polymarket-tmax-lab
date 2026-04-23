@@ -28,5 +28,5 @@ market-data clients, settlement rule parsing, and the `MarketSpec` abstraction.
 
 ## Change Checklist
 - Parser changes must keep `tests/test_rule_parser.py` and `tests/test_market_spec.py` green.
-- If supported rule families expand, update `docs/market-rules.md` and this file.
+- If supported rule families expand, update `docs/markets/market-rules.md` and this file.
 - If discovery output changes, update downstream dataset and paper-trading workflows.

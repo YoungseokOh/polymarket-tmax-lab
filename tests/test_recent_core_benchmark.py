@@ -52,7 +52,7 @@ def test_summarize_recent_core_profitability_returns_go_when_all_city_gates_pass
     )
 
     assert summary["decision"] == "GO"
-    assert summary["decision_reason"] == "positive_policy_pnl_in_real_and_proxy_with_city_gates"
+    assert summary["decision_reason"] == "positive_policy_pnl_real_history_with_city_gates"
     assert summary["sample_adequacy"]["passes"] is True
     assert summary["aggregate_real_history_metrics"]["priced_decision_rows"] == 177.0
     assert summary["aggregate_panel_coverage"]["ok_ratio"] > 0.20
@@ -66,13 +66,13 @@ def test_summarize_recent_core_profitability_is_inconclusive_when_city_trade_cou
     summary = summarize_recent_core_profitability(
         {
             "Seoul": _city_row(panel_rows=80, ok_rows=60, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
-            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=9.0, proxy_trades=39.0, proxy_pnl=6.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=39.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=6.0),
             "London": _city_row(panel_rows=78, ok_rows=55, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
         }
     )
 
     assert summary["decision"] == "INCONCLUSIVE"
-    assert summary["decision_reason"] == "city_quote_proxy_sample_inadequate"
+    assert summary["decision_reason"] == "city_real_history_sample_inadequate"
     assert summary["sample_adequacy"]["passes"] is True
     assert summary["city_gate_details"]["NYC"]["passes_trade_count"] is False
 
@@ -97,17 +97,17 @@ def test_summarize_recent_core_profitability_is_inconclusive_when_one_city_panel
     assert summary["reduced_core_candidate"]["coverage_excluded_cities"]["London"]["reason"] == "panel_coverage_below_threshold"
 
 
-def test_summarize_recent_core_profitability_returns_no_go_when_one_city_proxy_pnl_is_negative() -> None:
+def test_summarize_recent_core_profitability_returns_no_go_when_one_city_real_pnl_is_negative() -> None:
     summary = summarize_recent_core_profitability(
         {
             "Seoul": _city_row(panel_rows=80, ok_rows=60, real_trades=48.0, real_pnl=14.0, proxy_trades=45.0, proxy_pnl=8.0),
-            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=9.0, proxy_trades=43.0, proxy_pnl=-1.0),
+            "NYC": _city_row(panel_rows=85, ok_rows=62, real_trades=44.0, real_pnl=-1.0, proxy_trades=43.0, proxy_pnl=6.0),
             "London": _city_row(panel_rows=78, ok_rows=55, real_trades=41.0, real_pnl=7.0, proxy_trades=42.0, proxy_pnl=5.0),
         }
     )
 
     assert summary["decision"] == "NO_GO"
-    assert summary["decision_reason"] == "city_quote_proxy_negative_pnl"
+    assert summary["decision_reason"] == "city_real_history_negative_pnl"
     assert summary["city_gate_details"]["NYC"]["passes_non_negative_pnl"] is False
 
 

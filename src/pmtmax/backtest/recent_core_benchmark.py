@@ -103,20 +103,20 @@ def _build_city_gate_details(
     city_gate_details: dict[str, dict[str, object]] = {}
     for city in required_cities:
         city_payload = dict(cities.get(city, {}))
-        city_quote_proxy_metrics = dict(city_payload.get("policy_quote_proxy_metrics", {}))
+        city_real_history_metrics = dict(city_payload.get("policy_real_history_metrics", {}))
         city_panel_summary = dict(city_payload.get("panel_summary", {}))
-        city_num_trades = _as_float(city_quote_proxy_metrics.get("num_trades"))
-        city_pnl = _as_float(city_quote_proxy_metrics.get("pnl"))
+        city_num_trades = _as_float(city_real_history_metrics.get("num_trades"))
+        city_pnl = _as_float(city_real_history_metrics.get("pnl"))
         city_panel_rows = _as_float(city_panel_summary.get("rows"))
         city_panel_ok_rows = _as_float(dict(city_panel_summary.get("coverage", {})).get("ok"))
         city_panel_ok_ratio = _panel_ok_ratio(city_panel_summary)
         city_gate_details[city] = {
             "required": True,
             "available": bool(city_payload),
-            "min_quote_proxy_policy_trades": float(min_city_policy_trades),
+            "min_real_history_policy_trades": float(min_city_policy_trades),
             "min_panel_ok_ratio": float(min_panel_ok_ratio),
-            "quote_proxy_policy_num_trades": city_num_trades,
-            "quote_proxy_policy_pnl": city_pnl,
+            "real_history_policy_num_trades": city_num_trades,
+            "real_history_policy_pnl": city_pnl,
             "panel_rows": city_panel_rows,
             "panel_ok_rows": city_panel_ok_rows,
             "panel_ok_ratio": city_panel_ok_ratio,
@@ -212,7 +212,7 @@ def classify_profitability(
     *,
     aggregate_real_history_metrics: dict[str, object],
     aggregate_policy_real_history_metrics: dict[str, object],
-    aggregate_policy_quote_proxy_metrics: dict[str, object],
+    aggregate_policy_quote_proxy_metrics: dict[str, object] | None = None,
     aggregate_panel_coverage: dict[str, object],
     city_gate_details: dict[str, dict[str, object]] | None = None,
     min_policy_trades: float = DEFAULT_MIN_POLICY_TRADES,
@@ -254,27 +254,23 @@ def classify_profitability(
     if city_gate_details and not all(bool(details.get("passes_trade_count")) for details in city_gate_details.values()):
         return {
             "decision": "INCONCLUSIVE",
-            "decision_reason": "city_quote_proxy_sample_inadequate",
+            "decision_reason": "city_real_history_sample_inadequate",
             "sample_adequacy": sample_adequacy,
         }
     if city_gate_details and not all(bool(details.get("passes_non_negative_pnl")) for details in city_gate_details.values()):
         return {
             "decision": "NO_GO",
-            "decision_reason": "city_quote_proxy_negative_pnl",
+            "decision_reason": "city_real_history_negative_pnl",
             "sample_adequacy": sample_adequacy,
         }
 
     real_pnl = _as_float(aggregate_policy_real_history_metrics.get("pnl"))
-    proxy_pnl = _as_float(aggregate_policy_quote_proxy_metrics.get("pnl"))
-    if real_pnl > 0 and proxy_pnl > 0:
+    if real_pnl > 0:
         decision = "GO"
-        decision_reason = "positive_policy_pnl_in_real_and_proxy_with_city_gates"
-    elif real_pnl <= 0 and proxy_pnl <= 0:
-        decision = "NO_GO"
-        decision_reason = "non_positive_policy_pnl_in_real_and_proxy"
+        decision_reason = "positive_policy_pnl_real_history_with_city_gates"
     else:
-        decision = "INCONCLUSIVE"
-        decision_reason = "pricing_paths_disagree"
+        decision = "NO_GO"
+        decision_reason = "non_positive_policy_pnl_real_history"
     return {
         "decision": decision,
         "decision_reason": decision_reason,

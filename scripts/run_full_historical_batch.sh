@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ "${PMTMAX_WORKSPACE_NAME:-}" != "historical_real" ]]; then
+  exec "${ROOT_DIR}/scripts/pmtmax-workspace" historical_real "$0" "$@"
+fi
+
 MARKETS_PATH="configs/market_inventory/historical_temperature_snapshots.json"
-LOG_DIR="artifacts/batch_logs"
+LOG_DIR="${PMTMAX_ARTIFACTS_DIR:-artifacts/workspaces/historical_real}/batch_logs"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_FILE="$LOG_DIR/full_historical_batch_${TIMESTAMP}.log"
 MAX_PAGES=""
@@ -158,7 +162,7 @@ if [[ $SKIP_MODEL_SMOKE -eq 0 ]]; then
     uv run pmtmax train-baseline --model-name gaussian_emos
 
   run_step "Run research backtest" \
-    uv run pmtmax backtest --model-name gaussian_emos
+    uv run pmtmax backtest --pricing-source real_history --model-name gaussian_emos
 fi
 
 if [[ $SKIP_WATCHLIST -eq 0 ]]; then

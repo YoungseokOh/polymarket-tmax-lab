@@ -15,6 +15,7 @@ Use this skill for storage, bootstrap, and long-history data operations.
    - `docs/agent-skills/safety-and-rules.md`
 
 ## Focus
+- `weather_train` weather-real station/date pretrain data
 - canonical warehouse paths
 - `bootstrap-lab`, `export-seed`, `restore-seed`
 - `inventory-legacy-runs`, `archive-legacy-runs`
@@ -26,20 +27,45 @@ Use this skill for storage, bootstrap, and long-history data operations.
 
 ## Critical rules
 - canonical `historical_training_set*` / `historical_backtest_panel` overwrite is opt-in only.
+- canonical data is real-only: synthetic inventories, `synthetic_` market ids, fixture forecasts, and fabricated books are trust violations.
+- `weather_train` uses `PMTMAX_DATASET_PROFILE=weather_real` and must not contain Polymarket market ids, rule JSON, CLOB books, price history, or publish evidence.
+- `historical_real` / benchmark / publish commands remain `PMTMAX_DATASET_PROFILE=real_market`.
+- run `trust-check` before canonical overwrite, long collection, benchmark, or release validation.
+- Open-Meteo weather-training collection now supports short HTTP controls:
+  `--http-timeout-seconds`, `--http-retries`,
+  `--http-retry-wait-min-seconds`, `--http-retry-wait-max-seconds`, plus
+  stderr progress by default.
+- Latest observed field state on April 24, 2026:
+  `weather_train` gold has 4,992 rows. Full successful ranges are
+  `2024-01-03..2024-05-24` and `2026-01-01..2026-01-14`; partial coverage
+  extends through `2024-05-30` and `2026-01-21`. `2026-01-22..2026-01-28`
+  remained retry-only on the free path, while the older range
+  `2024-05-25..2024-05-30` still added `130` rows the same day.
+- Keep `checker/weather_train_status.md` and
+  `checker/weather_train_collection_log.md` synchronized after every
+  collection/pretrain turn.
 - use variant `--output-name` values by default; only pass `--allow-canonical-overwrite` for intentional canonical promotion.
 - canonical overwrite now snapshots the old parquet + manifest under `artifacts/recovery/` first.
 - lag recovery truth probes should default to `--truth-per-source-limit 1`, and use `--truth-no-cache` when cached truth payloads look stale or malformed.
 - `historical_temperature_snapshots.json` is the canonical curated backlog for data collection. Use this when the task is “collect the latest historical markets”.
 - `full_training_set_snapshots.json` is a checked-in training inventory, not an auto-refreshed mirror of the canonical historical backlog.
+- latest audit semantics: `full_training_set_snapshots.json` has 1,834 trusted market snapshots, which materialize to 5,478 training rows across supported horizons; this is not a hard cap.
+- more real data can be collected, but it must be closed, parseable, truth-ready, forecast-backed, and intentionally curated before replacing the checked-in training inventory.
+- daily `ops_daily` collection records forward evidence only; it does not auto-append to `full_training_set_snapshots.json` or retrain the champion.
 - When topping off an existing warehouse, prefer `backfill-forecasts --missing-only` so the run only fetches forecast request keys that are absent from `bronze_forecast_requests`.
 
 ## Common commands
+- Weather-real slow crawl with explicit HTTP bounds:
+  `scripts/pmtmax-workspace weather_train uv run pmtmax collect-weather-training --date-from 2026-01-22 --date-to 2026-01-22 --model gfs_seamless --missing-only --rate-limit-profile free --http-timeout-seconds 15 --http-retries 1 --http-retry-wait-min-seconds 1 --http-retry-wait-max-seconds 8`
 - Latest curated historical collection:
-  `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only`
 - Historical collection with single-run horizons:
-  `uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of`
 - Existing warehouse dataset rebuild without forecast refetch:
-  `uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
+- Official-price panel rebuild:
+  `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history --markets-path configs/market_inventory/full_training_set_snapshots.json --only-missing --price-no-cache --limit-markets 25`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite`
 - Seed/bootstrap refresh without forecast refetch:
   `uv run pmtmax bootstrap-lab --forecast-missing-only`
 

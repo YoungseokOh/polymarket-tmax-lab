@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: scripts/pmtmax-workspace <ops_daily|historical_real|research_synth|recent_core_eval> <command...>" >&2
+  echo "usage: scripts/pmtmax-workspace <weather_train|ops_daily|historical_real|recent_core_eval> <command...>" >&2
   exit 2
 fi
 
@@ -13,11 +13,11 @@ WORKSPACE="$1"
 shift
 
 case "${WORKSPACE}" in
+  weather_train)
+    DATASET_PROFILE="weather_real"
+    ;;
   ops_daily|historical_real|recent_core_eval)
     DATASET_PROFILE="real_market"
-    ;;
-  research_synth)
-    DATASET_PROFILE="synthetic"
     ;;
   *)
     echo "unknown workspace: ${WORKSPACE}" >&2

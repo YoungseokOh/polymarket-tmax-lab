@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
+import typer
 
 from pmtmax.cli.main import (
     _bootstrap_snapshots,
     _collection_preflight_report,
     _evaluate_market_signal,
+    _forbid_fixture_paper_rows,
     _load_alias_metadata,
     _load_snapshots,
     _quote_proxy_prices,
@@ -19,6 +22,7 @@ from pmtmax.cli.main import (
     _resolve_signal_horizon_with_reason,
     _run_quote_proxy_backtest,
     _run_real_history_backtest,
+    _trust_check_report,
     backtest,
     bootstrap_lab,
     execution_sensitivity_report,
@@ -77,6 +81,130 @@ def test_load_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> None:
         _load_snapshots(markets_path=missing)
 
 
+def _trust_config(tmp_path: Path, *, workspace_name: str, dataset_profile: str):
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            workspace_name=workspace_name,
+            dataset_profile=dataset_profile,
+            data_dir=tmp_path / "data",
+            artifacts_dir=tmp_path / "artifacts",
+            duckdb_path=tmp_path / "data" / "duckdb" / "warehouse.duckdb",
+            parquet_dir=tmp_path / "data" / "parquet",
+            public_model_dir=tmp_path / "artifacts" / "public_models",
+        )
+    )
+
+
+def test_trust_check_rejects_synthetic_inventory(tmp_path: Path) -> None:
+    inventory = tmp_path / "synthetic_historical_snapshots.json"
+    inventory.write_text('[{"captured_at": "2026-01-01T00:00:00Z"}]')
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=inventory,
+    )
+
+    assert report["ok"] is False
+    issue_checks = {issue["check"] for issue in report["issues"]}
+    assert "workspace_inventory_match" in issue_checks
+    assert "synthetic_inventory_forbidden" in issue_checks
+
+
+def test_trust_check_rejects_synthetic_inventory_even_with_matching_legacy_profile(tmp_path: Path) -> None:
+    inventory = tmp_path / "synthetic_historical_snapshots.json"
+    inventory.write_text('[{"captured_at": "2026-01-01T00:00:00Z"}]')
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="research_synth", dataset_profile="synthetic"),
+        markets_path=inventory,
+        output_name="synthetic_historical_training_set",
+    )
+
+    assert report["ok"] is False
+    assert report["inventory_rows"] == 1
+    issue_checks = {issue["check"] for issue in report["issues"]}
+    assert "dataset_profile" in issue_checks
+    assert "synthetic_inventory_forbidden" in issue_checks
+
+
+def test_trust_check_rejects_synthetic_marker_in_custom_inventory(tmp_path: Path) -> None:
+    inventory = tmp_path / "custom_snapshots.json"
+    inventory.write_text('[{"captured_at": "2026-01-01T00:00:00Z", "market": {"id": "synthetic_seoul_2026"}}]')
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=inventory,
+        output_name="historical_training_set",
+    )
+
+    assert report["ok"] is False
+    issue_checks = {issue["check"] for issue in report["issues"]}
+    assert "synthetic_inventory_forbidden" in issue_checks
+
+
+def test_trust_check_rejects_contaminated_warehouse(tmp_path: Path) -> None:
+    import duckdb
+
+    duckdb_path = tmp_path / "data" / "duckdb" / "warehouse.duckdb"
+    duckdb_path.parent.mkdir(parents=True)
+    con = duckdb.connect(str(duckdb_path))
+    con.execute("CREATE TABLE silver_forecast_runs_hourly (market_id VARCHAR, endpoint_kind VARCHAR, source VARCHAR)")
+    con.execute("INSERT INTO silver_forecast_runs_hourly VALUES ('synthetic_seoul_2026', 'fixture', 'fixture')")
+    con.close()
+
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=None,
+    )
+
+    assert report["ok"] is False
+    issue_checks = {issue["check"] for issue in report["issues"]}
+    assert "warehouse_contamination" in issue_checks
+    assert report["warehouse_contamination_counts"]
+
+
+def test_trust_check_rejects_synthetic_market_specs_table(tmp_path: Path) -> None:
+    import duckdb
+
+    duckdb_path = tmp_path / "data" / "duckdb" / "warehouse.duckdb"
+    duckdb_path.parent.mkdir(parents=True)
+    con = duckdb.connect(str(duckdb_path))
+    con.execute("CREATE TABLE silver_market_specs (market_id VARCHAR)")
+    con.execute("INSERT INTO silver_market_specs VALUES ('synthetic_london_2026')")
+    con.close()
+
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=None,
+    )
+
+    assert report["ok"] is False
+    assert report["warehouse_contamination_counts"] == {
+        "silver_market_specs.synthetic_market_id": 1,
+    }
+
+
+def test_trust_check_rejects_parquet_only_contamination(tmp_path: Path) -> None:
+    import duckdb
+
+    parquet_path = tmp_path / "data" / "parquet" / "silver" / "silver_market_specs.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute(
+        f"COPY (SELECT 'synthetic_nyc_2026' AS market_id) TO '{parquet_path}' (FORMAT PARQUET)"
+    )
+    con.close()
+
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=None,
+    )
+
+    assert report["ok"] is False
+    issue_checks = {issue["check"] for issue in report["issues"]}
+    assert "parquet_contamination" in issue_checks
+    assert report["parquet_contamination_counts"] == {
+        "silver/silver_market_specs.parquet.synthetic_market_id": 1,
+    }
+
+
 def test_bootstrap_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> None:
     missing = tmp_path / "missing_snapshots.json"
 
@@ -100,6 +228,11 @@ def test_load_alias_metadata_repairs_missing_alias_artifacts(tmp_path: Path, mon
                 "source_model_path": "/tmp/broken/det2prob_nn.pkl",
                 "source_calibration_path": "/tmp/broken/det2prob_nn.calibrator.pkl",
                 "contract_version": "v2",
+                "dataset_profile": "real_market",
+                "publish_gate": {
+                    "decision": "GO",
+                    "recent_core_summary_path": "artifacts/workspaces/recent_core_eval/recent_core_benchmark/recent_core_benchmark_summary.json",
+                },
             }
         )
     )
@@ -120,6 +253,39 @@ def test_load_alias_metadata_repairs_missing_alias_artifacts(tmp_path: Path, mon
     assert payload["source_calibration_path"] == str(models_dir / "det2prob_nn.calibrator.pkl")
     assert Path(payload["alias_path"]).exists()
     assert Path(payload["alias_calibration_path"]).exists()
+
+
+def test_load_alias_metadata_rejects_champion_without_recent_core_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / "lgbm_emos.pkl").write_bytes(b"model")
+    (models_dir / "lgbm_emos.calibrator.pkl").write_bytes(b"calibrator")
+    metadata_path = models_dir / "champion.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "alias_name": "champion",
+                "model_name": "lgbm_emos",
+                "alias_path": str(models_dir / "champion.pkl"),
+                "alias_calibration_path": str(models_dir / "champion.calibrator.pkl"),
+                "source_model_path": str(models_dir / "lgbm_emos.pkl"),
+                "source_calibration_path": str(models_dir / "lgbm_emos.calibrator.pkl"),
+                "contract_version": "v2",
+                "dataset_profile": "real_market",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_model_path",
+        lambda model_name: models_dir / f"{model_name}.pkl",
+    )
+    monkeypatch.setattr(
+        "pmtmax.cli.main._default_alias_metadata_path",
+        lambda alias_name: metadata_path,
+    )
+
+    with pytest.raises(Exception, match="missing publish_gate"):
+        _load_alias_metadata("champion")
 
 
 def test_load_alias_metadata_rejects_unknown_alias() -> None:
@@ -846,6 +1012,11 @@ def test_quote_proxy_prices_clip_to_bounds() -> None:
     assert ask == pytest.approx(0.03)
 
 
+def test_paper_rows_reject_fixture_book_source() -> None:
+    with pytest.raises(typer.BadParameter, match="Fixture book sources are forbidden"):
+        _forbid_fixture_paper_rows([{"market_id": "m1", "book_source_counts": {"fixture": 1}}])
+
+
 def test_opportunity_report_marks_missing_books_explicitly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -908,7 +1079,7 @@ def test_opportunity_report_marks_missing_books_explicitly(
     )
     monkeypatch.setattr(
         "pmtmax.cli.main._load_books_for_forecast",
-        lambda clob, snap, probs, allow_synthetic_fallback=False: {
+        lambda clob, snap, probs: {
             outcome_label: BookSnapshot(
                 market_id=snapshot.spec.market_id,
                 token_id=token_id,
@@ -1575,7 +1746,7 @@ def test_revenue_gate_report_writes_combined_summary(tmp_path: Path) -> None:
         json.dumps(
             {
                 "decision": "GO",
-                "decision_reason": "positive_policy_pnl_in_real_and_proxy",
+                "decision_reason": "positive_policy_pnl_real_history_with_city_gates",
                 "aggregate_policy_real_history_metrics": {"num_trades": 20.0, "pnl": 24.0},
                 "aggregate_policy_quote_proxy_metrics": {"num_trades": 20.0, "pnl": 12.0},
                 "aggregate_panel_coverage": {"rows": 55, "coverage": {"ok": 40, "missing": 15}},
@@ -2079,7 +2250,7 @@ def test_live_mm_uses_inventory_mapping_for_quoter(
     monkeypatch.setattr("pmtmax.cli.main._load_snapshots", lambda **kwargs: [snapshot])
     monkeypatch.setattr(
         "pmtmax.cli.main._load_books_for_forecast",
-        lambda clob, snap, probs, allow_synthetic_fallback=False: {
+        lambda clob, snap, probs: {
             outcome_label: BookSnapshot(
                 market_id=snapshot.spec.market_id,
                 token_id=token_id,

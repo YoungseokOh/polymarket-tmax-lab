@@ -9,7 +9,7 @@ Use this skill for market discovery, settlement parsing, and source fidelity.
 
 ## First reads
 1. Read `AGENTS.md`.
-2. Read `docs/market-rules.md`.
+2. Read `docs/markets/market-rules.md`.
 3. Read:
    - `docs/agent-skills/market-rules.md`
    - `docs/codebase/markets.md`

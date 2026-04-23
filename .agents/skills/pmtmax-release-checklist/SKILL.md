@@ -17,5 +17,6 @@ Use this skill for research-environment release checks.
 ## Focus
 - `bootstrap-lab`
 - baseline training
-- backtest smoke
+- official `real_history` backtest smoke with a materialized price-history panel
 - seed restore validation
+- real-only trust-check blockers before release readiness

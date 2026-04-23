@@ -14,11 +14,13 @@ The model target is not generic “city temperature.” It is the official sourc
 - `gaussian_emos`
 - `tuned_ensemble`
 - `det2prob_nn`
+- `lgbm_emos`
 
 ## Public Candidate Shapes
 - `gaussian_emos`: simple heteroscedastic linear baseline
 - `tuned_ensemble`: contextual mixture-of-experts combining linear, lead-time polynomial, and tree experts behind a learned gate
 - `det2prob_nn`: standalone mixture-density neural network that emits Gaussian-mixture daily-max forecasts
+- `lgbm_emos`: LightGBM-based EMOS family used for the current public champion
 
 ## Contract
 - workspace datasets live under `data/workspaces/<workspace>/parquet/gold/`
@@ -38,5 +40,7 @@ The model target is not generic “city temperature.” It is the official sourc
 - the single public champion alias is published to `artifacts/public_models/champion.pkl`
 - `benchmark-models` ranks workspace-local candidates only; it does not publish the public alias
 - `publish-champion` is the explicit promotion command and requires a recent-core `GO` summary before copying the alias
+- public champion metadata must include `publish_gate.decision=GO`, a real-market dataset profile, and the recent-core summary path; missing or legacy champion metadata fails closed
+- current public champion family/variant is `lgbm_emos / high_neighbor_oof`
 - research champion scoring still blends forecast skill and trading-like PnL
-- execution-candidate scoring is stricter on `quote_proxy` / `real_history` profitability and only considers sample-adequate candidates when available
+- execution-candidate scoring is stricter on `real_history` profitability and only considers sample-adequate candidates when available; `quote_proxy` metrics are diagnostic

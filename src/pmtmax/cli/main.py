@@ -8,7 +8,7 @@ import shutil
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
@@ -38,9 +38,6 @@ from pmtmax.http import CachedHttpClient
 from pmtmax.logging_utils import configure_logging
 from pmtmax.markets.book_utils import (
     fetch_book as _fetch_book,
-)
-from pmtmax.markets.book_utils import (
-    synthetic_book as _synthetic_book,
 )
 from pmtmax.markets.clob_read_client import ClobReadClient
 from pmtmax.markets.gamma_client import GammaClient
@@ -78,8 +75,8 @@ from pmtmax.modeling.autoresearch import (
     save_lgbm_autoresearch_spec,
 )
 from pmtmax.modeling.champion import (
-    score_leaderboard,
     score_execution_candidate_leaderboard,
+    score_leaderboard,
     select_champion,
     select_execution_candidate,
 )
@@ -141,6 +138,11 @@ from pmtmax.utils import dump_json, load_json, load_yaml_with_extends, set_globa
 from pmtmax.weather.intraday_observation import fetch_intraday_observations
 from pmtmax.weather.metar_client import MetarClient
 from pmtmax.weather.openmeteo_client import OpenMeteoClient
+from pmtmax.weather.training_data import (
+    WeatherTrainingProgressEvent,
+    collect_weather_training_data,
+    default_weather_training_date_range,
+)
 from pmtmax.weather.truth_sources.base import celsius_to_fahrenheit
 
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
@@ -195,6 +197,12 @@ def _default_dataset_path(*, sequence: bool = False, panel: bool = False) -> Pat
         return gold_dir / "historical_backtest_panel.parquet"
     suffix = "historical_training_set_sequence.parquet" if sequence else "historical_training_set.parquet"
     return gold_dir / suffix
+
+
+def _default_weather_training_path() -> Path:
+    """Return the active workspace weather-only gold dataset path."""
+
+    return _path_env().parquet_dir / "gold" / "weather_training_set.parquet"
 
 
 def _default_artifacts_dir() -> Path:
@@ -264,6 +272,28 @@ def _artifact_calibration_path(model_path: Path) -> Path:
     return model_path.with_name(f"{model_path.stem}.calibrator.pkl")
 
 
+def _frame_signature(frame: pd.DataFrame) -> str:
+    """Return a lightweight, deterministic signature for an in-memory frame."""
+
+    payload: dict[str, object] = {
+        "rows": int(len(frame)),
+        "columns": [str(column) for column in frame.columns],
+    }
+    if "target_date" in frame.columns and not frame.empty:
+        target_dates = pd.to_datetime(frame["target_date"], errors="coerce")
+        payload["target_date_min"] = str(target_dates.min())
+        payload["target_date_max"] = str(target_dates.max())
+        payload["target_date_unique"] = int(target_dates.nunique(dropna=True))
+    if "market_id" in frame.columns:
+        payload["market_id_unique"] = int(frame["market_id"].astype(str).nunique(dropna=True))
+    if "decision_horizon" in frame.columns:
+        payload["decision_horizon_counts"] = {
+            str(key): int(value)
+            for key, value in frame["decision_horizon"].astype(str).value_counts(dropna=False).sort_index().items()
+        }
+    return stable_hash(json.dumps(payload, sort_keys=True, default=str))
+
+
 def _current_alias_variant(alias_name: str) -> str | None:
     """Return the current variant recorded for one public alias."""
 
@@ -314,6 +344,22 @@ def _resolve_lgbm_variant_inputs(
     return spec.candidate_name, spec.build_variant_config(), spec
 
 
+def _resolve_autoresearch_spec_path(
+    spec_path: Path | None,
+    spec_path_option: Path | None,
+) -> Path:
+    """Support both positional SPEC_PATH and the documented --spec-path option."""
+
+    positional = _resolve_option_value(spec_path)
+    option = _resolve_option_value(spec_path_option)
+    if positional is not None and option is not None and Path(positional) != Path(option):
+        raise typer.BadParameter("Use either positional SPEC_PATH or --spec-path, not both.")
+    resolved = option or positional
+    if resolved is None:
+        raise typer.BadParameter("Provide a candidate spec path as SPEC_PATH or --spec-path.")
+    return Path(resolved)
+
+
 def _publish_existing_model_alias(
     *,
     alias_name: str,
@@ -346,6 +392,23 @@ def _publish_existing_model_alias(
         metadata["leaderboard_path"] = str(leaderboard_path)
     dump_json(_default_alias_metadata_path(alias_name), metadata)
     return metadata
+
+
+def _summary_artifact_path(
+    summary: Mapping[str, object],
+    key: str,
+    *,
+    summary_path: Path,
+) -> Path:
+    """Resolve and require one artifact path recorded in a summary payload."""
+
+    value = summary.get(key)
+    if not isinstance(value, str) or not value:
+        raise typer.BadParameter(f"{summary_path} is missing required `{key}`.")
+    path = Path(value)
+    if not path.exists():
+        raise typer.BadParameter(f"{summary_path} references missing `{key}` artifact: {path}")
+    return path
 
 
 def _summarize_reason_rows(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -418,7 +481,9 @@ def _load_alias_metadata(alias_name: str = DEFAULT_MODEL_NAME, path: Path | None
     if not isinstance(payload, dict) or "model_name" not in payload:
         msg = f"Champion metadata is malformed: {metadata_path}"
         raise typer.BadParameter(msg)
-    return _repair_alias_metadata(alias_name, payload, metadata_path=metadata_path)
+    repaired = _repair_alias_metadata(alias_name, payload, metadata_path=metadata_path)
+    _validate_public_alias_metadata(alias_name, repaired, metadata_path=metadata_path)
+    return repaired
 
 
 def _repair_alias_metadata(
@@ -483,6 +548,41 @@ def _repair_alias_metadata(
     return repaired
 
 
+def _validate_public_alias_metadata(
+    alias_name: str,
+    metadata: Mapping[str, object],
+    *,
+    metadata_path: Path,
+) -> None:
+    """Fail closed when the public champion alias lacks a real recent-core gate."""
+
+    if alias_name not in PUBLIC_MODEL_ALIASES:
+        return
+    if str(metadata.get("contract_version", "")) != "v2":
+        raise typer.BadParameter(f"Public alias metadata must use contract_version=v2: {metadata_path}")
+    if str(metadata.get("dataset_profile", "")) != "real_market":
+        raise typer.BadParameter(
+            f"Public champion metadata is not real_market-gated: {metadata_path}. "
+            "Re-run `uv run pmtmax publish-champion` with a recent-core GO summary."
+        )
+    publish_gate = metadata.get("publish_gate")
+    if not isinstance(publish_gate, dict):
+        raise typer.BadParameter(
+            f"Public champion metadata is missing publish_gate: {metadata_path}. "
+            "Re-run `uv run pmtmax publish-champion` with a recent-core GO summary."
+        )
+    if str(publish_gate.get("decision", "")) != "GO":
+        raise typer.BadParameter(
+            f"Public champion publish gate is not GO: {metadata_path}. "
+            "Re-run `uv run pmtmax publish-champion` only after recent-core validation passes."
+        )
+    recent_core_summary_path = publish_gate.get("recent_core_summary_path")
+    if not isinstance(recent_core_summary_path, str) or "recent_core" not in recent_core_summary_path:
+        raise typer.BadParameter(
+            f"Public champion metadata does not reference a recent-core summary: {metadata_path}."
+        )
+
+
 def _load_champion_metadata(path: Path | None = None) -> dict[str, object]:
     """Load the default champion metadata."""
 
@@ -519,6 +619,62 @@ def _runtime(include_stores: bool = True) -> tuple:
     parquet_store = ParquetStore(config.app.parquet_dir) if include_stores else None
     openmeteo = OpenMeteoClient(http, config.weather.openmeteo_base_url, config.weather.archive_base_url)
     return config, env, http, duckdb_store, parquet_store, openmeteo
+
+
+def _require_dataset_profile(config: Any, allowed: set[str], *, command: str) -> None:
+    """Fail closed when a command is run from the wrong workspace profile."""
+
+    app_config = getattr(config, "app", None)
+    dataset_profile = str(getattr(app_config, "dataset_profile", "real_market"))
+    if dataset_profile not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise typer.BadParameter(
+            f"{command} requires dataset profile {allowed_text}; active profile is {dataset_profile}."
+        )
+
+
+def _forbid_fixture_paper_rows(rows: list[dict[str, object]]) -> None:
+    """Reject paper artifacts that still carry legacy fabricated book markers."""
+
+    for row in rows:
+        if str(row.get("book_source", "")) == "fixture":
+            raise typer.BadParameter("Fixture book sources are forbidden in paper-trader outputs.")
+        counts = row.get("book_source_counts")
+        if isinstance(counts, Mapping) and int(counts.get("fixture", 0) or 0) > 0:
+            raise typer.BadParameter("Fixture book sources are forbidden in paper-trader outputs.")
+
+
+def _parse_iso_date_option(value: object, *, option_name: str) -> date:
+    """Parse a CLI date option without relying on Typer's date converter."""
+
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise typer.BadParameter(f"{option_name} must use YYYY-MM-DD format.") from exc
+
+
+def _render_weather_training_progress(event: WeatherTrainingProgressEvent) -> None:
+    """Emit one short stderr line per weather-training station/date event."""
+
+    label = f"[{event.item_index}/{event.item_total}] {event.target_date} {event.city}/{event.station_id}"
+    if event.phase == "start":
+        typer.echo(f"{label} start", err=True)
+        return
+    if event.phase == "skip":
+        typer.echo(f"{label} skip existing", err=True)
+        return
+    if event.phase == "available":
+        realized = "na" if event.realized_daily_max is None else f"{event.realized_daily_max:.1f}"
+        typer.echo(f"{label} ok realized_daily_max={realized} elapsed={event.elapsed_seconds:.1f}s", err=True)
+        return
+    status_code = f" status={event.status_code}" if event.status_code is not None else ""
+    message = " ".join(str(event.message).split())[:180]
+    typer.echo(
+        f"{label} {event.phase}{status_code} elapsed={event.elapsed_seconds:.1f}s error={message}",
+        err=True,
+    )
 
 
 def _load_recent_horizon_policy(path: Path = DEFAULT_RECENT_HORIZON_POLICY_PATH) -> dict[str, list[str]]:
@@ -993,8 +1149,6 @@ def _load_books_for_forecast(
     clob: ClobReadClient,
     snapshot: MarketSnapshot,
     forecast_probs: dict[str, float],
-    *,
-    allow_synthetic_fallback: bool = False,
 ) -> dict[str, BookSnapshot]:
     """Fetch one book per modeled outcome for an active market."""
 
@@ -1012,7 +1166,6 @@ def _load_books_for_forecast(
             snapshot,
             token_id,
             outcome_label,
-            allow_synthetic_fallback=allow_synthetic_fallback,
         )
     return books
 
@@ -1065,7 +1218,7 @@ def _rank_execution_candidates(
     candidates: list[dict[str, object]] = []
     for outcome_label, fair_prob in forecast_probs.items():
         book = books.get(outcome_label)
-        if book is None or book.source not in {"clob", "fixture", "gamma"} or not book.asks:
+        if book is None or book.source != "clob" or not book.asks:
             continue
         best_bid = book.best_bid()
         best_ask = book.best_ask()
@@ -2424,25 +2577,6 @@ def _load_full_books_for_snapshot(
     )
 
 
-def _build_gamma_books_for_forecast(
-    snapshot: MarketSnapshot,
-    forecast_probs: dict[str, float],
-) -> dict[str, BookSnapshot]:
-    """Build synthetic books from Gamma mid-prices instead of fetching from CLOB."""
-
-    spec = snapshot.spec
-    if spec is None:
-        return {}
-    books: dict[str, BookSnapshot] = {}
-    for outcome_label in forecast_probs:
-        idx = spec.outcome_labels().index(outcome_label) if outcome_label in spec.outcome_labels() else -1
-        if idx < 0 or idx >= len(spec.token_ids):
-            continue
-        token_id = spec.token_ids[idx]
-        books[outcome_label] = _synthetic_book(snapshot, outcome_label, token_id)
-    return books
-
-
 def _run_paper_model_evaluation(
     *,
     snapshots: list[MarketSnapshot],
@@ -2458,7 +2592,7 @@ def _run_paper_model_evaluation(
     max_spread_bps: int,
     min_liquidity: float,
     book_cache: dict[str, dict[str, BookSnapshot]] | None = None,
-    price_source: str = "gamma",
+    price_source: str = "clob",
     min_market_price: float = 0.0,
     max_city_exposure: float | None = None,
     global_max_exposure: float | None = None,
@@ -2532,14 +2666,13 @@ def _run_paper_model_evaluation(
             )
             continue
 
+        if price_source != "clob":
+            raise typer.BadParameter("Only --price-source clob is supported for real-only paper evaluation.")
+
         if book_cache is not None:
             books = dict(book_cache.get(spec.market_id, {}))
-        elif price_source == "gamma":
-            books = _build_gamma_books_for_forecast(snapshot, forecast.outcome_probabilities)
         else:
             books = _load_books_for_forecast(clob, snapshot, forecast.outcome_probabilities)
-        effective_max_spread_bps = 1_000_000 if price_source == "gamma" else max_spread_bps
-        effective_min_liquidity = 0.0 if price_source == "gamma" else min_liquidity
         evaluation = _evaluate_market_signal(
             snapshot,
             forecast.outcome_probabilities,
@@ -2548,8 +2681,8 @@ def _run_paper_model_evaluation(
             clob=clob,
             default_fee_bps=_default_fee_bps(config),
             edge_threshold=edge_threshold,
-            max_spread_bps=effective_max_spread_bps,
-            min_liquidity=effective_min_liquidity,
+            max_spread_bps=max_spread_bps,
+            min_liquidity=min_liquidity,
             forecast_contract_version=getattr(forecast, "contract_version", "v2"),
             probability_source=getattr(forecast, "probability_source", "raw"),
             distribution_family=getattr(forecast, "distribution_family", "gaussian"),
@@ -2996,137 +3129,6 @@ def _summarize_backtest_metrics(
     return metrics, prediction_frame, trade_frame
 
 
-def _run_synthetic_backtest(
-    frame: pd.DataFrame,
-    *,
-    model_name: str,
-    variant: str | None = None,
-    variant_config: LgbmEMOSVariantConfig | None = None,
-    artifacts_dir: Path,
-    bankroll: float,
-    default_fee_bps: float,
-    split_policy: Literal["market_day", "target_day"] = "market_day",
-    seed: int | None = None,
-    min_train_size: int | None = None,
-    retrain_stride: int = 1,
-) -> tuple[dict[str, float], list[dict[str, object]]]:
-    """Run the existing synthetic-book research backtest.
-
-    retrain_stride: retrain the model only every N test steps; reuse the cached
-    model for intermediate steps.  stride=1 (default) retrains every step.
-    """
-
-    broker = PaperBroker(bankroll=bankroll)
-    prediction_rows: list[dict[str, object]] = []
-    trade_rows: list[dict[str, object]] = []
-    effective_split_policy = _effective_split_policy(split_policy)
-    effective_min_train = min_train_size if min_train_size is not None else 1
-    cached_artifact = None
-    step = 0
-    for train, test in rolling_origin_splits(
-        frame,
-        min_train_size=effective_min_train,
-        test_size=1,
-        split_policy=effective_split_policy,
-    ):
-        train_kwargs: dict[str, object] = {
-            "split_policy": effective_split_policy,
-            "seed": seed,
-        }
-        if variant is not None:
-            train_kwargs["variant"] = variant
-        if variant_config is not None:
-            train_kwargs["variant_config"] = variant_config
-        if cached_artifact is None or step % retrain_stride == 0:
-            cached_artifact = train_model(
-                model_name,
-                train,
-                artifacts_dir,
-                **train_kwargs,
-            )
-        artifact = cached_artifact
-        step += 1
-        for _, row in test.iterrows():
-            spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
-            snapshot = MarketSnapshot(
-                captured_at=datetime.now(tz=UTC),
-                market={"id": spec.market_id},
-                spec=spec,
-                outcome_prices=json.loads(str(row.get("market_prices_json", "{}"))),
-                clob_token_ids=spec.token_ids,
-            )
-            forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
-            winning_label = str(row["winning_outcome"])
-            top_label, top_probability = max(
-                forecast.outcome_probabilities.items(),
-                key=lambda item: item[1],
-            )
-            prediction_rows.append(
-                {
-                    "target_date": row["target_date"],
-                    "city": spec.city,
-                    "y_true": row["realized_daily_max"],
-                    "y_pred": forecast.mean,
-                    "std": forecast.std,
-                    "brier": brier_score(forecast.outcome_probabilities, winning_label),
-                    "crps": crps_from_samples(pd.Series(forecast.samples).to_numpy(), float(row["realized_daily_max"])),
-                    "top_probability": float(top_probability),
-                    "top_is_correct": float(top_label == winning_label),
-                }
-            )
-
-            outcome_labels = list(forecast.outcome_probabilities.keys())
-            books: dict[str, BookSnapshot] = {}
-            for ol in outcome_labels:
-                tid = spec.token_ids[spec.outcome_labels().index(ol)] if spec.token_ids else ol
-                books[ol] = _synthetic_book(snapshot, ol, tid)
-            signal = _best_signal_across_outcomes(
-                snapshot,
-                forecast.outcome_probabilities,
-                books,
-                mode="paper",
-                clob=None,
-                default_fee_bps=default_fee_bps,
-            )
-            if signal is None:
-                continue
-            book = books[signal.outcome_label]
-            size_notional = capped_kelly(signal.edge, signal.fair_probability, broker.bankroll, signal.executable_price)
-            size = size_notional / max(signal.executable_price, 1e-6)
-            if size <= 0:
-                continue
-            fill = broker.simulate_fill(signal, book=book, size=size)
-            if fill is None:
-                continue
-            realized_pnl = settle_position(
-                Position(
-                    outcome_label=fill.outcome_label,
-                    price=fill.price,
-                    size=fill.size,
-                    side=fill.side,
-                ),
-                winning_label,
-                fee_paid=estimate_fee(fill.price * fill.size, taker_bps=default_fee_bps),
-            )
-            trade_rows.append(
-                {
-                    "market_id": fill.market_id,
-                    "city": spec.city,
-                    "decision_horizon": str(row["decision_horizon"]),
-                    "outcome_label": fill.outcome_label,
-                    "winning_outcome": winning_label,
-                    "price": fill.price,
-                    "size": fill.size,
-                    "edge": signal.edge,
-                    "realized_pnl": realized_pnl,
-                    "pricing_source": "synthetic",
-                }
-            )
-
-    metrics, _, _ = _summarize_backtest_metrics(prediction_rows, trade_rows)
-    return metrics, trade_rows
-
-
 def _run_real_history_backtest(
     frame: pd.DataFrame,
     panel: pd.DataFrame,
@@ -3168,7 +3170,7 @@ def _quote_proxy_prices(
     min_price: float = 0.0005,
     max_price: float = 0.9995,
 ) -> tuple[float, float]:
-    """Build a conservative synthetic bid/ask proxy around a historical last trade."""
+    """Build a conservative diagnostic bid/ask proxy around a historical last trade."""
 
     bounded_price = min(max(float(market_price), min_price), max_price)
     bounded_half_spread = max(float(half_spread), 0.0)
@@ -3417,6 +3419,10 @@ def _run_panel_pricing_backtest(
         prediction_rows,
         trade_rows,
         extra_metrics={
+            "dataset_rows": float(len(frame)),
+            "dataset_signature": _frame_signature(frame),
+            "panel_rows": float(len(panel)),
+            "panel_signature": _frame_signature(panel),
             "priced_decision_rows": float(priced_decision_rows),
             "skipped_missing_price": float(skipped_missing_price),
             "skipped_stale_price": float(skipped_stale_price),
@@ -3659,6 +3665,540 @@ def scan_edge(
 
 
 _DEFAULT_FULL_TRAINING_MARKETS = Path("configs/market_inventory/full_training_set_snapshots.json")
+_SYNTHETIC_MARKET_INVENTORIES = {
+    "synthetic_historical_snapshots.json",
+    "synthetic_ready_snapshots.json",
+    "synthetic_gfs_eligible.json",
+}
+_REAL_MARKET_INVENTORIES = {
+    "full_training_set_snapshots.json",
+    "historical_temperature_snapshots.json",
+    "recent_core_temperature_snapshots.json",
+    "active_temperature_watchlist.json",
+}
+
+
+def _count_snapshot_file(path: Path) -> int | None:
+    """Count JSON snapshot records without loading large inventories into memory."""
+
+    if not path.exists():
+        return None
+    count = 0
+    marker = b'"captured_at"'
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            count += chunk.count(marker)
+    return count
+
+
+def _inventory_dataset_profile(markets_path: Path | None) -> str | None:
+    """Infer whether an inventory is real-market or forbidden synthetic by name."""
+
+    if markets_path is None:
+        return None
+    name = markets_path.name
+    if name in _SYNTHETIC_MARKET_INVENTORIES or name.startswith("synthetic_"):
+        return "synthetic"
+    if name in _REAL_MARKET_INVENTORIES:
+        return "real_market"
+    return None
+
+
+def _file_contains_marker(path: Path, marker: bytes) -> bool:
+    """Scan a potentially large file for a byte marker without loading it all."""
+
+    if not path.exists():
+        return False
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                if marker in chunk:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _parquet_row_count(path: Path) -> int | None:
+    """Return Parquet row count from metadata when possible."""
+
+    if not path.exists():
+        return None
+    try:
+        import pyarrow.parquet as pq
+
+        metadata = pq.ParquetFile(path).metadata
+        return int(metadata.num_rows) if metadata is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _duckdb_real_only_contamination_counts(path: Path) -> dict[str, int]:
+    """Return synthetic/fixture row counts that make a warehouse non-canonical."""
+
+    if not path.exists():
+        return {}
+    try:
+        import duckdb
+    except Exception:  # noqa: BLE001
+        return {}
+
+    checks = {
+        "bronze_market_snapshots.synthetic_market_id": (
+            "bronze_market_snapshots",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "bronze_forecast_requests.synthetic_market_id": (
+            "bronze_forecast_requests",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "bronze_truth_snapshots.synthetic_market_id": (
+            "bronze_truth_snapshots",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "silver_market_specs.synthetic_market_id": (
+            "silver_market_specs",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "silver_forecast_runs_hourly.synthetic_market_id": (
+            "silver_forecast_runs_hourly",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "silver_observations_daily.synthetic_market_id": (
+            "silver_observations_daily",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "gold_training_examples.synthetic_market_id": (
+            "gold_training_examples",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "gold_training_examples_tabular.synthetic_market_id": (
+            "gold_training_examples_tabular",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "gold_training_examples_sequence.synthetic_market_id": (
+            "gold_training_examples_sequence",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "gold_backtest_panel.synthetic_market_id": (
+            "gold_backtest_panel",
+            "market_id LIKE 'synthetic_%'",
+        ),
+        "bronze_forecast_requests.fixture_forecast": (
+            "bronze_forecast_requests",
+            "endpoint_kind = 'fixture' OR status = 'fixture' OR availability_status = 'demo_fixture'",
+        ),
+        "silver_forecast_runs_hourly.fixture_forecast": (
+            "silver_forecast_runs_hourly",
+            "endpoint_kind = 'fixture' OR source = 'fixture'",
+        ),
+    }
+    counts: dict[str, int] = {}
+    con = None
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+        for label, (table, predicate) in checks.items():
+            with suppress(Exception):
+                count = int(con.execute(f"SELECT COUNT(*) FROM {table} WHERE {predicate}").fetchone()[0])
+                if count > 0:
+                    counts[label] = count
+    except Exception:  # noqa: BLE001
+        return counts
+    finally:
+        if con is not None:
+            with suppress(Exception):
+                con.close()
+    return counts
+
+
+def _parquet_real_only_contamination_counts(parquet_root: Path) -> dict[str, int]:
+    """Return synthetic/fixture row counts in parquet mirrors and materialized gold files."""
+
+    if not parquet_root.exists():
+        return {}
+    try:
+        import duckdb
+    except Exception:  # noqa: BLE001
+        return {}
+
+    relative_paths = [
+        "bronze/bronze_market_snapshots.parquet",
+        "bronze/bronze_forecast_requests.parquet",
+        "bronze/bronze_truth_snapshots.parquet",
+        "silver/silver_market_specs.parquet",
+        "silver/silver_forecast_runs_hourly.parquet",
+        "silver/silver_observations_daily.parquet",
+        "gold/gold_training_examples.parquet",
+        "gold/gold_training_examples_tabular.parquet",
+        "gold/gold_training_examples_sequence.parquet",
+        "gold/gold_backtest_panel.parquet",
+        "gold/historical_training_set.parquet",
+        "gold/historical_training_set_compat.parquet",
+        "gold/historical_training_set_sequence.parquet",
+        "gold/historical_backtest_panel.parquet",
+        "gold/v2/historical_training_set.parquet",
+        "gold/v2/historical_training_set_compat.parquet",
+        "gold/v2/historical_training_set_sequence.parquet",
+        "gold/v2/historical_backtest_panel.parquet",
+    ]
+    fixture_columns = ("endpoint_kind", "status", "availability_status", "source", "forecast_source_kind")
+    max_exact_scan_bytes = 256 * 1024 * 1024
+    counts: dict[str, int] = {}
+    con = None
+    try:
+        con = duckdb.connect()
+        for relative_path in relative_paths:
+            parquet_path = parquet_root / relative_path
+            if not parquet_path.exists():
+                continue
+            synthetic_marker_found = _file_contains_marker(parquet_path, b"synthetic_")
+            fixture_marker_found = _file_contains_marker(parquet_path, b"fixture") or _file_contains_marker(
+                parquet_path, b"demo_fixture"
+            )
+            if not synthetic_marker_found and not fixture_marker_found:
+                continue
+            if parquet_path.stat().st_size > max_exact_scan_bytes:
+                if synthetic_marker_found:
+                    counts[f"{relative_path}.synthetic_marker_found"] = 1
+                if fixture_marker_found:
+                    counts[f"{relative_path}.fixture_marker_found"] = 1
+                continue
+            parquet_literal = str(parquet_path).replace("'", "''")
+            try:
+                columns = [
+                    str(row[0])
+                    for row in con.execute(
+                        f"DESCRIBE SELECT * FROM read_parquet('{parquet_literal}')"  # noqa: S608
+                    ).fetchall()
+                ]
+            except Exception:  # noqa: BLE001, S112
+                continue
+            if "market_id" in columns:
+                with suppress(Exception):
+                    count = int(
+                        con.execute(
+                            f"SELECT COUNT(*) FROM read_parquet('{parquet_literal}') "  # noqa: S608
+                            "WHERE market_id LIKE 'synthetic_%'"
+                        ).fetchone()[0]
+                    )
+                    if count > 0:
+                        counts[f"{relative_path}.synthetic_market_id"] = count
+            for column in fixture_columns:
+                if column not in columns:
+                    continue
+                with suppress(Exception):
+                    count = int(
+                        con.execute(
+                            f"SELECT COUNT(*) FROM read_parquet('{parquet_literal}') "  # noqa: S608
+                            f"WHERE {column} IN ('fixture', 'demo_fixture')"
+                        ).fetchone()[0]
+                    )
+                    if count > 0:
+                        counts[f"{relative_path}.{column}_fixture"] = count
+    finally:
+        if con is not None:
+            with suppress(Exception):
+                con.close()
+    return counts
+
+
+def _trust_check_report(
+    *,
+    config: Any,
+    markets_path: Path | None,
+    allow_canonical_overwrite: bool = False,
+    output_name: str = "historical_training_set",
+    workflow: Literal["real_market", "weather_training"] = "real_market",
+) -> dict[str, object]:
+    """Build a fail-closed operational trust report for the active workspace."""
+
+    inventory_profile = _inventory_dataset_profile(markets_path)
+    dataset_profile = config.app.dataset_profile
+    synthetic_marker_found = bool(markets_path is not None and _file_contains_marker(markets_path, b"synthetic_"))
+    contamination_counts = _duckdb_real_only_contamination_counts(config.app.duckdb_path)
+    parquet_contamination_counts = _parquet_real_only_contamination_counts(config.app.parquet_dir)
+    issues: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+
+    if markets_path is not None and not markets_path.exists():
+        issues.append({"check": "markets_path_exists", "message": f"missing inventory: {markets_path}"})
+
+    if workflow == "weather_training":
+        if dataset_profile != "weather_real":
+            issues.append(
+                {
+                    "check": "dataset_profile",
+                    "message": (
+                        f"weather training requires dataset profile weather_real; active profile is {dataset_profile}"
+                    ),
+                }
+            )
+        if markets_path is not None:
+            issues.append(
+                {
+                    "check": "markets_path_forbidden",
+                    "message": "weather training must not use Polymarket inventory files",
+                }
+            )
+    elif dataset_profile != "real_market":
+        issues.append(
+            {
+                "check": "dataset_profile",
+                "message": f"unsupported dataset profile {dataset_profile}; only real_market is allowed",
+            }
+        )
+
+    if workflow == "real_market" and inventory_profile is not None and inventory_profile != dataset_profile:
+        issues.append(
+            {
+                "check": "workspace_inventory_match",
+                "message": (
+                    f"workspace profile is {dataset_profile}, but {markets_path} looks like "
+                    f"{inventory_profile}"
+                ),
+            }
+        )
+
+    if inventory_profile == "synthetic" or synthetic_marker_found:
+        issues.append(
+            {
+                "check": "synthetic_inventory_forbidden",
+                "message": "synthetic inventories are forbidden in real-only canonical workflows",
+            }
+        )
+
+    if contamination_counts:
+        issues.append(
+            {
+                "check": "warehouse_contamination",
+                "message": f"warehouse contains non-canonical synthetic/fixture rows: {contamination_counts}",
+            }
+        )
+
+    if parquet_contamination_counts:
+        issues.append(
+            {
+                "check": "parquet_contamination",
+                "message": f"parquet mirrors contain non-canonical synthetic/fixture rows: {parquet_contamination_counts}",
+            }
+        )
+
+    if allow_canonical_overwrite and output_name == "historical_training_set":
+        warnings.append(
+            {
+                "check": "canonical_overwrite",
+                "message": "canonical overwrite requested; verify this is an intentional promotion",
+            }
+        )
+
+    lock_path = config.app.duckdb_path.with_suffix(config.app.duckdb_path.suffix + ".lock")
+    if lock_path.exists():
+        warnings.append({"check": "warehouse_lock", "message": f"lock file exists: {lock_path}"})
+
+    dataset_path = config.app.parquet_dir / "gold" / "historical_training_set.parquet"
+    v2_dataset_path = config.app.parquet_dir / "gold" / "v2" / "historical_training_set.parquet"
+    target_v2_output_path = config.app.parquet_dir / "gold" / "v2" / f"{output_name}.parquet"
+    champion_metadata_path = config.app.public_model_dir / "champion.json"
+    if workflow == "real_market" and not champion_metadata_path.exists():
+        warnings.append(
+            {
+                "check": "champion_metadata",
+                "message": f"public champion metadata missing: {champion_metadata_path}",
+            }
+        )
+
+    return {
+        "ok": not issues,
+        "workspace": config.app.workspace_name,
+        "dataset_profile": dataset_profile,
+        "workflow": workflow,
+        "data_dir": str(config.app.data_dir),
+        "artifacts_dir": str(config.app.artifacts_dir),
+        "duckdb_path": str(config.app.duckdb_path),
+        "markets_path": str(markets_path) if markets_path is not None else None,
+        "inventory_profile": inventory_profile,
+        "synthetic_marker_found": synthetic_marker_found,
+        "warehouse_contamination_counts": contamination_counts,
+        "parquet_contamination_counts": parquet_contamination_counts,
+        "inventory_rows": _count_snapshot_file(markets_path) if markets_path is not None else None,
+        "allow_canonical_overwrite": allow_canonical_overwrite,
+        "output_name": output_name,
+        "dataset_rows": _parquet_row_count(dataset_path),
+        "v2_dataset_rows": _parquet_row_count(v2_dataset_path),
+        "target_v2_output_path": str(target_v2_output_path),
+        "target_v2_output_rows": _parquet_row_count(target_v2_output_path),
+        "champion_metadata_path": str(champion_metadata_path),
+        "champion_metadata_exists": champion_metadata_path.exists(),
+        "issues": issues,
+        "warnings": warnings,
+    }
+
+
+def _raise_for_trust_issues(report: dict[str, object]) -> None:
+    """Raise a Typer error when a preflight trust report has fatal issues."""
+
+    issues = report.get("issues", [])
+    if not issues:
+        return
+    messages = [
+        str(issue.get("message", issue))
+        for issue in issues
+        if isinstance(issue, dict)
+    ]
+    raise typer.BadParameter("; ".join(messages) if messages else "trust-check failed")
+
+
+@app.command("trust-check")
+def trust_check(
+    markets_path: Path | None = None,
+    allow_canonical_overwrite: Annotated[bool, typer.Option("--allow-canonical-overwrite")] = False,
+    output_name: str = "historical_training_set",
+    workflow: Literal["real_market", "weather_training"] = "real_market",
+    as_json: Annotated[bool, typer.Option("--json/--table")] = False,
+) -> None:
+    """Check workspace, inventory, and canonical-write safety before running long jobs."""
+
+    config, _ = load_settings()
+    report = _trust_check_report(
+        config=config,
+        markets_path=markets_path,
+        allow_canonical_overwrite=allow_canonical_overwrite,
+        output_name=output_name,
+        workflow=workflow,
+    )
+    if as_json:
+        console.print_json(data=report)
+    else:
+        table = Table(title="PMTMAX Trust Check")
+        table.add_column("Field")
+        table.add_column("Value")
+        for key in (
+            "ok",
+            "workspace",
+            "dataset_profile",
+            "workflow",
+            "markets_path",
+            "inventory_profile",
+            "synthetic_marker_found",
+            "warehouse_contamination_counts",
+            "parquet_contamination_counts",
+            "inventory_rows",
+            "data_dir",
+            "artifacts_dir",
+            "duckdb_path",
+            "dataset_rows",
+            "v2_dataset_rows",
+            "target_v2_output_path",
+            "target_v2_output_rows",
+            "champion_metadata_exists",
+        ):
+            table.add_row(key, str(report.get(key)))
+        console.print(table)
+        for warning in report["warnings"]:
+            console.print(f"[yellow]WARN[/] {warning['check']}: {warning['message']}")
+        for issue in report["issues"]:
+            console.print(f"[red]FAIL[/] {issue['check']}: {issue['message']}")
+    if not report["ok"]:
+        raise typer.Exit(1)
+
+
+@app.command("collect-weather-training")
+def collect_weather_training(
+    station_catalog: Path = Path("configs/market_inventory/station_catalog.json"),
+    date_from: str | None = typer.Option(None, help="Inclusive local target date start (YYYY-MM-DD)"),
+    date_to: str | None = typer.Option(None, help="Inclusive local target date end (YYYY-MM-DD)"),
+    model: str = "gfs_seamless",
+    missing_only: Annotated[bool, typer.Option("--missing-only/--no-missing-only")] = True,
+    workers: int = 1,
+    rate_limit_profile: str = "free",
+    http_timeout_seconds: int = typer.Option(15, min=1, help="Per-request HTTP timeout for Open-Meteo."),
+    http_retries: int = typer.Option(1, min=0, help="Extra HTTP retries per Open-Meteo request."),
+    http_retry_wait_min_seconds: float = typer.Option(1.0, min=0.0, help="Minimum retry backoff seconds."),
+    http_retry_wait_max_seconds: float = typer.Option(8.0, min=0.0, help="Maximum retry backoff seconds."),
+    progress: Annotated[bool, typer.Option("--progress/--no-progress")] = True,
+    cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+) -> None:
+    """Collect station/date real-weather training rows in the weather_train workspace."""
+
+    station_catalog = Path(_resolve_option_value(station_catalog, Path("configs/market_inventory/station_catalog.json")))
+    if not station_catalog.exists():
+        raise typer.BadParameter(f"Station catalog does not exist: {station_catalog}")
+    start_default, end_default = default_weather_training_date_range()
+    date_from_value = _resolve_option_value(date_from)
+    date_to_value = _resolve_option_value(date_to)
+    resolved_date_from = (
+        _parse_iso_date_option(date_from_value, option_name="--date-from")
+        if date_from_value is not None
+        else start_default
+    )
+    resolved_date_to = (
+        _parse_iso_date_option(date_to_value, option_name="--date-to")
+        if date_to_value is not None
+        else end_default
+    )
+    cities = _resolve_option_value(cities)
+
+    config, env = load_settings()
+    configure_logging(env.log_level)
+    set_global_seed(config.app.random_seed)
+    http = CachedHttpClient(
+        config.app.cache_dir,
+        timeout_seconds=http_timeout_seconds,
+        retries=http_retries,
+        retry_wait_min_seconds=http_retry_wait_min_seconds,
+        retry_wait_max_seconds=http_retry_wait_max_seconds,
+    )
+    openmeteo = OpenMeteoClient(http, config.weather.openmeteo_base_url, config.weather.archive_base_url)
+    _raise_for_trust_issues(
+        _trust_check_report(
+            config=config,
+            markets_path=None,
+            workflow="weather_training",
+            output_name="weather_training_set",
+        )
+    )
+    try:
+        result = collect_weather_training_data(
+            openmeteo=openmeteo,
+            raw_root=config.app.raw_dir,
+            parquet_root=config.app.parquet_dir,
+            station_cities=cities,
+            date_from=resolved_date_from,
+            date_to=resolved_date_to,
+            model=model,
+            missing_only=missing_only,
+            workers=workers,
+            rate_limit_profile=rate_limit_profile,
+            progress_callback=_render_weather_training_progress if progress else None,
+        )
+    finally:
+        http.close()
+    payload = {
+        "workspace": config.app.workspace_name,
+        "dataset_profile": config.app.dataset_profile,
+        "station_catalog": str(station_catalog),
+        "date_from": resolved_date_from.isoformat(),
+        "date_to": resolved_date_to.isoformat(),
+        "model": model,
+        "paths": {
+            "bronze": str(result.paths.bronze_path),
+            "silver": str(result.paths.silver_path),
+            "gold": str(result.paths.gold_path),
+        },
+        "requested_rows": result.requested_rows,
+        "collected_rows": result.collected_rows,
+        "skipped_existing_rows": result.skipped_existing_rows,
+        "failed_rows": result.failed_rows,
+        "status_counts": result.status_counts,
+        "failures": result.failures[:20],
+        "workers_requested": result.workers_requested,
+        "workers_effective": result.workers_effective,
+        "http_timeout_seconds": http_timeout_seconds,
+        "http_retries": http_retries,
+        "http_retry_wait_min_seconds": http_retry_wait_min_seconds,
+        "http_retry_wait_max_seconds": http_retry_wait_max_seconds,
+    }
+    console.print_json(data=payload)
 
 
 @app.command("build-dataset")
@@ -3677,6 +4217,9 @@ def build_dataset(
 ) -> None:
     """Backfill bronze/silver tables, then materialize a gold training dataset."""
 
+    if allow_demo_fixture_fallback:
+        raise typer.BadParameter("Fixture forecast fallback is test/demo-only and cannot be used in real-only dataset builds.")
+
     if markets_path is None and _DEFAULT_FULL_TRAINING_MARKETS.exists():
         console.print(
             f"[yellow]No --markets-path given; defaulting to {_DEFAULT_FULL_TRAINING_MARKETS}[/yellow]"
@@ -3684,6 +4227,15 @@ def build_dataset(
         markets_path = _DEFAULT_FULL_TRAINING_MARKETS
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _require_dataset_profile(config, {"real_market"}, command="build-dataset")
+    _raise_for_trust_issues(
+        _trust_check_report(
+            config=config,
+            markets_path=markets_path,
+            allow_canonical_overwrite=allow_canonical_overwrite,
+            output_name=output_name,
+        )
+    )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo, use_truth_cache=not truth_no_cache)
     run = pipeline.warehouse.start_run(
@@ -3805,10 +4357,18 @@ def backfill_forecasts(
     missing_only: Annotated[bool, typer.Option("--missing-only/--no-missing-only")] = False,
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
     allow_demo_fixture_fallback: bool = False,
+    workers: Annotated[int, typer.Option("--workers")] = 1,
 ) -> None:
     """Backfill forecast payloads and normalized hourly forecast tables."""
 
+    if allow_demo_fixture_fallback:
+        raise typer.BadParameter("Fixture forecast fallback is test/demo-only and cannot be used in real-only forecast backfills.")
+
+    if workers < 1 or workers > 3:
+        raise typer.BadParameter("--workers must be between 1 and 3; keep Open-Meteo backfills rate-safe.")
+
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _raise_for_trust_issues(_trust_check_report(config=config, markets_path=markets_path))
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo)
     run = pipeline.warehouse.start_run(
@@ -3834,6 +4394,7 @@ def backfill_forecasts(
             allow_fixture_fallback=allow_demo_fixture_fallback,
             single_run_horizons=single_run_horizons,
             missing_only=missing_only,
+            workers=workers,
         )
         pipeline.warehouse.finish_run(run, status="completed")
     except Exception as exc:  # noqa: BLE001
@@ -3858,6 +4419,7 @@ def backfill_truth(
     """Backfill official truth snapshots and normalized daily observations."""
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _raise_for_trust_issues(_trust_check_report(config=config, markets_path=markets_path))
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo, use_truth_cache=not truth_no_cache)
     run = pipeline.warehouse.start_run(
@@ -3894,17 +4456,53 @@ def backfill_truth(
     )
 
 
+def _single_row_count(frame: object, *, fallback: int) -> int:
+    """Extract a one-row count frame returned by pipeline commands."""
+
+    if isinstance(frame, pd.DataFrame) and not frame.empty and "row_count" in frame.columns:
+        return int(frame.iloc[0]["row_count"])
+    return fallback
+
+
 @app.command("backfill-price-history")
 def backfill_price_history(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
     interval: str = "max",
     fidelity: int = 60,
+    only_missing: Annotated[bool, typer.Option("--only-missing/--all-tokens")] = False,
+    price_no_cache: Annotated[bool, typer.Option("--price-no-cache/--price-use-cache")] = False,
+    target_date_from: Annotated[str | None, typer.Option("--target-date-from")] = None,
+    target_date_to: Annotated[str | None, typer.Option("--target-date-to")] = None,
+    offset_markets: Annotated[int, typer.Option("--offset-markets")] = 0,
+    limit_markets: Annotated[int | None, typer.Option("--limit-markets")] = None,
 ) -> None:
     """Backfill Polymarket official outcome-token price history into bronze/silver tables."""
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
+    if offset_markets < 0:
+        raise typer.BadParameter("--offset-markets must be >= 0")
+    if limit_markets is not None and limit_markets < 1:
+        raise typer.BadParameter("--limit-markets must be >= 1")
+    try:
+        date_from = datetime.fromisoformat(target_date_from).date() if target_date_from else None
+        date_to = datetime.fromisoformat(target_date_to).date() if target_date_to else None
+    except ValueError as exc:
+        raise typer.BadParameter("target dates must use YYYY-MM-DD") from exc
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise typer.BadParameter("--target-date-from must be <= --target-date-to")
+    if date_from is not None or date_to is not None:
+        snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot.spec is not None
+            and (date_from is None or snapshot.spec.target_local_date >= date_from)
+            and (date_to is None or snapshot.spec.target_local_date <= date_to)
+        ]
+    if offset_markets or limit_markets is not None:
+        end = None if limit_markets is None else offset_markets + limit_markets
+        snapshots = snapshots[offset_markets:end]
     pipeline = _backfill_pipeline(config, http, openmeteo)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     run = pipeline.warehouse.start_run(
@@ -3916,6 +4514,12 @@ def backfill_price_history(
             cities=cities,
             interval=interval,
             fidelity=fidelity,
+            only_missing=only_missing,
+            price_no_cache=price_no_cache,
+            target_date_from=target_date_from,
+            target_date_to=target_date_to,
+            offset_markets=offset_markets,
+            limit_markets=limit_markets,
         ),
     )
     pipeline.run_id = run.run_id
@@ -3925,7 +4529,8 @@ def backfill_price_history(
             clob=clob,
             interval=interval,
             fidelity=fidelity,
-            use_cache=True,
+            use_cache=not price_no_cache,
+            only_missing=only_missing,
         )
         pipeline.warehouse.finish_run(run, status="completed")
     except Exception as exc:  # noqa: BLE001
@@ -3935,16 +4540,35 @@ def backfill_price_history(
         pipeline.warehouse.close()
         http.close()
     status_counts: dict[str, int] = {}
-    if not result["bronze_price_history_requests"].empty and "status" in result["bronze_price_history_requests"].columns:
+    batch_bronze = result.get("batch_bronze_price_history_requests", result["bronze_price_history_requests"])
+    batch_silver = result.get("batch_silver_price_timeseries", result["silver_price_timeseries"])
+    persisted_bronze_count = _single_row_count(
+        result.get("persisted_bronze_price_history_request_count"),
+        fallback=len(result["bronze_price_history_requests"]),
+    )
+    persisted_silver_count = _single_row_count(
+        result.get("persisted_silver_price_timeseries_count"),
+        fallback=len(result["silver_price_timeseries"]),
+    )
+    if not batch_bronze.empty and "status" in batch_bronze.columns:
         status_counts = {
             str(key): int(value)
-            for key, value in result["bronze_price_history_requests"]["status"].astype(str).value_counts().to_dict().items()
+            for key, value in batch_bronze["status"].astype(str).value_counts().to_dict().items()
         }
     console.print_json(
         data={
-            "bronze_price_history_requests": len(result["bronze_price_history_requests"]),
-            "silver_price_timeseries": len(result["silver_price_timeseries"]),
+            "batch_bronze_price_history_requests": len(batch_bronze),
+            "batch_silver_price_timeseries": len(batch_silver),
+            "persisted_bronze_price_history_requests": persisted_bronze_count,
+            "persisted_silver_price_timeseries": persisted_silver_count,
             "status_counts": status_counts,
+            "only_missing": only_missing,
+            "use_cache": not price_no_cache,
+            "selected_markets": len(snapshots),
+            "target_date_from": target_date_from,
+            "target_date_to": target_date_to,
+            "offset_markets": offset_markets,
+            "limit_markets": limit_markets,
         }
     )
 
@@ -4105,6 +4729,14 @@ def materialize_training_set(
     """Materialize the gold training dataset from backfilled bronze/silver tables."""
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _raise_for_trust_issues(
+        _trust_check_report(
+            config=config,
+            markets_path=markets_path,
+            allow_canonical_overwrite=allow_canonical_overwrite,
+            output_name=output_name,
+        )
+    )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo)
     run = pipeline.warehouse.start_run(
@@ -4383,6 +5015,9 @@ def bootstrap_lab(
 ) -> None:
     """Build a usable research dataset environment in one command."""
 
+    if allow_demo_fixture_fallback:
+        raise typer.BadParameter("Fixture forecast fallback is test/demo-only and cannot be used in real-only bootstrap runs.")
+
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
     snapshots = _bootstrap_snapshots(markets_path=markets_path, cities=cities)
     archived_legacy_paths: list[str] = []
@@ -4548,6 +5183,7 @@ def train_baseline(
     """Train a baseline probabilistic model."""
 
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="train-baseline")
     frame = pd.read_parquet(dataset_path)
     artifact = train_model(
         require_supported_model_name(model_name),
@@ -4566,13 +5202,18 @@ def train_advanced(
     artifacts_dir: Path = _default_artifacts_dir(),
     variant: str | None = None,
     variant_spec: Path | None = None,
+    pretrained_weather_model: Path | None = None,
     publish_champion: bool = False,
 ) -> None:
     """Train an advanced probabilistic model inside the active workspace."""
 
     if publish_champion:
         raise typer.BadParameter("`train-advanced` no longer publishes the public alias. Use `uv run pmtmax publish-champion` after recent-core validation.")
+    pretrained_weather_model = _resolve_option_value(pretrained_weather_model)
+    if pretrained_weather_model is not None and not Path(pretrained_weather_model).exists():
+        raise typer.BadParameter(f"Pretrained weather model does not exist: {pretrained_weather_model}")
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="train-advanced")
     frame = pd.read_parquet(dataset_path)
     resolved_variant, resolved_variant_config, _ = _resolve_lgbm_variant_inputs(
         model_name=model_name,
@@ -4588,7 +5229,65 @@ def train_advanced(
         variant=resolved_variant,
         variant_config=resolved_variant_config,
     )
+    if pretrained_weather_model is not None:
+        sidecar = Path(str(artifact.path)).with_suffix(".json")
+        payload = artifact.model_dump(mode="json")
+        payload["pretrained_weather_model"] = str(pretrained_weather_model)
+        payload["adaptation_note"] = "Trained on real Polymarket rows with weather pretrain artifact recorded for two-stage lineage."
+        dump_json(sidecar, payload)
     console.print(f"Trained {model_name} -> {artifact.path}")
+
+
+@app.command("train-weather-pretrain")
+def train_weather_pretrain(
+    dataset_path: Path = _default_weather_training_path(),
+    model_name: str = "gaussian_emos",
+    artifacts_dir: Path = _default_artifacts_dir(),
+    variant: str | None = None,
+    variant_spec: Path | None = None,
+) -> None:
+    """Train a weather-only pretrain artifact from weather_train gold parquet."""
+
+    config, _ = load_settings()
+    _require_dataset_profile(config, {"weather_real"}, command="train-weather-pretrain")
+    dataset_path = Path(_resolve_option_value(dataset_path, _default_weather_training_path()))
+    if not dataset_path.exists():
+        raise typer.BadParameter(f"Weather training dataset does not exist: {dataset_path}")
+    frame = pd.read_parquet(dataset_path)
+    if frame.empty:
+        raise typer.BadParameter("Weather training dataset is empty.")
+    forbidden_columns = {"market_id", "market_spec_json", "market_prices_json", "clob_token_ids"}.intersection(frame.columns)
+    if forbidden_columns:
+        raise typer.BadParameter(
+            f"Weather pretrain input must not contain Polymarket columns: {sorted(forbidden_columns)}"
+        )
+    resolved_variant, resolved_variant_config, _ = _resolve_lgbm_variant_inputs(
+        model_name=model_name,
+        variant=variant,
+        variant_spec=variant_spec,
+    )
+    artifact = train_model(
+        require_supported_model_name(model_name),
+        frame,
+        artifacts_dir,
+        split_policy="target_day",
+        seed=config.app.random_seed,
+        variant=resolved_variant,
+        variant_config=resolved_variant_config,
+    )
+    sidecar = Path(str(artifact.path)).with_suffix(".json")
+    payload = artifact.model_dump(mode="json")
+    payload.update(
+        {
+            "dataset_profile": config.app.dataset_profile,
+            "workspace_name": config.app.workspace_name,
+            "dataset_path": str(dataset_path),
+            "weather_training_rows": int(len(frame)),
+            "pretrain_scope": "weather_real_only",
+        }
+    )
+    dump_json(sidecar, payload)
+    console.print_json(data=payload)
 
 
 @app.command("backtest")
@@ -4597,7 +5296,7 @@ def backtest(
     model_name: str = DEFAULT_MODEL_NAME,
     artifacts_dir: Path = _default_artifacts_dir(),
     bankroll: float = 10_000.0,
-    pricing_source: Literal["synthetic", "real_history", "quote_proxy"] = "synthetic",
+    pricing_source: Literal["real_history", "quote_proxy"] = "real_history",
     panel_path: Path = _default_dataset_path(panel=True),
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
@@ -4607,13 +5306,14 @@ def backtest(
     last_n: int = 0,
     retrain_stride: int = 1,
 ) -> None:
-    """Run a rolling-origin backtest with synthetic or official historical pricing.
+    """Run a rolling-origin backtest with official historical pricing.
 
     Use --last-n N to run only the final N rows as test points (fast-eval proxy).
     Use --retrain-stride N to retrain the model every N steps (e.g. 30 for ~47 min).
     """
 
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="backtest")
     resolved_model_name = _resolve_model_name_alias(model_name)
     # If model_name is an alias and variant was not explicitly provided, pick up
     # the variant stored in the alias metadata (e.g. champion → high_capacity_fast).
@@ -4645,79 +5345,70 @@ def backtest(
     if len(frame) < 2:
         raise typer.BadParameter("Need at least two rows to backtest.")
 
-    if pricing_source == "synthetic":
-        metrics, trade_rows = _run_synthetic_backtest(
+    if not panel_path.exists():
+        msg = (
+            f"Backtest panel does not exist: {panel_path}. "
+            "Run `uv run pmtmax materialize-backtest-panel` first."
+        )
+        raise typer.BadParameter(msg)
+    panel = pd.read_parquet(panel_path)
+    panel_required = {"market_id", "decision_horizon", "outcome_label", "coverage_status", "market_price"}
+    missing_panel = panel_required.difference(panel.columns)
+    if missing_panel:
+        msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
+        raise typer.BadParameter(msg)
+    if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
+        msg = (
+            "Backtest panel has no coverage_status=ok rows. "
+            "Run `uv run pmtmax summarize-price-history-coverage` to inspect gaps."
+        )
+        raise typer.BadParameter(msg)
+    if pricing_source == "real_history":
+        metrics, trade_rows = _run_real_history_backtest(
             frame,
+            panel,
             model_name=resolved_model_name,
             variant=variant,
             variant_config=variant_config,
             artifacts_dir=artifacts_dir,
-            bankroll=bankroll,
+            flat_stake=flat_stake,
             default_fee_bps=default_fee_bps,
             split_policy=split_policy,
             seed=config.app.random_seed,
             min_train_size=fast_eval_min_train,
             retrain_stride=retrain_stride,
         )
-        metrics_output = _default_backtest_output("backtest_metrics.json")
-        trades_output = _default_backtest_output("backtest_trades.json")
+        metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
+        trades_output = _default_backtest_output("backtest_trades_real_history.json")
     else:
-        if not panel_path.exists():
-            msg = (
-                f"Backtest panel does not exist: {panel_path}. "
-                "Run `uv run pmtmax materialize-backtest-panel` first."
-            )
-            raise typer.BadParameter(msg)
-        panel = pd.read_parquet(panel_path)
-        panel_required = {"market_id", "decision_horizon", "outcome_label", "coverage_status", "market_price"}
-        missing_panel = panel_required.difference(panel.columns)
-        if missing_panel:
-            msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
-            raise typer.BadParameter(msg)
-        if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
-            msg = (
-                "Backtest panel has no coverage_status=ok rows. "
-                "Run `uv run pmtmax summarize-price-history-coverage` to inspect gaps."
-            )
-            raise typer.BadParameter(msg)
-        if pricing_source == "real_history":
-            metrics, trade_rows = _run_real_history_backtest(
-                frame,
-                panel,
-                model_name=resolved_model_name,
-                variant=variant,
-                variant_config=variant_config,
-                artifacts_dir=artifacts_dir,
-                flat_stake=flat_stake,
-                default_fee_bps=default_fee_bps,
-                split_policy=split_policy,
-                seed=config.app.random_seed,
-                min_train_size=fast_eval_min_train,
-                retrain_stride=retrain_stride,
-            )
-            metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
-            trades_output = _default_backtest_output("backtest_trades_real_history.json")
-        else:
-            metrics, trade_rows = _run_quote_proxy_backtest(
-                frame,
-                panel,
-                model_name=resolved_model_name,
-                variant=variant,
-                variant_config=variant_config,
-                artifacts_dir=artifacts_dir,
-                flat_stake=flat_stake,
-                default_fee_bps=default_fee_bps,
-                quote_proxy_half_spread=quote_proxy_half_spread,
-                split_policy=split_policy,
-                seed=config.app.random_seed,
-                min_train_size=fast_eval_min_train,
-                retrain_stride=retrain_stride,
-            )
-            metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
-            trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
+        metrics, trade_rows = _run_quote_proxy_backtest(
+            frame,
+            panel,
+            model_name=resolved_model_name,
+            variant=variant,
+            variant_config=variant_config,
+            artifacts_dir=artifacts_dir,
+            flat_stake=flat_stake,
+            default_fee_bps=default_fee_bps,
+            quote_proxy_half_spread=quote_proxy_half_spread,
+            split_policy=split_policy,
+            seed=config.app.random_seed,
+            min_train_size=fast_eval_min_train,
+            retrain_stride=retrain_stride,
+        )
+        metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
+        trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
 
     metrics["contract_version"] = "v2"
     metrics["model_name"] = resolved_model_name
+    metrics["variant"] = variant or ""
+    metrics["dataset_path"] = str(dataset_path)
+    metrics["dataset_artifact_signature"] = path_signature(Path(dataset_path))
+    metrics["panel_path"] = str(panel_path)
+    metrics["panel_artifact_signature"] = path_signature(Path(panel_path))
+    metrics["artifacts_dir"] = str(artifacts_dir)
+    metrics["pricing_source"] = pricing_source
+    metrics["retrain_stride"] = float(retrain_stride)
     metrics["split_policy"] = _effective_split_policy(split_policy)
     metrics["leakage_audit_passed"] = True
     dump_json(metrics_output, metrics)
@@ -4980,6 +5671,10 @@ def _run_grouped_holdout_ablation(
         "artifact_variant": artifact.variant,
         "artifact_status": artifact.status,
         "artifact_diagnostics": artifact.diagnostics,
+        "artifact_metrics": artifact.metrics,
+        "artifact_dataset_signature": artifact.dataset_signature,
+        "artifact_split_policy": artifact.split_policy,
+        "artifact_seed": artifact.seed,
         "calibration_path": artifact.calibration_path,
     }
     return real_metrics, quote_metrics, metadata
@@ -5136,6 +5831,7 @@ def benchmark_ablations(
     """Benchmark internal ablation variants with a grouped one-shot holdout."""
 
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="benchmark-ablations")
     family = require_supported_model_name(model_name)
     available_variants = supported_ablation_variants(family)
     if not available_variants:
@@ -5224,7 +5920,13 @@ def benchmark_ablations(
         "split_policies": resolved_split_policies,
         "seeds": benchmark_seeds,
         "dataset_path": str(dataset_path),
+        "dataset_artifact_signature": path_signature(Path(dataset_path)),
+        "dataset_frame_signature": _frame_signature(frame),
         "panel_path": str(panel_path),
+        "panel_artifact_signature": path_signature(Path(panel_path)),
+        "panel_frame_signature": _frame_signature(panel),
+        "artifacts_dir": str(artifacts_dir),
+        "quote_proxy_half_spread": quote_proxy_half_spread,
         "leaderboard_path": str(leaderboard_output),
         "leaderboard_csv_path": str(leaderboard_csv_output),
         "generated_at": datetime.now(tz=UTC).isoformat(),
@@ -5255,6 +5957,7 @@ def benchmark_models(
         raise typer.BadParameter("`benchmark-models` no longer publishes public aliases. Use `uv run pmtmax publish-champion` after the recent-core gate passes.")
 
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="benchmark-models")
     frame = pd.read_parquet(dataset_path)
     if not panel_path.exists():
         msg = (
@@ -5324,6 +6027,15 @@ def benchmark_models(
         "split_policy": split_policy,
         "workspace_name": config.app.workspace_name,
         "dataset_profile": config.app.dataset_profile,
+        "dataset_path": str(dataset_path),
+        "dataset_artifact_signature": path_signature(Path(dataset_path)),
+        "dataset_frame_signature": _frame_signature(frame),
+        "panel_path": str(panel_path),
+        "panel_artifact_signature": path_signature(Path(panel_path)),
+        "panel_frame_signature": _frame_signature(panel),
+        "artifacts_dir": str(artifacts_dir),
+        "retrain_stride": retrain_stride,
+        "quote_proxy_half_spread": quote_proxy_half_spread,
         "candidate_models": ordered_models,
         "supported_models": list(supported_model_names()),
         "seeds": benchmark_seeds,
@@ -5390,7 +6102,7 @@ def publish_champion(
         )
 
     resolved_model_name = require_supported_model_name(
-        _resolve_option_value(model_name, _infer_model_name_from_artifact(model_path))
+        _resolve_option_value(model_name) or _infer_model_name_from_artifact(model_path)
     )
     if variant is None and model_path.stem.startswith(f"{resolved_model_name}__"):
         variant = model_path.stem.split("__", 1)[1]
@@ -5404,6 +6116,7 @@ def publish_champion(
         )
 
     config, _ = load_settings()
+    _require_dataset_profile(config, {"real_market"}, command="publish-champion")
     metadata = _publish_existing_model_alias(
         alias_name=DEFAULT_MODEL_NAME,
         model_name=resolved_model_name,
@@ -5422,7 +6135,7 @@ def publish_champion(
                 "sample_adequacy": sample_adequacy,
                 "city_gate_details": city_gate_details,
                 "aggregate_policy_real_history_metrics": dict(summary.get("aggregate_policy_real_history_metrics", {})),
-                "aggregate_policy_quote_proxy_metrics": dict(summary.get("aggregate_policy_quote_proxy_metrics", {})),
+                "diagnostic_policy_quote_proxy_metrics": dict(summary.get("aggregate_policy_quote_proxy_metrics", {})),
                 "aggregate_panel_coverage": dict(summary.get("aggregate_panel_coverage", {})),
                 "recent_core_summary_path": str(recent_core_summary_path),
             },
@@ -5544,13 +6257,14 @@ def autoresearch_init(
 
 @app.command("autoresearch-step")
 def autoresearch_step(
-    spec_path: Path,
+    spec_path: Annotated[Path | None, typer.Argument(help="Candidate YAML spec path.")] = None,
     dataset_path: Path = _default_dataset_path(),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+    spec_path_option: Annotated[Path | None, typer.Option("--spec-path", help="Candidate YAML spec path.")] = None,
 ) -> None:
     """Train one candidate spec, run quick eval, and append keep/discard/crash to the ledger."""
 
-    spec_path = _resolve_option_value(spec_path)
+    spec_path = _resolve_autoresearch_spec_path(spec_path, spec_path_option)
     dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     spec = load_lgbm_autoresearch_spec(spec_path)
@@ -5629,7 +6343,7 @@ def autoresearch_step(
 
 @app.command("autoresearch-gate")
 def autoresearch_gate(
-    spec_path: Path,
+    spec_path: Annotated[Path | None, typer.Argument(help="Candidate YAML spec path.")] = None,
     dataset_path: Path = _default_dataset_path(),
     panel_path: Path = _default_dataset_path(panel=True),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
@@ -5637,10 +6351,11 @@ def autoresearch_gate(
     seeds: Annotated[list[int] | None, typer.Option("--seed")] = None,
     flat_stake: float = 1.0,
     quote_proxy_half_spread: float = 0.02,
+    spec_path_option: Annotated[Path | None, typer.Option("--spec-path", help="Candidate YAML spec path.")] = None,
 ) -> None:
     """Run grouped-holdout benchmark gates for one baseline/candidate pair."""
 
-    spec_path = _resolve_option_value(spec_path)
+    spec_path = _resolve_autoresearch_spec_path(spec_path, spec_path_option)
     dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
     panel_path = _resolve_option_value(panel_path, _default_dataset_path(panel=True))
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
@@ -5720,17 +6435,28 @@ def autoresearch_gate(
     for split_policy in resolved_split_policies:
         baseline_row = next(row for row in leaderboard_rows if row["split_policy"] == split_policy and row["variant"] == manifest.baseline_variant)
         candidate_row = next(row for row in leaderboard_rows if row["split_policy"] == split_policy and row["variant"] == spec.candidate_name)
+        baseline_pnl = float(baseline_row["real_history_pnl_mean"])
+        candidate_pnl = float(candidate_row["real_history_pnl_mean"])
+        baseline_sample_ok = bool(baseline_row.get("sample_adequacy_passed", False))
+        candidate_sample_ok = bool(candidate_row.get("sample_adequacy_passed", False))
+        calibration_available = bool(candidate_row.get("calibration_available", False))
         passed = (
             float(candidate_row["avg_crps_mean"]) < float(baseline_row["avg_crps_mean"])
-            and bool(candidate_row.get("calibration_available", False))
+            and calibration_available
+            and baseline_sample_ok
+            and candidate_sample_ok
+            and candidate_pnl >= baseline_pnl
         )
         benchmark_gate_passed = benchmark_gate_passed and passed
         benchmark_gate_details[split_policy] = {
             "passed": passed,
             "baseline_avg_crps_mean": float(baseline_row["avg_crps_mean"]),
             "candidate_avg_crps_mean": float(candidate_row["avg_crps_mean"]),
-            "baseline_real_history_pnl_mean": float(baseline_row["real_history_pnl_mean"]),
-            "candidate_real_history_pnl_mean": float(candidate_row["real_history_pnl_mean"]),
+            "baseline_real_history_pnl_mean": baseline_pnl,
+            "candidate_real_history_pnl_mean": candidate_pnl,
+            "baseline_sample_adequacy_passed": baseline_sample_ok,
+            "candidate_sample_adequacy_passed": candidate_sample_ok,
+            "candidate_calibration_available": calibration_available,
         }
 
     summary = {
@@ -5756,13 +6482,14 @@ def autoresearch_gate(
 
 @app.command("autoresearch-analyze-paper")
 def autoresearch_analyze_paper(
-    spec_path: Path,
+    spec_path: Annotated[Path | None, typer.Argument(help="Candidate YAML spec path.")] = None,
     dataset_path: Path = _default_dataset_path(),
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
+    spec_path_option: Annotated[Path | None, typer.Option("--spec-path", help="Candidate YAML spec path.")] = None,
 ) -> None:
     """Run paper and live-shadow diagnostics for one autoresearch candidate artifact."""
 
-    spec_path = _resolve_option_value(spec_path)
+    spec_path = _resolve_autoresearch_spec_path(spec_path, spec_path_option)
     dataset_path = _resolve_option_value(dataset_path, _default_dataset_path())
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     spec = load_lgbm_autoresearch_spec(spec_path)
@@ -5881,14 +6608,15 @@ def autoresearch_analyze_paper(
 
 @app.command("autoresearch-promote")
 def autoresearch_promote(
-    spec_path: Path,
+    spec_path: Annotated[Path | None, typer.Argument(help="Candidate YAML spec path.")] = None,
     root_dir: Path = DEFAULT_AUTORESEARCH_ROOT,
     publish_champion: bool = False,
     force: bool = False,
+    spec_path_option: Annotated[Path | None, typer.Option("--spec-path", help="Candidate YAML spec path.")] = None,
 ) -> None:
     """Promote one gated candidate into the persistent promoted-spec registry."""
 
-    spec_path = _resolve_option_value(spec_path)
+    spec_path = _resolve_autoresearch_spec_path(spec_path, spec_path_option)
     root_dir = _resolve_option_value(root_dir, DEFAULT_AUTORESEARCH_ROOT)
     publish_champion = bool(_resolve_option_value(publish_champion, False))
     force = bool(_resolve_option_value(force, False))
@@ -5897,6 +6625,7 @@ def autoresearch_promote(
             "`autoresearch-promote` no longer publishes public aliases. Promote the YAML only, then run `uv run pmtmax publish-champion` after recent-core validation."
         )
     spec = load_lgbm_autoresearch_spec(spec_path)
+    manifest = _load_autoresearch_manifest(spec.run_tag, root_dir=root_dir)
 
     gate_summary_path = autoresearch_analysis_dir(spec.run_tag, root_dir=root_dir) / f"gate_summary__{spec.candidate_name}.json"
     paper_summary_path = (
@@ -5913,22 +6642,41 @@ def autoresearch_promote(
     paper_summary = load_json(paper_summary_path)
     if not bool(gate_summary.get("benchmark_gate_passed", False)):
         raise typer.BadParameter("Candidate did not pass the benchmark gate.")
-    if str(paper_summary.get("overall_gate_decision", "INCONCLUSIVE")) == "NO_GO":
-        raise typer.BadParameter("Paper analysis marked this candidate as NO_GO.")
+    if str(gate_summary.get("dataset_signature", "")) != manifest.dataset_signature:
+        raise typer.BadParameter("Gate summary dataset signature does not match the autoresearch manifest.")
+    if str(gate_summary.get("panel_signature", "")) != manifest.panel_signature:
+        raise typer.BadParameter("Gate summary panel signature does not match the autoresearch manifest.")
+    _summary_artifact_path(gate_summary, "leaderboard_path", summary_path=gate_summary_path)
+    _summary_artifact_path(gate_summary, "leaderboard_csv_path", summary_path=gate_summary_path)
+    if not bool(paper_summary.get("analysis_completed", False)):
+        raise typer.BadParameter("Paper analysis summary is incomplete.")
+    paper_decision = str(paper_summary.get("overall_gate_decision", "INCONCLUSIVE"))
+    if paper_decision != "GO":
+        raise typer.BadParameter(f"Paper analysis gate is not GO: {paper_decision}.")
 
     target_path = promoted_lgbm_emos_spec_path(spec.candidate_name)
     if target_path.exists() and not force:
         raise typer.BadParameter(f"Promoted spec already exists: {target_path}")
-    save_lgbm_autoresearch_spec(target_path, spec)
 
     model_path = autoresearch_models_dir(spec.run_tag, root_dir=root_dir) / f"lgbm_emos__{spec.candidate_name}.pkl"
     if not model_path.exists():
         raise typer.BadParameter(f"Candidate artifact does not exist: {model_path}")
+    calibrator_path = _artifact_calibration_path(model_path)
+    if not calibrator_path.exists():
+        raise typer.BadParameter(f"Candidate calibrator artifact does not exist: {calibrator_path}")
+
+    save_lgbm_autoresearch_spec(target_path, spec)
 
     summary = {
         "run_tag": spec.run_tag,
         "candidate_name": spec.candidate_name,
         "promoted_spec_path": str(target_path),
+        "gate_summary_path": str(gate_summary_path),
+        "paper_summary_path": str(paper_summary_path),
+        "model_path": str(model_path),
+        "calibration_path": str(calibrator_path),
+        "dataset_signature": manifest.dataset_signature,
+        "panel_signature": manifest.panel_signature,
         "published_aliases": {},
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
@@ -7266,7 +8014,7 @@ def paper_trader(
     min_edge: float | None = None,
     max_spread_bps: int | None = typer.Option(None, help="Maximum spread override"),
     min_liquidity: float | None = typer.Option(None, help="Minimum liquidity override"),
-    price_source: str = typer.Option("gamma", help="Price source for edge calculation: 'gamma' (Gamma mid-prices) or 'clob' (live order book)"),
+    price_source: str = typer.Option("clob", help="Price source for edge calculation; only live CLOB books are supported"),
     min_market_price: float = typer.Option(0.0, help="Skip outcomes where Gamma mid-price is below this threshold (e.g. 0.10 to exclude <10% bins)"),
     max_city_exposure: float | None = typer.Option(None, help="Max notional per city (default: config value $500). Scale down with bankroll, e.g. --max-city-exposure 30 for $200 bankroll."),
     global_max_exposure: float | None = typer.Option(None, help="Max total notional across all cities (default: config value $2000). Set to bankroll for full deployment, e.g. --global-max-exposure 200."),
@@ -7287,13 +8035,16 @@ def paper_trader(
     min_edge = _resolve_option_value(min_edge)
     max_spread_bps = _resolve_option_value(max_spread_bps)
     min_liquidity = _resolve_option_value(min_liquidity)
-    price_source = str(_resolve_option_value(price_source, "gamma"))
+    price_source = str(_resolve_option_value(price_source, "clob"))
+    if price_source != "clob":
+        raise typer.BadParameter("Only --price-source clob is supported for real-only paper evaluation.")
     min_market_price = float(_resolve_option_value(min_market_price, 0.0))
     max_city_exposure = _resolve_option_value(max_city_exposure)
     global_max_exposure = _resolve_option_value(global_max_exposure)
     kelly_cap = float(_resolve_option_value(kelly_cap, 0.05))
     output = _resolve_option_value(output, _default_signal_output("paper_signals.json"))
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _require_dataset_profile(config, {"real_market"}, command="paper-trader")
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -7334,6 +8085,7 @@ def paper_trader(
         global_max_exposure=float(global_max_exposure) if global_max_exposure is not None else None,
         kelly_max_fraction=kelly_cap,
     )
+    _forbid_fixture_paper_rows(results)
     dump_json(output, results)
     console.print_json(data=results)
 
@@ -7376,6 +8128,7 @@ def paper_multimodel_report(
     model_names = _resolve_option_value(model_names)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _require_dataset_profile(config, {"real_market"}, command="paper-multimodel-report")
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
         http=http,
@@ -7433,6 +8186,7 @@ def paper_multimodel_report(
                 min_liquidity=liquidity_floor,
                 book_cache=books_by_market,
             )
+            _forbid_fixture_paper_rows(rows)
             dump_json(run_dir / f"{_safe_slug(label)}.json", rows)
             summary = _summarize_result_rows(rows, bankroll_remaining=bankroll_remaining)
             model_summaries[label] = summary
@@ -7542,6 +8296,7 @@ def execution_sensitivity_report(
     output_dir = _resolve_option_value(output_dir)
 
     config, _, http, _, _, openmeteo = _runtime(include_stores=False)
+    _require_dataset_profile(config, {"real_market"}, command="execution-sensitivity-report")
     model_path, resolved_model_name = _resolve_model_path(model_path, model_name)
     clob = ClobReadClient(http, config.polymarket.clob_base_url)
     builder = DatasetBuilder(
@@ -7644,6 +8399,7 @@ def execution_sensitivity_report(
                                 min_liquidity=float(liquidity_floor),
                                 book_cache=books_by_scope[resolved_scope],
                             )
+                            _forbid_fixture_paper_rows(rows)
                             rows_path = combos_dir / f"{combo_slug}.json"
                             dump_json(rows_path, rows)
                             summary = _summarize_result_rows(rows, bankroll_remaining=bankroll_remaining)

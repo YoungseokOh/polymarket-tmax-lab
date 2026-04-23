@@ -39,7 +39,7 @@ def test_build_revenue_gate_report_requires_benchmark_and_one_live_path() -> Non
     report = build_revenue_gate_report(
         benchmark_summary={
             "decision": "GO",
-            "decision_reason": "positive_policy_pnl_in_real_and_proxy",
+            "decision_reason": "positive_policy_pnl_real_history_with_city_gates",
             "aggregate_policy_real_history_metrics": {"num_trades": 25.0, "pnl": 30.0},
             "aggregate_policy_quote_proxy_metrics": {"num_trades": 25.0, "pnl": 18.0},
             "aggregate_panel_coverage": {"rows": 60, "coverage": {"ok": 50, "missing": 10}},
@@ -70,7 +70,7 @@ def test_build_revenue_gate_report_accepts_observation_shadow_as_live_confirmati
     report = build_revenue_gate_report(
         benchmark_summary={
             "decision": "GO",
-            "decision_reason": "positive_policy_pnl_in_real_and_proxy",
+            "decision_reason": "positive_policy_pnl_real_history_with_city_gates",
         },
         opportunity_summary={
             "cycles": 3,

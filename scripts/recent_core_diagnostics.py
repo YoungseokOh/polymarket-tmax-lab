@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument(
         "--panel-path",
         type=Path,
-        default=Path("data/parquet/gold/historical_backtest_panel.parquet"),
+        default=Path("data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet"),
     )
     parser.add_argument(
         "--quote-proxy-trades-path",

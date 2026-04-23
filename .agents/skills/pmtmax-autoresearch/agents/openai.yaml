@@ -1,6 +1,6 @@
 interface:
   display_name: "PM Tmax Autoresearch"
-  short_description: "Run candidate YAML loops around recency_neighbor_oof and gate winners safely."
+  short_description: "Run LGBM candidate YAML loops around the manifest baseline and gate winners safely."
   default_prompt: "Use $pmtmax-autoresearch to create or edit one candidate YAML, run autoresearch-step/gate/paper analysis, and promote winners without touching canonical aliases unless explicitly requested."
 
 policy:

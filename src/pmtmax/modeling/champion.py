@@ -14,8 +14,7 @@ _RESEARCH_LOWER_IS_BETTER_WEIGHTS = {
     "mae_std": 0.05,
 }
 _RESEARCH_HIGHER_IS_BETTER_WEIGHTS = {
-    "real_history_pnl_mean": 0.05,
-    "quote_proxy_pnl_mean": 0.05,
+    "real_history_pnl_mean": 0.10,
 }
 _EXECUTION_CANDIDATE_LOWER_IS_BETTER_WEIGHTS = {
     "calibration_gap_mean": 0.2,
@@ -26,12 +25,9 @@ _EXECUTION_CANDIDATE_LOWER_IS_BETTER_WEIGHTS = {
     "nll_mean": 0.05,
 }
 _EXECUTION_CANDIDATE_HIGHER_IS_BETTER_WEIGHTS = {
-    "quote_proxy_pnl_mean": 0.2,
-    "real_history_pnl_mean": 0.15,
-    "quote_proxy_avg_edge_mean": 0.04,
-    "real_history_avg_edge_mean": 0.03,
-    "quote_proxy_hit_rate_mean": 0.02,
-    "real_history_hit_rate_mean": 0.01,
+    "real_history_pnl_mean": 0.35,
+    "real_history_avg_edge_mean": 0.07,
+    "real_history_hit_rate_mean": 0.03,
 }
 
 

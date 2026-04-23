@@ -18,7 +18,8 @@ from pmtmax.modeling.advanced.lgbm_emos import (
 from pmtmax.utils import load_yaml_with_extends, stable_hash
 
 DEFAULT_AUTORESEARCH_ROOT = EnvSettings().artifacts_dir / "autoresearch"
-PROMOTED_LGBM_EMOS_DIR = Path("configs/autoresearch/lgbm_emos/promoted")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PROMOTED_LGBM_EMOS_DIR = REPO_ROOT / "configs/autoresearch/lgbm_emos/promoted"
 
 
 class LgbmAutoresearchParams(BaseModel):

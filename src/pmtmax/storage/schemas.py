@@ -210,7 +210,7 @@ class BookSnapshot(BaseModel):
     market_id: str
     token_id: str
     outcome_label: str
-    source: Literal["clob", "fixture", "missing"] = "clob"
+    source: Literal["clob", "missing"] = "clob"
     timestamp: datetime | None = None
     bids: list[BookLevel] = Field(default_factory=list)
     asks: list[BookLevel] = Field(default_factory=list)

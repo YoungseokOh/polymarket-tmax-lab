@@ -64,7 +64,6 @@ def build_forecast_summaries(
                 snapshot,
                 token_id,
                 outcome_label,
-                allow_synthetic_fallback=False,
             )
             if book.source != "clob" or not book.asks:
                 continue

@@ -18,10 +18,13 @@
 - `storage/firebase_mirror.py`: builds Firebase Storage backup manifests and performs optional mirror syncs
 
 ## Runtime Paths
-- workspace launcher: `scripts/pmtmax-workspace <ops_daily|historical_real|research_synth|recent_core_eval> <command...>`
+- workspace launcher: `scripts/pmtmax-workspace <weather_train|ops_daily|historical_real|recent_core_eval> <command...>`
+- preflight: `uv run pmtmax trust-check --markets-path <inventory>` validates workspace/inventory/canonical overwrite safety without mutating data
+- weather preflight: `scripts/pmtmax-workspace weather_train uv run pmtmax trust-check --workflow weather_training`
 - shared public alias registry: `artifacts/public_models/champion.pkl`, `artifacts/public_models/champion.json`
 - workspace data roots: `data/workspaces/<workspace>/...`
 - workspace artifact roots: `artifacts/workspaces/<workspace>/...`
+- `data/workspaces/weather_train/parquet/gold/weather_training_set.parquet`: weather-real pretrain rows keyed by station/date/model, with no Polymarket market ids or prices
 - `data/cache/`: legacy/default cached HTTP payloads when no workspace wrapper is used
 - `data/raw/bronze/`: legacy/default raw source payloads keyed by market/source/date
 - `data/duckdb/warehouse.duckdb`: legacy/default warehouse when no workspace wrapper is used
@@ -37,8 +40,8 @@
 - `artifacts/active_weather_watchlist.json`: supported-city active grouped-event watchlist
 - `artifacts/dataset_readiness.json`: city-level and market-level forecast/truth/gold readiness summary
 - `artifacts/price_history_coverage.json`: official price-history request and decision-time coverage summary
-- `data/parquet/gold/historical_backtest_panel.parquet`: decision-time official-price panel for real-history backtests
-- `data/duckdb/warehouse.duckdb.lock`: transient writer lock file only while canonical backfill/materialization commands are running
+- `data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet`: decision-time official-price panel for real-history backtests
+- `data/workspaces/<workspace>/duckdb/warehouse.duckdb.lock`: transient writer lock file only while workspace backfill/materialization commands are running
 - `artifacts/bootstrap/pmtmax_seed.tar.gz`: portable seed archive for moving canonical data between machines
 
 ## What To Keep Stable
@@ -46,8 +49,10 @@
 - Storage schemas should only change with a matching downstream compatibility review, because the canonical warehouse is now the source of truth for long-history experiments.
 - Example live config should remain instructional, not operational by default.
 - Research CLI defaults should read live/public truth adapters, not `tests/fixtures/*`, unless a demo/test path opts into fixtures explicitly.
-- Workspace boundaries should remain explicit: `ops_daily` and long-running synthetic collection must never share DuckDB/parquet/artifact roots.
+- Workspace boundaries should remain explicit: `weather_train`, `ops_daily`, `historical_real`, and `recent_core_eval` must never share DuckDB/parquet/artifact roots.
+- Canonical storage is real-only; market workflows require `real_market`, weather pretrain requires `weather_real`, and trust-check fails closed on synthetic inventories, `synthetic_` market ids, fixture forecasts, fabricated books, and profile/workflow mismatches.
+- Legacy mixed/synthetic roots should be quarantined and audited, not deleted silently.
 
 ## Change Checklist
-- Settings changes should be checked against `.env.example`, README, and `docs/live-trading.md`.
+- Settings changes should be checked against `.env.example`, README, and `docs/operations/live-trading.md`.
 - Schema changes should be checked against CLI JSON outputs, migration tests, and the generated warehouse manifest.

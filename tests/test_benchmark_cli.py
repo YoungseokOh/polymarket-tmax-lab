@@ -161,7 +161,7 @@ def test_publish_champion_copies_public_alias_after_recent_core_go(
         json.dumps(
             {
                 "decision": "GO",
-                "decision_reason": "positive_policy_pnl_in_real_and_proxy_with_city_gates",
+                "decision_reason": "positive_policy_pnl_real_history_with_city_gates",
                 "sample_adequacy": {"passes": True},
                 "city_gate_details": {
                     "Seoul": {"passes": True},
@@ -192,7 +192,6 @@ def test_publish_champion_copies_public_alias_after_recent_core_go(
 
     publish_champion(
         model_path=model_path,
-        model_name="lgbm_emos",
         recent_core_summary_path=recent_core_summary_path,
     )
 

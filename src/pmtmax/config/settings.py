@@ -17,7 +17,7 @@ class AppConfig(BaseModel):
     random_seed: int = 42
     supported_cities: list[str] = Field(default_factory=catalog_supported_cities)
     workspace_name: str = "default"
-    dataset_profile: Literal["real_market", "synthetic"] = "real_market"
+    dataset_profile: Literal["real_market", "weather_real"] = "real_market"
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")
@@ -203,7 +203,7 @@ class EnvSettings(BaseSettings):
     env: str = "research"
     config: Path = Path("configs/research.yaml")
     workspace_name: str = "default"
-    dataset_profile: Literal["real_market", "synthetic"] = "real_market"
+    dataset_profile: Literal["real_market", "weather_real"] = "real_market"
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     raw_dir: Path = Path("data/raw")

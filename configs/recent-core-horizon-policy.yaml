@@ -10,4 +10,6 @@ cities:
       - previous_evening
   London:
     allowed_horizons:
+      - market_open
       - previous_evening
+      - morning_of

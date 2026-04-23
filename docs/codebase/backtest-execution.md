@@ -15,7 +15,7 @@ from signal generation and broker behavior.
 - `fees.py` and `slippage.py`: token-specific fee-rate lookups plus level-walk execution cost estimates
 - `sizing.py`: bankroll-aware size selection
 - `guardrails.py`: spread, freshness, and exposure limits
-- `book_utils.py`: explicit `clob` / `missing` / optional `fixture` book loading contract
+- `src/pmtmax/markets/book_utils.py`: explicit `clob` / `missing` book loading contract used by execution paths; fabricated book fallback is not allowed
 - `paper_broker.py`: conservative paper fill simulation
 - `paper_market_maker.py`: two-sided fill simulation with realized/unrealized mark-to-market PnL
 - `live_broker.py`: official live path behind explicit feature flags
@@ -30,6 +30,7 @@ from signal generation and broker behavior.
 - `execution/` decides whether an actionable edge survives spread, fees, slippage, and guardrails.
 - Live trading must remain gated and isolated from the default research/paper path.
 - `opportunity-report`, `paper-trader`, `live-trader`, `paper-mm`, and `live-mm` should treat missing live books as explicit skip states, not synthetic liquidity.
+- `paper-trader`, `paper-multimodel-report`, and `execution-sensitivity-report` reject any legacy `book_source=fixture` rows; unavailable CLOB data must be recorded as `missing_book`.
 - signal paths should also treat missing calibrators or forecast-contract mismatches as explicit fail-closed states.
 - `opportunity-shadow` reuses the same guardrails but logs the best raw gap and after-cost edge even for rejected markets, so “strategy is dead” and “book is unusable” remain distinct diagnoses.
 - `observation-report` / `observation-shadow` sit one layer above the same execution diagnostics and zero out outcome bins already made impossible by the latest live observation before ranking candidates.
@@ -38,12 +39,14 @@ from signal generation and broker behavior.
 - `open-phase-shadow` is the listing/opening observer. It filters active markets by the earliest `acceptingOrdersTimestamp`/`createdAt` metadata and evaluates only recently opened markets with the configured horizon.
 - `hope-hunt-report` / `hope-hunt-daemon` sit on top of the same execution diagnostics but constrain discovery to supported Wunderground-family `research_public` cities and rank fresh listings without placing orders.
 - Execution diagnostics should distinguish `raw_gap_non_positive`, `fee_killed_edge`, `slippage_killed_edge`, and `after_cost_positive_but_spread_too_wide` instead of collapsing everything into a generic “no edge”.
-- `backtest --pricing-source quote_proxy` still is not exact replay. It keeps official historical last-price coverage but overlays a configurable half-spread proxy so execution assumptions are stricter than raw `real_history`.
+- `backtest --pricing-source quote_proxy` is diagnostic only. It keeps official historical last-price coverage but overlays a configurable half-spread proxy, and it must not drive champion promotion.
 - `benchmark-models` is the workspace-local model-selection path. It writes the leaderboard under the active workspace benchmark root and does not mutate the public alias.
 - `publish-champion` is the only public-alias promotion path. It copies one calibrated artifact into `artifacts/public_models/champion.*` only after the recent-core benchmark summary is `GO`.
+- public champion metadata is part of the safety contract: missing `publish_gate.decision=GO` or non-`real_market` metadata must fail closed.
+- autoresearch promotion is YAML-only and requires CLI-generated gate leaderboard artifacts, matching dataset/panel signatures, a candidate calibrator, and paper `overall_gate_decision=GO`.
 - `revenue-gate-report` is the promotion checkpoint that combines recent-core benchmark results with shadow/open-phase viability before any small live pilot.
 
 ## Change Checklist
 - Dataset-column changes affect both training and paper-trading workflows.
-- Guardrail changes should be reflected in `docs/live-trading.md` and agent safety docs.
+- Guardrail changes should be reflected in `docs/operations/live-trading.md` and agent safety docs.
 - Execution changes must not weaken the default live-trading gate.

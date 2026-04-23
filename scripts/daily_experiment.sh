@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Daily experiment loop: collect Gamma prices + scan-edge signals.
+# Daily experiment loop: collect active real market data + scan-edge signals.
 #
 # What this does each run:
-#   1. scan-markets  — refresh discovered_markets.json with Gamma prices
-#   2. log_gamma_prices — append prices to gamma_price_log.jsonl (for backtest expansion)
-#   3. scan-edge     — generate today's signals using Gamma mid-prices
-#   4. Append scan-edge snapshot to scan_edge_history.jsonl
+#   1. scan-markets       — refresh discovered_markets.json with active Gamma markets
+#   2. backfill-truth     — collect active-market settlement/truth observations
+#   3. backfill-forecasts — collect real forecast payloads, no fixture fallback
+#   4. log_gamma_prices   — append live Gamma prices to gamma_price_log.jsonl
+#   5. scan-edge          — generate today's signals using Gamma mid-prices
+#   6. paper-trader       — evaluate the same discovered snapshot with CLOB books
+#   7. track outcomes     — update forward-paper diagnostics
 #
-# Schedule: run once per day (e.g., 09:00 KST = 00:00 UTC)
+# Schedule: run once per day after daily temperature markets open.
+# On this KST host, use cron "0 9 * * *". On a UTC host, use "0 0 * * *".
 set -euo pipefail
 
 # Ensure uv and python are on PATH (cron doesn't load ~/.bashrc)
@@ -51,7 +55,7 @@ uv run pmtmax backfill-truth --markets-path "${DISCOVERED_MARKETS_PATH}"
 
 # 1c. Backfill forecasts for all active cities
 echo "${LOG_PREFIX} backfill-forecasts (all cities)..."
-uv run pmtmax backfill-forecasts --markets-path "${DISCOVERED_MARKETS_PATH}"
+uv run pmtmax backfill-forecasts --markets-path "${DISCOVERED_MARKETS_PATH}" --strict-archive
 
 # 2. Log Gamma prices to timeseries
 echo "${LOG_PREFIX} logging gamma prices..."
@@ -92,13 +96,14 @@ print(f'Appended {len(signals)} signals to history.')
 "
 fi
 
-# 5. Run paper-trader (Kelly-sized positions, gamma prices, min 10% market price)
+# 5. Run paper-trader (Kelly-sized positions, live CLOB books, min 10% market price)
 PAPER_DATE=$(date -u '+%Y-%m-%d')
 PAPER_SNAPSHOT="${PAPER_SIGNALS_DIR}/paper_signals_${PAPER_DATE}.json"
 echo "${LOG_PREFIX} paper-trader (bankroll=100, min-market-price=0.10)..."
 uv run pmtmax paper-trader \
+    --markets-path "${DISCOVERED_MARKETS_PATH}" \
     --bankroll 100 \
-    --price-source gamma \
+    --price-source clob \
     --min-market-price 0.10 \
     --output "${PAPER_SNAPSHOT}"
 # Also keep a "latest" pointer

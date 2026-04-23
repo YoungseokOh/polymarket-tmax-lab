@@ -9,25 +9,6 @@ from pmtmax.markets.clob_read_client import ClobReadClient
 from pmtmax.storage.schemas import BookLevel, BookSnapshot, MarketSnapshot
 
 
-def synthetic_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) -> BookSnapshot:
-    """Build a synthetic single-level book from Gamma-API outcome prices."""
-
-    price = snapshot.outcome_prices.get(outcome_label, 0.5)
-    half_spread = max(0.03, price * 0.10)
-    bid = max(price - half_spread, 0.01)
-    ask = min(price + half_spread, 0.99)
-    liquidity = max(price * 50.0, 5.0)
-    return BookSnapshot(
-        market_id=snapshot.spec.market_id if snapshot.spec is not None else str(snapshot.market.get("id")),
-        token_id=token_id,
-        outcome_label=outcome_label,
-        source="fixture",
-        timestamp=snapshot.captured_at,
-        bids=[BookLevel(price=bid, size=liquidity)],
-        asks=[BookLevel(price=ask, size=liquidity)],
-    )
-
-
 def missing_book(snapshot: MarketSnapshot, outcome_label: str, token_id: str) -> BookSnapshot:
     """Return an explicit empty-book sentinel when live CLOB data is unavailable."""
 
@@ -48,13 +29,10 @@ def book_snapshot_from_payload(
     token_id: str,
     outcome_label: str,
     payload: dict[str, Any] | None,
-    allow_synthetic_fallback: bool = False,
 ) -> BookSnapshot:
     """Parse a CLOB book payload into a BookSnapshot."""
 
     if payload is None:
-        if allow_synthetic_fallback:
-            return synthetic_book(snapshot, outcome_label, token_id)
         return missing_book(snapshot, outcome_label, token_id)
     bids = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("bids", [])[:5]]
     asks = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("asks", [])[:5]]
@@ -81,10 +59,8 @@ def fetch_book(
     snapshot: MarketSnapshot,
     token_id: str,
     outcome_label: str,
-    *,
-    allow_synthetic_fallback: bool = False,
 ) -> BookSnapshot:
-    """Fetch a live order book, optionally falling back to a synthetic fixture."""
+    """Fetch a live order book, returning an explicit missing sentinel on failure."""
 
     try:
         payload = clob.get_book(token_id)
@@ -95,5 +71,4 @@ def fetch_book(
         token_id=token_id,
         outcome_label=outcome_label,
         payload=payload,
-        allow_synthetic_fallback=allow_synthetic_fallback,
     )

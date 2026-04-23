@@ -29,4 +29,4 @@
 
 ## See Also
 - `docs/codebase/index.md` for folder ownership and edit impact
-- `docs/market-rules.md` for supported rule families and parser expectations
+- `docs/markets/market-rules.md` for supported rule families and parser expectations

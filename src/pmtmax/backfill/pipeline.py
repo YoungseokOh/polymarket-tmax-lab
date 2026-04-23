@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import gc
 import json
+import queue
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -379,8 +382,7 @@ class BackfillPipeline:
 
         # Also seed from silver: if silver_forecast_runs_hourly already has rows for a
         # market_id × model_name pair, treat them as existing so missing_only=True skips
-        # API calls for data already materialized there (common for synthetic markets
-        # loaded from parquet rather than fetched via API).
+        # API calls for data already materialized there.
         if self.warehouse.table_exists("silver_forecast_runs_hourly"):
             market_placeholders = ",".join(["?"] * len(market_ids))
             model_placeholders = ",".join(["?"] * len(models))
@@ -400,17 +402,11 @@ class BackfillPipeline:
                     for snapshot in snapshots
                     if snapshot.spec is not None
                 }
-                synthetic_ok: ForecastRequestState = {
+                materialized_ok: ForecastRequestState = {
                     "status": "ok",
                     "availability_status": "available",
                     "query_signature": None,
                     "http_status": 200,
-                }
-                synthetic_skip: ForecastRequestState = {
-                    "status": "skipped_silver_present",
-                    "availability_status": "available",
-                    "query_signature": None,
-                    "http_status": None,
                 }
                 # Collect which (market_id, model) have historical_forecast in silver
                 hf_pairs: set[tuple[str, str]] = set()
@@ -427,16 +423,16 @@ class BackfillPipeline:
                     if ek == "historical_forecast":
                         # Mark the full historical_forecast request as done
                         full_key: ForecastRequestKey = (mid, model, "historical_forecast", "full", None, date_str)
-                        states.setdefault(full_key, synthetic_ok)
+                        states.setdefault(full_key, materialized_ok)
                         # Also mark the probe as done so backfill_forecasts does not
                         # call _probe_forecast_availability for already-materialized data.
                         probe_key: ForecastRequestKey = (mid, model, "historical_forecast", "probe", None, date_str)
-                        states.setdefault(probe_key, synthetic_ok)
+                        states.setdefault(probe_key, materialized_ok)
                         hf_pairs.add((mid, model))
                     elif ek == "single_run" and dh is not None:
                         # Mark this specific single_run horizon as done
                         sr_key: ForecastRequestKey = (mid, model, "single_run", "single_run", dh, date_str)
-                        states.setdefault(sr_key, synthetic_ok)
+                        states.setdefault(sr_key, materialized_ok)
 
                 # NOTE: We intentionally do NOT pre-mark single_run horizons as skipped
                 # for markets that only have historical_forecast in silver. Those markets
@@ -456,9 +452,11 @@ class BackfillPipeline:
         single_run_horizons: list[str] | None = None,
         missing_only: bool = False,
         return_tables: bool = False,
+        workers: int = 1,
     ) -> ForecastBackfillResult:
         """Persist raw forecast payloads and normalize hourly forecast rows."""
 
+        workers = max(1, workers)
         selected_models = models or self.models
         bronze_history, existing_request_states = self._load_existing_forecast_request_states(
             snapshots,
@@ -468,434 +466,345 @@ class BackfillPipeline:
             bronze_history["request_kind"].astype(str) == "probe"
         ].copy() if not bronze_history.empty else pd.DataFrame()
         negative_cache = self._negative_cache_signatures(bronze_history)
-        bronze_rows: list[dict[str, object]] = []
-        silver_rows: list[dict[str, object]] = []
-        model_rows: list[dict[str, object]] = []
-        source_rows: list[dict[str, object]] = []
         checkpoint_snapshots = 10
         parquet_export_every = 100  # export parquet every N markets (safety snapshot)
-        processed_since_checkpoint = 0
-        processed_since_parquet_export = 0
         bronze_count = self.warehouse.table_row_count("bronze_forecast_requests")
         silver_count = self.warehouse.table_row_count("silver_forecast_runs_hourly")
         total_snapshots = len(snapshots)
-        processed_total = 0
 
-        def flush_buffers(*, force: bool = False) -> None:
-            nonlocal bronze_count, silver_count
+        db_lock = threading.Lock()
 
-            should_flush = force or any((bronze_rows, silver_rows, model_rows, source_rows))
-            if not should_flush:
-                return
-            bronze_count = int(
-                self.warehouse.upsert_table(
-                    "bronze_forecast_requests",
-                    pd.DataFrame(bronze_rows),
-                    export_parquet=force,
-                    return_frame=False,
-                )
-            )
-            silver_count = int(
-                self.warehouse.upsert_table(
-                    "silver_forecast_runs_hourly",
-                    pd.DataFrame(silver_rows),
-                    export_parquet=force,
-                    return_frame=False,
-                )
-            )
-            self.warehouse.upsert_table(
-                "dim_model",
-                pd.DataFrame(model_rows),
-                export_parquet=force,
-                return_frame=False,
-            )
-            self.warehouse.upsert_table(
-                "dim_source",
-                pd.DataFrame(source_rows),
-                export_parquet=force,
-                return_frame=False,
-            )
-            bronze_rows.clear()
-            silver_rows.clear()
-            model_rows.clear()
-            source_rows.clear()
+        def flush_to_db(
+            b_rows: list, s_rows: list, m_rows: list, src_rows: list, *, force: bool = False,
+        ) -> tuple[int, int]:
+            if not force and not any((b_rows, s_rows, m_rows, src_rows)):
+                return bronze_count, silver_count
+            with db_lock:
+                bc = int(self.warehouse.upsert_table(
+                    "bronze_forecast_requests", pd.DataFrame(b_rows), export_parquet=force, return_frame=False,
+                ))
+                sc = int(self.warehouse.upsert_table(
+                    "silver_forecast_runs_hourly", pd.DataFrame(s_rows), export_parquet=force, return_frame=False,
+                ))
+                self.warehouse.upsert_table("dim_model", pd.DataFrame(m_rows), export_parquet=force, return_frame=False)
+                self.warehouse.upsert_table("dim_source", pd.DataFrame(src_rows), export_parquet=force, return_frame=False)
+            return bc, sc
 
-        single_run_ok_total = 0
-        single_run_err_total = 0
+        # Split snapshots into city-balanced shards for parallel processing.
+        city_buckets: dict[str, list[MarketSnapshot]] = {}
+        for s in snapshots:
+            city = s.spec.city if s.spec else "__unknown__"
+            city_buckets.setdefault(city, []).append(s)
+        shards: list[list[MarketSnapshot]] = [[] for _ in range(workers)]
+        for i, city in enumerate(sorted(city_buckets)):
+            shards[i % workers].extend(city_buckets[city])
 
-        for snapshot in snapshots:
-            spec = snapshot.spec
-            if spec is None:
-                continue
-            latitude, longitude, timezone = self._station_coords(spec)
-            for model in selected_models:
-                model_rows.append(
-                    {
+        results_queue: queue.Queue[tuple[int, int]] = queue.Queue()
+        errors_queue: queue.Queue[tuple[int, BaseException]] = queue.Queue()
+
+        def run_shard(shard_snapshots: list[MarketSnapshot], shard_id: int) -> None:
+            local_existing = dict(existing_request_states)
+            local_neg_cache = set(negative_cache)
+            b_rows: list[dict[str, object]] = []
+            s_rows: list[dict[str, object]] = []
+            m_rows: list[dict[str, object]] = []
+            src_rows: list[dict[str, object]] = []
+            sr_ok = 0
+            sr_err = 0
+            since_chk = 0
+            since_parquet = 0
+            shard_processed = 0
+
+            def flush_local(*, force: bool = False) -> None:
+                if not force and not any((b_rows, s_rows, m_rows, src_rows)):
+                    return
+                flush_to_db(list(b_rows), list(s_rows), list(m_rows), list(src_rows), force=force)
+                b_rows.clear()
+                s_rows.clear()
+                m_rows.clear()
+                src_rows.clear()
+
+            for snapshot in shard_snapshots:
+                spec = snapshot.spec
+                if spec is None:
+                    continue
+                latitude, longitude, timezone = self._station_coords(spec)
+                for model in selected_models:
+                    m_rows.append({
                         "model_name": model,
                         "provider": "open-meteo",
                         "city": spec.city,
                         "station_id": spec.station_id,
                         "endpoint_kind": self._forecast_endpoint_kind(spec),
                         **self._metadata_fields(source_priority=70),
-                    }
-                )
-                fetched_at = dt.datetime.now(tz=dt.UTC)
-                endpoint_kind = self._forecast_endpoint_kind(spec)
-                full_key = self._forecast_request_key(
-                    spec=spec,
-                    model=model,
-                    endpoint_kind=endpoint_kind,
-                    request_kind="full",
-                    decision_horizon=None,
-                )
-                existing_full = existing_request_states.get(full_key) if missing_only else None
-                probe_ok = True
-                if endpoint_kind == "historical_forecast":
-                    probe_key = self._forecast_request_key(
-                        spec=spec,
-                        model=model,
-                        endpoint_kind=endpoint_kind,
-                        request_kind="probe",
-                        decision_horizon=None,
+                    })
+                    fetched_at = dt.datetime.now(tz=dt.UTC)
+                    endpoint_kind = self._forecast_endpoint_kind(spec)
+                    full_key = self._forecast_request_key(
+                        spec=spec, model=model, endpoint_kind=endpoint_kind,
+                        request_kind="full", decision_horizon=None,
                     )
-                    existing_probe = existing_request_states.get(probe_key) if missing_only else None
-                    probe_signature = self._forecast_query_signature(
-                        spec=spec,
-                        model=model,
-                        endpoint_kind=endpoint_kind,
-                        hourly=PROBE_HOURLY,
-                        request_kind="probe",
-                        decision_horizon=None,
-                        latitude=latitude,
-                        longitude=longitude,
-                    )
-                    if existing_probe is not None:
-                        probe_ok = existing_probe["availability_status"] == "available"
-                    elif probe_signature in negative_cache:
-                        bronze_rows.append(
-                            self._forecast_request_row(
-                                spec=spec,
-                                model=model,
-                                endpoint_kind=endpoint_kind,
-                                request_kind="full",
-                                decision_horizon=None,
-                                requested_at=fetched_at,
-                                latitude=latitude,
-                                longitude=longitude,
-                                timezone=timezone,
-                                forecast_days=1,
-                                status="skipped_negative_cache",
-                                availability_status="unavailable",
-                                variables=DEFAULT_HOURLY,
+                    existing_full = local_existing.get(full_key) if missing_only else None
+                    probe_ok = True
+                    if endpoint_kind == "historical_forecast":
+                        probe_key = self._forecast_request_key(
+                            spec=spec, model=model, endpoint_kind=endpoint_kind,
+                            request_kind="probe", decision_horizon=None,
+                        )
+                        existing_probe = local_existing.get(probe_key) if missing_only else None
+                        probe_signature = self._forecast_query_signature(
+                            spec=spec, model=model, endpoint_kind=endpoint_kind,
+                            hourly=PROBE_HOURLY, request_kind="probe", decision_horizon=None,
+                            latitude=latitude, longitude=longitude,
+                        )
+                        if existing_probe is not None:
+                            probe_ok = existing_probe["availability_status"] == "available"
+                        elif probe_signature in local_neg_cache:
+                            b_rows.append(self._forecast_request_row(
+                                spec=spec, model=model, endpoint_kind=endpoint_kind,
+                                request_kind="full", decision_horizon=None, requested_at=fetched_at,
+                                latitude=latitude, longitude=longitude, timezone=timezone,
+                                forecast_days=1, status="skipped_negative_cache",
+                                availability_status="unavailable", variables=DEFAULT_HOURLY,
                                 error_message="Skipped due to prior 404/422 availability probe.",
+                            ))
+                            continue
+                        else:
+                            probe_ok, probe_row = self._probe_forecast_availability(
+                                spec=spec, model=model, latitude=latitude, longitude=longitude,
+                                timezone=timezone, endpoint_kind=endpoint_kind, fetched_at=fetched_at,
                             )
-                        )
-                        continue
-                    else:
-                        probe_ok, probe_row = self._probe_forecast_availability(
-                            spec=spec,
-                            model=model,
-                            latitude=latitude,
-                            longitude=longitude,
-                            timezone=timezone,
-                            endpoint_kind=endpoint_kind,
-                            fetched_at=fetched_at,
-                        )
-                        bronze_rows.append(probe_row)
-                        if missing_only:
-                            existing_request_states[probe_key] = {
-                                "status": str(probe_row.get("status", "")),
-                                "availability_status": str(probe_row.get("availability_status", "")),
-                                "query_signature": (
-                                    str(probe_row["query_signature"])
-                                    if probe_row.get("query_signature") is not None
-                                    else None
-                                ),
-                                "http_status": int(probe_row["http_status"]) if probe_row.get("http_status") is not None else None,
-                            }
-                        if not probe_ok:
-                            if probe_row.get("query_signature"):
-                                negative_cache.add(str(probe_row["query_signature"]))
-                            if strict_archive or not allow_fixture_fallback:
-                                bronze_rows.append(
-                                    self._forecast_request_row(
-                                        spec=spec,
-                                        model=model,
-                                        endpoint_kind=endpoint_kind,
-                                        request_kind="full",
-                                        decision_horizon=None,
-                                        requested_at=fetched_at,
-                                        latitude=latitude,
-                                        longitude=longitude,
-                                        timezone=timezone,
-                                        forecast_days=1,
-                                        status="skipped_probe_failure",
-                                        availability_status="unavailable",
-                                        variables=DEFAULT_HOURLY,
+                            b_rows.append(probe_row)
+                            if missing_only:
+                                local_existing[probe_key] = {
+                                    "status": str(probe_row.get("status", "")),
+                                    "availability_status": str(probe_row.get("availability_status", "")),
+                                    "query_signature": str(probe_row["query_signature"]) if probe_row.get("query_signature") is not None else None,
+                                    "http_status": (
+                                        int(str(probe_row["http_status"]))
+                                        if probe_row.get("http_status") is not None
+                                        else None
+                                    ),
+                                }
+                            if not probe_ok:
+                                if probe_row.get("query_signature"):
+                                    local_neg_cache.add(str(probe_row["query_signature"]))
+                                if strict_archive or not allow_fixture_fallback:
+                                    b_rows.append(self._forecast_request_row(
+                                        spec=spec, model=model, endpoint_kind=endpoint_kind,
+                                        request_kind="full", decision_horizon=None, requested_at=fetched_at,
+                                        latitude=latitude, longitude=longitude, timezone=timezone,
+                                        forecast_days=1, status="skipped_probe_failure",
+                                        availability_status="unavailable", variables=DEFAULT_HOURLY,
                                         error_message="Skipped full request after failed availability probe.",
-                                    )
-                                )
-                                continue
+                                    ))
+                                    continue
 
-                    if existing_probe is not None and not probe_ok and existing_full is None and (strict_archive or not allow_fixture_fallback):
-                        bronze_rows.append(
-                            self._forecast_request_row(
-                                spec=spec,
-                                model=model,
-                                endpoint_kind=endpoint_kind,
-                                request_kind="full",
-                                decision_horizon=None,
-                                requested_at=fetched_at,
-                                latitude=latitude,
-                                longitude=longitude,
-                                timezone=timezone,
-                                forecast_days=1,
-                                status="skipped_probe_failure",
-                                availability_status="unavailable",
-                                variables=DEFAULT_HOURLY,
+                        if existing_probe is not None and not probe_ok and existing_full is None and (strict_archive or not allow_fixture_fallback):
+                            b_rows.append(self._forecast_request_row(
+                                spec=spec, model=model, endpoint_kind=endpoint_kind,
+                                request_kind="full", decision_horizon=None, requested_at=fetched_at,
+                                latitude=latitude, longitude=longitude, timezone=timezone,
+                                forecast_days=1, status="skipped_probe_failure",
+                                availability_status="unavailable", variables=DEFAULT_HOURLY,
                                 error_message="Skipped full request after existing failed availability probe.",
+                            ))
+                            continue
+
+                    if existing_full is not None:
+                        if endpoint_kind == "historical_forecast" and single_run_horizons:
+                            single_run_bronze, single_run_silver = self._backfill_single_run_requests(
+                                spec=spec, model=model, latitude=latitude, longitude=longitude,
+                                timezone=timezone, horizons=single_run_horizons,
+                                strict_archive=strict_archive, missing_only=missing_only,
+                                existing_request_states=local_existing,
                             )
-                        )
+                            _sr_ok = sum(1 for r in single_run_bronze if r.get("status") == "ok")
+                            _sr_err = sum(1 for r in single_run_bronze if r.get("status") == "error")
+                            sr_ok += _sr_ok
+                            sr_err += _sr_err
+                            if single_run_bronze:
+                                LOGGER.info("single_run market done", extra={
+                                    "market_id": spec.market_id, "city": spec.city, "model": model,
+                                    "target_date": str(spec.target_local_date),
+                                    "ok": _sr_ok, "err": _sr_err,
+                                    "cumulative_ok": sr_ok, "cumulative_err": sr_err,
+                                    "market_progress": f"{shard_processed + 1}/{total_snapshots}",
+                                })
+                            b_rows.extend(single_run_bronze)
+                            s_rows.extend(single_run_silver)
                         continue
 
-                if existing_full is not None:
+                    try:
+                        payload, variables = self._fetch_forecast_with_variable_fallback(
+                            spec=spec, model=model, latitude=latitude, longitude=longitude,
+                            timezone=timezone, endpoint_kind=endpoint_kind,
+                        )
+                        status = "ok"
+                        availability_status = "available"
+                        error_message = None
+                        http_status: int | None = 200
+                        reason = None
+                        query_signature = self._forecast_query_signature(
+                            spec=spec, model=model, endpoint_kind=endpoint_kind, hourly=variables,
+                            request_kind="full", decision_horizon=None, latitude=latitude, longitude=longitude,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        payload = None
+                        variables = DEFAULT_HOURLY
+                        status = "error"
+                        http_status, reason = self._error_details(exc)
+                        availability_status = self._availability_status(http_status, reason)
+                        error_message = str(exc)
+                        query_signature = self._forecast_query_signature(
+                            spec=spec, model=model, endpoint_kind=endpoint_kind, hourly=variables,
+                            request_kind="full", decision_horizon=None, latitude=latitude, longitude=longitude,
+                        )
+                        if availability_status == "unavailable":
+                            local_neg_cache.add(query_signature)
+                        if allow_fixture_fallback and not strict_archive:
+                            fixture = self._load_forecast_fixture(spec.city)
+                            if fixture is not None:
+                                payload = fixture
+                                status = "fixture"
+                                availability_status = "demo_fixture"
+                                endpoint_kind = "fixture"
+                                http_status = None
+                                reason = "demo_fixture_fallback"
+                                error_message = None
+                        if payload is None:
+                            b_rows.append(self._forecast_request_row(
+                                spec=spec, model=model, endpoint_kind=endpoint_kind,
+                                request_kind="full", decision_horizon=None, requested_at=fetched_at,
+                                latitude=latitude, longitude=longitude, timezone=timezone,
+                                forecast_days=1, status=status, availability_status=availability_status,
+                                variables=variables, error_message=error_message,
+                                http_status=http_status, reason=reason, query_signature=query_signature,
+                            ))
+                            continue
+
+                    relative_path = (
+                        f"forecasts/{endpoint_kind}/{spec.city.lower().replace(' ', '_')}/"
+                        f"{spec.target_local_date.isoformat()}/{spec.market_id}_{model}.json"
+                    )
+                    artifact = self.warehouse.raw_store.write_json(relative_path, payload)
+                    b_rows.append(self._forecast_request_row(
+                        spec=spec, model=model, endpoint_kind=endpoint_kind,
+                        request_kind="full", decision_horizon=None, requested_at=fetched_at,
+                        latitude=latitude, longitude=longitude, timezone=timezone,
+                        forecast_days=self._forecast_days(spec, timezone),
+                        status=status, availability_status=availability_status, variables=variables,
+                        raw_path=artifact.relative_path, raw_hash=artifact.content_hash,
+                        http_status=http_status, reason=reason, query_signature=query_signature,
+                    ))
+                    s_rows.extend(self._normalize_forecast_rows(
+                        spec=spec, model_name=model, endpoint_kind=endpoint_kind,
+                        payload=cast(dict[str, Any], payload),
+                        raw_path=artifact.relative_path, raw_hash=artifact.content_hash,
+                        availability_status=availability_status, source_variables=variables,
+                        retrieved_at=fetched_at, decision_horizon=None,
+                        issue_time_utc=None, requested_run_time_utc=None,
+                    ))
                     if endpoint_kind == "historical_forecast" and single_run_horizons:
                         single_run_bronze, single_run_silver = self._backfill_single_run_requests(
-                            spec=spec,
-                            model=model,
-                            latitude=latitude,
-                            longitude=longitude,
-                            timezone=timezone,
-                            horizons=single_run_horizons,
-                            strict_archive=strict_archive,
-                            missing_only=missing_only,
-                            existing_request_states=existing_request_states,
+                            spec=spec, model=model, latitude=latitude, longitude=longitude,
+                            timezone=timezone, horizons=single_run_horizons,
+                            strict_archive=strict_archive, missing_only=missing_only,
+                            existing_request_states=local_existing,
                         )
                         _sr_ok = sum(1 for r in single_run_bronze if r.get("status") == "ok")
                         _sr_err = sum(1 for r in single_run_bronze if r.get("status") == "error")
-                        single_run_ok_total += _sr_ok
-                        single_run_err_total += _sr_err
+                        sr_ok += _sr_ok
+                        sr_err += _sr_err
                         if single_run_bronze:
-                            LOGGER.info(
-                                "single_run market done",
-                                extra={
-                                    "market_id": spec.market_id,
-                                    "city": spec.city,
-                                    "model": model,
-                                    "target_date": str(spec.target_local_date),
-                                    "ok": _sr_ok,
-                                    "err": _sr_err,
-                                    "cumulative_ok": single_run_ok_total,
-                                    "cumulative_err": single_run_err_total,
-                                    "market_progress": f"{processed_total + 1}/{total_snapshots}",
-                                },
-                            )
-                        bronze_rows.extend(single_run_bronze)
-                        silver_rows.extend(single_run_silver)
-                    continue
-
-                try:
-                    payload, variables = self._fetch_forecast_with_variable_fallback(
-                        spec=spec,
-                        model=model,
-                        latitude=latitude,
-                        longitude=longitude,
-                        timezone=timezone,
-                        endpoint_kind=endpoint_kind,
-                    )
-                    status = "ok"
-                    availability_status = "available"
-                    error_message = None
-                    http_status: int | None = 200
-                    reason = None
-                    query_signature = self._forecast_query_signature(
-                        spec=spec,
-                        model=model,
-                        endpoint_kind=endpoint_kind,
-                        hourly=variables,
-                        request_kind="full",
-                        decision_horizon=None,
-                        latitude=latitude,
-                        longitude=longitude,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    payload = None
-                    variables = DEFAULT_HOURLY
-                    status = "error"
-                    availability_status = "error"
-                    http_status, reason = self._error_details(exc)
-                    error_message = str(exc)
-                    query_signature = self._forecast_query_signature(
-                        spec=spec,
-                        model=model,
-                        endpoint_kind=endpoint_kind,
-                        hourly=variables,
-                        request_kind="full",
-                        decision_horizon=None,
-                        latitude=latitude,
-                        longitude=longitude,
-                    )
-                    if availability_status == "unavailable":
-                        negative_cache.add(query_signature)
-                    if allow_fixture_fallback and not strict_archive:
-                        fixture = self._load_forecast_fixture(spec.city)
-                        if fixture is not None:
-                            payload = fixture
-                            status = "fixture"
-                            availability_status = "demo_fixture"
-                            endpoint_kind = "fixture"
-                            http_status = None
-                            reason = "demo_fixture_fallback"
-                            error_message = None
-                    if payload is None:
-                        bronze_rows.append(
-                            self._forecast_request_row(
-                                spec=spec,
-                                model=model,
-                                endpoint_kind=endpoint_kind,
-                                request_kind="full",
-                                decision_horizon=None,
-                                requested_at=fetched_at,
-                                latitude=latitude,
-                                longitude=longitude,
-                                timezone=timezone,
-                                forecast_days=1,
-                                status=status,
-                                availability_status=availability_status,
-                                variables=variables,
-                                error_message=error_message,
-                                http_status=http_status,
-                                reason=reason,
-                                query_signature=query_signature,
-                            )
-                        )
-                        continue
-
-                relative_path = (
-                    f"forecasts/{endpoint_kind}/{spec.city.lower().replace(' ', '_')}/"
-                    f"{spec.target_local_date.isoformat()}/{spec.market_id}_{model}.json"
-                )
-                artifact = self.warehouse.raw_store.write_json(relative_path, payload)
-                bronze_rows.append(
-                    self._forecast_request_row(
-                        spec=spec,
-                        model=model,
-                        endpoint_kind=endpoint_kind,
-                        request_kind="full",
-                        decision_horizon=None,
-                        requested_at=fetched_at,
-                        latitude=latitude,
-                        longitude=longitude,
-                        timezone=timezone,
-                        forecast_days=self._forecast_days(spec, timezone),
-                        status=status,
-                        availability_status=availability_status,
-                        variables=variables,
-                        raw_path=artifact.relative_path,
-                        raw_hash=artifact.content_hash,
-                        http_status=http_status,
-                        reason=reason,
-                        query_signature=query_signature,
-                    )
-                )
-                silver_rows.extend(
-                    self._normalize_forecast_rows(
-                        spec=spec,
-                        model_name=model,
-                        endpoint_kind=endpoint_kind,
-                        payload=cast(dict[str, Any], payload),
-                        raw_path=artifact.relative_path,
-                        raw_hash=artifact.content_hash,
-                        availability_status=availability_status,
-                        source_variables=variables,
-                        retrieved_at=fetched_at,
-                        decision_horizon=None,
-                        issue_time_utc=None,
-                        requested_run_time_utc=None,
-                    )
-                )
-                if endpoint_kind == "historical_forecast" and single_run_horizons:
-                    single_run_bronze, single_run_silver = self._backfill_single_run_requests(
-                        spec=spec,
-                        model=model,
-                        latitude=latitude,
-                        longitude=longitude,
-                        timezone=timezone,
-                        horizons=single_run_horizons,
-                        strict_archive=strict_archive,
-                        missing_only=missing_only,
-                        existing_request_states=existing_request_states,
-                    )
-                    _sr_ok = sum(1 for r in single_run_bronze if r.get("status") == "ok")
-                    _sr_err = sum(1 for r in single_run_bronze if r.get("status") == "error")
-                    single_run_ok_total += _sr_ok
-                    single_run_err_total += _sr_err
-                    if single_run_bronze:
-                        LOGGER.info(
-                            "single_run market done",
-                            extra={
-                                "market_id": spec.market_id,
-                                "city": spec.city,
-                                "model": model,
+                            LOGGER.info("single_run market done", extra={
+                                "market_id": spec.market_id, "city": spec.city, "model": model,
                                 "target_date": str(spec.target_local_date),
-                                "ok": _sr_ok,
-                                "err": _sr_err,
-                                "cumulative_ok": single_run_ok_total,
-                                "cumulative_err": single_run_err_total,
-                                "market_progress": f"{processed_total + 1}/{total_snapshots}",
-                            },
-                        )
-                    bronze_rows.extend(single_run_bronze)
-                    silver_rows.extend(single_run_silver)
-                source_rows.append(
-                    {
+                                "ok": _sr_ok, "err": _sr_err,
+                                "cumulative_ok": sr_ok, "cumulative_err": sr_err,
+                                "market_progress": f"{shard_processed + 1}/{total_snapshots}",
+                            })
+                        b_rows.extend(single_run_bronze)
+                        s_rows.extend(single_run_silver)
+                    src_rows.append({
                         "source_key": stable_hash(f"open-meteo|{endpoint_kind}|{model}")[:16],
                         "source_name": "open-meteo",
                         "source_url": self._forecast_endpoint_url(
-                            spec=spec,
-                            model=model,
-                            endpoint_kind=endpoint_kind,
-                            hourly=variables,
-                            forecast_days=self._forecast_days(spec, timezone),
-                            request_kind="full",
-                            latitude=latitude,
-                            longitude=longitude,
-                            decision_horizon=None,
+                            spec=spec, model=model, endpoint_kind=endpoint_kind, hourly=variables,
+                            forecast_days=self._forecast_days(spec, timezone), request_kind="full",
+                            latitude=latitude, longitude=longitude, decision_horizon=None,
                         ),
                         "station_id": spec.station_id,
                         "city": spec.city,
                         "source_kind": endpoint_kind,
                         **self._metadata_fields(source_priority=self._source_priority(endpoint_kind)),
-                    }
-                )
-            processed_since_checkpoint += 1
-            processed_since_parquet_export += 1
-            processed_total += 1
-            # Checkpoint long runs so city/batch shards do not lose all progress on interruption.
-            if processed_since_checkpoint >= checkpoint_snapshots:
-                export_parquet = processed_since_parquet_export >= parquet_export_every
-                flush_buffers(force=export_parquet)
-                self.warehouse.write_manifest()
-                processed_since_checkpoint = 0
-                if export_parquet:
-                    processed_since_parquet_export = 0
-                pct = 100.0 * processed_total / total_snapshots if total_snapshots else 0.0
-                LOGGER.info(
-                    "backfill_forecasts checkpoint",
-                    extra={
-                        "processed": processed_total,
+                    })
+                since_chk += 1
+                since_parquet += 1
+                shard_processed += 1
+                if since_chk >= checkpoint_snapshots:
+                    export_parquet = since_parquet >= parquet_export_every
+                    flush_local(force=export_parquet)
+                    with db_lock:
+                        self.warehouse.write_manifest()
+                    since_chk = 0
+                    if export_parquet:
+                        since_parquet = 0
+                    pct = 100.0 * shard_processed / len(shard_snapshots) if shard_snapshots else 0.0
+                    LOGGER.info("backfill_forecasts checkpoint", extra={
+                        "shard_id": shard_id,
+                        "processed": shard_processed,
                         "total": total_snapshots,
                         "pct": round(pct, 1),
-                        "bronze_rows": bronze_count,
-                        "silver_rows": silver_count,
-                        "single_run_ok": single_run_ok_total,
-                        "single_run_err": single_run_err_total,
+                        "single_run_ok": sr_ok,
+                        "single_run_err": sr_err,
                         "parquet_exported": export_parquet,
-                    },
-                )
+                    })
+            flush_local(force=True)
+            results_queue.put((sr_ok, sr_err))
 
-        flush_buffers(force=True)
-        self.warehouse.write_manifest()
+        def run_shard_guarded(shard_snapshots: list[MarketSnapshot], shard_id: int) -> None:
+            try:
+                run_shard(shard_snapshots, shard_id)
+            except BaseException as exc:  # noqa: BLE001
+                errors_queue.put((shard_id, exc))
+
+        threads = [
+            threading.Thread(target=run_shard_guarded, args=(shards[i], i), daemon=True)
+            for i in range(workers)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        if not errors_queue.empty():
+            shard_id, exc = errors_queue.get_nowait()
+            msg = f"backfill_forecasts worker {shard_id} failed"
+            raise RuntimeError(msg) from exc
+
+        with db_lock:
+            self.warehouse.write_manifest()
+
+        total_sr_ok = 0
+        total_sr_err = 0
+        while not results_queue.empty():
+            sr_ok, sr_err = results_queue.get_nowait()
+            total_sr_ok += sr_ok
+            total_sr_err += sr_err
+
+        bronze_count = self.warehouse.table_row_count("bronze_forecast_requests")
+        silver_count = self.warehouse.table_row_count("silver_forecast_runs_hourly")
+        LOGGER.info(
+            "backfill_forecasts completed",
+            extra={
+                "workers": workers,
+                "single_run_ok": total_sr_ok,
+                "single_run_err": total_sr_err,
+                "bronze_forecast_requests": bronze_count,
+                "silver_forecast_runs_hourly": silver_count,
+            },
+        )
         bronze = self.warehouse.read_table("bronze_forecast_requests") if return_tables else None
         silver = self.warehouse.read_table("silver_forecast_runs_hourly") if return_tables else None
         return {
@@ -1228,17 +1137,33 @@ class BackfillPipeline:
         interval: str = "max",
         fidelity: int = 60,
         use_cache: bool = True,
+        only_missing: bool = False,
     ) -> dict[str, pd.DataFrame]:
         """Persist Polymarket official token price history for a historical market set."""
 
         bronze_rows: list[dict[str, object]] = []
         silver_rows: list[dict[str, object]] = []
+        existing_price_keys: set[tuple[str, str]] = set()
+        if only_missing and self.warehouse.table_exists("silver_price_timeseries"):
+            existing_prices = self.warehouse.read_query(
+                """
+                select distinct cast(market_id as varchar) as market_id,
+                                cast(token_id as varchar) as token_id
+                from silver_price_timeseries
+                """
+            )
+            existing_price_keys = {
+                (str(row.market_id), str(row.token_id))
+                for row in existing_prices.itertuples(index=False)
+            }
         for snapshot in snapshots:
             spec = snapshot.spec
             if spec is None:
                 continue
             token_ids = spec.token_ids or snapshot.clob_token_ids
             for outcome_label, token_id in zip(spec.outcome_labels(), token_ids, strict=False):
+                if only_missing and (str(spec.market_id), str(token_id)) in existing_price_keys:
+                    continue
                 requested_at = dt.datetime.now(tz=dt.UTC)
                 raw_path: str | None = None
                 raw_hash: str | None = None
@@ -1354,10 +1279,27 @@ class BackfillPipeline:
                     }
                 )
 
-        bronze = self.warehouse.upsert_table("bronze_price_history_requests", pd.DataFrame(bronze_rows))
-        silver = self.warehouse.upsert_table("silver_price_timeseries", pd.DataFrame(silver_rows))
+        batch_bronze = pd.DataFrame(bronze_rows)
+        batch_silver = pd.DataFrame(silver_rows)
+        bronze = self.warehouse.upsert_table("bronze_price_history_requests", batch_bronze)
+        if batch_silver.empty:
+            self.warehouse.upsert_table("silver_price_timeseries", batch_silver, return_frame=False)
+            silver = batch_silver
+        else:
+            silver = self.warehouse.upsert_table("silver_price_timeseries", batch_silver)
         self.warehouse.write_manifest()
-        return {"bronze_price_history_requests": bronze, "silver_price_timeseries": silver}
+        return {
+            "bronze_price_history_requests": bronze,
+            "silver_price_timeseries": silver,
+            "batch_bronze_price_history_requests": batch_bronze,
+            "batch_silver_price_timeseries": batch_silver,
+            "persisted_bronze_price_history_request_count": pd.DataFrame(
+                [{"row_count": self.warehouse.table_row_count("bronze_price_history_requests")}]
+            ),
+            "persisted_silver_price_timeseries_count": pd.DataFrame(
+                [{"row_count": self.warehouse.table_row_count("silver_price_timeseries")}]
+            ),
+        }
 
     def materialize_backtest_panel(
         self,
@@ -1609,6 +1551,7 @@ class BackfillPipeline:
         decision_horizons: list[str] | None = None,
         contract: str = "both",
         allow_canonical_overwrite: bool = False,
+        chunk_size: int = 5000,
     ) -> pd.DataFrame:
         """Build the gold training dataset from normalized bronze/silver tables."""
 
@@ -1616,235 +1559,257 @@ class BackfillPipeline:
             msg = f"Unsupported materialization contract: {contract}"
             raise ValueError(msg)
         horizons = decision_horizons or ["market_open", "previous_evening", "morning_of"]
-        needed_ids = sorted({s.spec.market_id for s in snapshots if s.spec is not None})
-        id_placeholders = ",".join(["?"] * len(needed_ids))
 
-        # Precompute all daily features in a single DuckDB SQL aggregation.
-        # This replaces the per-market-×-model-×-horizon Python feature loop
-        # (91k × 3 × 4 = 1.1M calls) with one vectorised GROUP BY.
-        if self.warehouse.table_exists("silver_forecast_runs_hourly"):
-            features_df = self.warehouse.read_query(
-                f"""
-                select
-                    market_id,
-                    model_name,
-                    endpoint_kind,
-                    coalesce(cast(decision_horizon as varchar), '__historical__') as dh_key,
-                    max(temperature_2m)  filter (where local_date = target_local_date) as model_daily_max,
-                    avg(temperature_2m)  filter (where local_date = target_local_date) as model_daily_mean,
-                    min(temperature_2m)  filter (where local_date = target_local_date) as model_daily_min,
-                    max(temperature_2m)  filter (where local_date = target_local_date)
-                        - min(temperature_2m) filter (where local_date = target_local_date) as diurnal_amplitude,
-                    avg(case when hour between 11 and 15 and local_date = target_local_date
-                             then temperature_2m end) as midday_temp,
-                    avg(cloud_cover)          filter (where local_date = target_local_date) as cloud_cover_mean,
-                    avg(wind_speed_10m)       filter (where local_date = target_local_date) as wind_speed_mean,
-                    avg(relative_humidity_2m) filter (where local_date = target_local_date) as humidity_mean,
-                    avg(dew_point_2m)         filter (where local_date = target_local_date) as dew_point_mean,
-                    count(*)                  filter (where local_date = target_local_date) as num_hours,
-                    max(issue_time_utc) as latest_issue_time_utc
-                from silver_forecast_runs_hourly
-                where market_id in ({id_placeholders})
-                group by market_id, model_name, endpoint_kind, dh_key
-                """,  # noqa: S608
-                parameters=needed_ids,
-            )
-        else:
-            features_df = pd.DataFrame()
-        if self.warehouse.table_exists("silver_observations_daily"):
-            truth_df = self.warehouse.read_query(
-                f"select * from silver_observations_daily where market_id in ({id_placeholders})",  # noqa: S608
-                parameters=needed_ids,
-            )
-        else:
-            truth_df = pd.DataFrame()
-
-        # Build lookup dicts for O(1) per-market access.
-        # feature_lookup: (market_id, model_name, endpoint_kind, dh_key) → feature dict
         _feat_cols = [
             "model_daily_max", "model_daily_mean", "model_daily_min", "diurnal_amplitude",
             "midday_temp", "cloud_cover_mean", "wind_speed_mean", "humidity_mean",
             "dew_point_mean", "num_hours", "latest_issue_time_utc",
         ]
-        feature_lookup: dict[tuple[str, str, str, str], dict[str, object]] = {}
-        for frow in features_df.itertuples(index=False):
-            key = (str(frow.market_id), str(frow.model_name), str(frow.endpoint_kind), str(frow.dh_key))
-            feature_lookup[key] = {col: getattr(frow, col) for col in _feat_cols}
+        _known_endpoint_kinds = ("historical_forecast", "single_run", "fixture")
 
-        truth_by_market: dict[str, pd.Series] = {}
-        if not truth_df.empty and "market_id" in truth_df.columns:
-            for mid, grp in truth_df.groupby("market_id", sort=False):
-                truth_by_market[str(mid)] = grp.iloc[-1]
+        chunk_frames: list[pd.DataFrame] = []
+        chunk_seq_frames: list[pd.DataFrame] = []
 
-        # Keep raw hourly data available for sequence rows (loaded lazily per-market).
-        forecast_by_market: dict[str, pd.DataFrame] = {}
-        if contract in {"sequence", "both"} and self.warehouse.table_exists("silver_forecast_runs_hourly"):
-            hourly_df = self.warehouse.read_query(
-                f"select * from silver_forecast_runs_hourly where market_id in ({id_placeholders})",  # noqa: S608
-                parameters=needed_ids,
+        for chunk_start in range(0, len(snapshots), chunk_size):
+            chunk_snapshots = snapshots[chunk_start : chunk_start + chunk_size]
+            needed_ids = sorted({s.spec.market_id for s in chunk_snapshots if s.spec is not None})
+            if not needed_ids:
+                continue
+            id_placeholders = ",".join(["?"] * len(needed_ids))
+
+            LOGGER.info(
+                "materialize_training_set_chunk",
+                extra={"chunk_start": chunk_start, "chunk_end": chunk_start + len(chunk_snapshots), "total": len(snapshots)},
             )
-            if not hourly_df.empty and "market_id" in hourly_df.columns:
-                for mid, grp in hourly_df.groupby("market_id", sort=False):
-                    forecast_by_market[str(mid)] = grp.reset_index(drop=True)
-            del hourly_df
 
-        rows: list[dict[str, object]] = []
-        sequence_rows: list[dict[str, object]] = []
-        for snapshot in snapshots:
-            spec = snapshot.spec
-            if spec is None:
-                continue
-            mid = str(spec.market_id)
-            truth_series = truth_by_market.get(mid)
-            if truth_series is None:
-                LOGGER.warning(
-                    "materialize_training_set_skip",
-                    extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
+            # Precompute all daily features in a single DuckDB SQL aggregation.
+            if self.warehouse.table_exists("silver_forecast_runs_hourly"):
+                features_df = self.warehouse.read_query(
+                    f"""
+                    select
+                        market_id,
+                        model_name,
+                        endpoint_kind,
+                        coalesce(cast(decision_horizon as varchar), '__historical__') as dh_key,
+                        max(temperature_2m)  filter (where local_date = target_local_date) as model_daily_max,
+                        avg(temperature_2m)  filter (where local_date = target_local_date) as model_daily_mean,
+                        min(temperature_2m)  filter (where local_date = target_local_date) as model_daily_min,
+                        max(temperature_2m)  filter (where local_date = target_local_date)
+                            - min(temperature_2m) filter (where local_date = target_local_date) as diurnal_amplitude,
+                        avg(case when hour between 11 and 15 and local_date = target_local_date
+                                 then temperature_2m end) as midday_temp,
+                        avg(cloud_cover)          filter (where local_date = target_local_date) as cloud_cover_mean,
+                        avg(wind_speed_10m)        filter (where local_date = target_local_date) as wind_speed_mean,
+                        avg(relative_humidity_2m)  filter (where local_date = target_local_date) as humidity_mean,
+                        avg(dew_point_2m)          filter (where local_date = target_local_date) as dew_point_mean,
+                        count(*)                   filter (where local_date = target_local_date) as num_hours,
+                        max(issue_time_utc) as latest_issue_time_utc
+                    from silver_forecast_runs_hourly
+                    where market_id in ({id_placeholders})
+                    group by market_id, model_name, endpoint_kind, dh_key
+                    """,  # noqa: S608
+                    parameters=needed_ids,
                 )
-                continue
-
-            # Check that at least one model has features for this market.
-            # "fixture" endpoint_kind is used by test fixtures as a stand-in for historical_forecast.
-            _known_endpoint_kinds = ("historical_forecast", "single_run", "fixture")
-            has_features = any(
-                (mid, m, ek, dh) in feature_lookup
-                for m in (self.models or [])
-                for ek in _known_endpoint_kinds
-                for dh in ("__historical__", *horizons)
-            )
-            if not has_features:
-                LOGGER.warning(
-                    "materialize_training_set_skip",
-                    extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
+            else:
+                features_df = pd.DataFrame()
+            if self.warehouse.table_exists("silver_observations_daily"):
+                truth_df = self.warehouse.read_query(
+                    f"select * from silver_observations_daily where market_id in ({id_placeholders})",  # noqa: S608
+                    parameters=needed_ids,
                 )
-                continue
+            else:
+                truth_df = pd.DataFrame()
 
-            truth_row = truth_series
-            winning_outcome = infer_winning_label(spec, float(truth_row["daily_max"]))
+            # Build lookup dicts for O(1) per-market access, then free the DataFrames.
+            feature_lookup: dict[tuple[str, str, str, str], dict[str, object]] = {}
+            for frow in features_df.itertuples(index=False):
+                key = (str(frow.market_id), str(frow.model_name), str(frow.endpoint_kind), str(frow.dh_key))
+                feature_lookup[key] = {col: getattr(frow, col) for col in _feat_cols}
+            del features_df
 
-            for horizon in horizons:
-                decision_point = self._decision_point(spec, horizon)
-                # Resolve available models for this horizon using the feature lookup.
-                selected_models: list[str] = []
-                for model in (self.models or []):
-                    # Prefer single_run for this horizon, fall back to historical_forecast/fixture.
-                    if (mid, model, "single_run", horizon) in feature_lookup or (mid, model, "historical_forecast", "__historical__") in feature_lookup or (mid, model, "fixture", "__historical__") in feature_lookup:
-                        selected_models.append(model)
+            truth_by_market: dict[str, pd.Series] = {}
+            if not truth_df.empty and "market_id" in truth_df.columns:
+                for mid, grp in truth_df.groupby("market_id", sort=False):
+                    truth_by_market[str(mid)] = grp.iloc[-1]
+            del truth_df
 
-                if not selected_models:
+            # Load hourly data for sequence rows only for this chunk.
+            forecast_by_market: dict[str, pd.DataFrame] = {}
+            if contract in {"sequence", "both"} and self.warehouse.table_exists("silver_forecast_runs_hourly"):
+                hourly_df = self.warehouse.read_query(
+                    f"select * from silver_forecast_runs_hourly where market_id in ({id_placeholders})",  # noqa: S608
+                    parameters=needed_ids,
+                )
+                if not hourly_df.empty and "market_id" in hourly_df.columns:
+                    for mid, grp in hourly_df.groupby("market_id", sort=False):
+                        forecast_by_market[str(mid)] = grp.reset_index(drop=True)
+                del hourly_df
+
+            rows: list[dict[str, object]] = []
+            sequence_rows: list[dict[str, object]] = []
+            for snapshot in chunk_snapshots:
+                spec = snapshot.spec
+                if spec is None:
+                    continue
+                mid = str(spec.market_id)
+                truth_series = truth_by_market.get(mid)
+                if truth_series is None:
                     LOGGER.warning(
-                        "materialize_training_set_skip_horizon",
-                        extra={"market_id": spec.market_id, "horizon": horizon, "reason": "missing_horizon_forecasts"},
+                        "materialize_training_set_skip",
+                        extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
                     )
                     continue
 
-                # Determine issue_time from the latest precomputed timestamp.
-                issue_time_candidates = [
-                    feature_lookup.get((mid, m, "single_run", horizon), {}).get("latest_issue_time_utc")
-                    or feature_lookup.get((mid, m, "historical_forecast", "__historical__"), {}).get("latest_issue_time_utc")
-                    or feature_lookup.get((mid, m, "fixture", "__historical__"), {}).get("latest_issue_time_utc")
-                    for m in selected_models
-                ]
-                issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
-                issue_time: pd.Timestamp = (
-                    pd.Timestamp(max(issue_time_candidates)) if issue_time_candidates
-                    else pd.Timestamp(decision_point["issue_time_utc"])
+                # Check that at least one model has features for this market.
+                # "fixture" endpoint_kind is used by test fixtures as a stand-in for historical_forecast.
+                has_features = any(
+                    (mid, m, ek, dh) in feature_lookup
+                    for m in (self.models or [])
+                    for ek in _known_endpoint_kinds
+                    for dh in ("__historical__", *horizons)
                 )
-
-                # Determine forecast source kind.
-                source_kind = (
-                    "single_run" if any((mid, m, "single_run", horizon) in feature_lookup for m in selected_models)
-                    else "historical_forecast"
-                )
-
-                row: dict[str, object] = {
-                    "market_id": spec.market_id,
-                    "station_id": spec.station_id,
-                    "city": spec.city,
-                    "truth_track": spec.truth_track,
-                    "settlement_eligible": spec.settlement_eligible,
-                    "target_date": pd.Timestamp(spec.target_local_date),
-                    "decision_horizon": horizon,
-                    "decision_time_utc": pd.Timestamp(decision_point["decision_time_utc"]),
-                    "issue_time_utc": issue_time,
-                    "lead_hours": decision_point["lead_hours"],
-                    "market_spec_json": spec.model_dump_json(),
-                    "market_prices_json": json.dumps(snapshot.outcome_prices, sort_keys=True),
-                    "realized_daily_max": float(truth_row["daily_max"]),
-                    "winning_outcome": winning_outcome,
-                    "available_models_json": json.dumps(selected_models),
-                    "selected_models_json": json.dumps(selected_models),
-                    "forecast_source_kind": source_kind,
-                    **self._metadata_fields(source_priority=self._source_priority(source_kind)),
-                }
-
-                # Populate model features from the precomputed lookup.
-                for model in self.models or []:
-                    feat = (
-                        feature_lookup.get((mid, model, "single_run", horizon))
-                        or feature_lookup.get((mid, model, "historical_forecast", "__historical__"))
-                        or feature_lookup.get((mid, model, "fixture", "__historical__"))
-                        or {}
+                if not has_features:
+                    LOGGER.warning(
+                        "materialize_training_set_skip",
+                        extra={"market_id": spec.market_id, "reason": "missing_forecast_or_truth"},
                     )
-                    raw_features = {
-                        "model_daily_max": float(feat.get("model_daily_max") or 0.0),
-                        "model_daily_mean": float(feat.get("model_daily_mean") or 0.0),
-                        "model_daily_min": float(feat.get("model_daily_min") or 0.0),
-                        "diurnal_amplitude": float(feat.get("diurnal_amplitude") or 0.0),
-                        "midday_temp": float(feat.get("midday_temp") or feat.get("model_daily_mean") or 0.0),
-                        "cloud_cover_mean": float(feat.get("cloud_cover_mean") or 0.0),
-                        "wind_speed_mean": float(feat.get("wind_speed_mean") or 0.0),
-                        "humidity_mean": float(feat.get("humidity_mean") or 0.0),
-                        "dew_point_mean": float(feat.get("dew_point_mean") or 0.0),
-                        "num_hours": float(feat.get("num_hours") or 0.0),
-                    }
-                    features = _convert_celsius_features(raw_features, spec.unit)
-                    for key, value in features.items():
-                        row[f"{model}_{key}"] = value
-                    if "model_daily_max" in features and "model_daily_max" not in row:
-                        row["model_daily_max"] = features["model_daily_max"]
+                    continue
 
-                row["neighbor_mean_temp"] = float(
-                    _coerce_float(row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0)))
-                )
-                row["neighbor_spread"] = abs(
-                    _coerce_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
-                    - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
-                )
+                truth_row = truth_series
+                winning_outcome = infer_winning_label(spec, float(truth_row["daily_max"]))
 
-                availability = {model: bool(model in selected_models) for model in (self.models or [])}
-                row["contract_version"] = "v2"
-                row["group_id"] = f"{spec.market_id}|{spec.target_local_date.isoformat()}"
-                row["split_group"] = row["group_id"]
-                row["feature_availability_json"] = json.dumps(availability, sort_keys=True)
-                rows.append(row)
+                for horizon in horizons:
+                    decision_point = self._decision_point(spec, horizon)
+                    # Resolve available models for this horizon using the feature lookup.
+                    selected_models: list[str] = []
+                    for model in (self.models or []):
+                        # Prefer single_run for this horizon, fall back to historical_forecast/fixture.
+                        if (mid, model, "single_run", horizon) in feature_lookup or (mid, model, "historical_forecast", "__historical__") in feature_lookup or (mid, model, "fixture", "__historical__") in feature_lookup:
+                            selected_models.append(model)
 
-                if contract in {"sequence", "both"}:
-                    market_forecasts = forecast_by_market.get(mid, pd.DataFrame())
-                    selected_forecasts = self._select_forecasts_for_horizon(market_forecasts, horizon)
-                    sequence_rows.extend(
-                        self._build_sequence_rows(
-                            selected_forecasts=selected_forecasts,
-                            spec=spec,
-                            horizon=horizon,
-                            decision_point=decision_point,
-                            issue_time=issue_time,
-                            snapshot=snapshot,
-                            winning_outcome=winning_outcome,
-                            realized_daily_max=float(truth_row["daily_max"]),
+                    if not selected_models:
+                        LOGGER.warning(
+                            "materialize_training_set_skip_horizon",
+                            extra={"market_id": spec.market_id, "horizon": horizon, "reason": "missing_horizon_forecasts"},
                         )
+                        continue
+
+                    # Determine issue_time from the latest precomputed timestamp.
+                    issue_time_candidates = [
+                        feature_lookup.get((mid, m, "single_run", horizon), {}).get("latest_issue_time_utc")
+                        or feature_lookup.get((mid, m, "historical_forecast", "__historical__"), {}).get("latest_issue_time_utc")
+                        or feature_lookup.get((mid, m, "fixture", "__historical__"), {}).get("latest_issue_time_utc")
+                        for m in selected_models
+                    ]
+                    issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
+                    issue_time: pd.Timestamp = (
+                        pd.Timestamp(max(issue_time_candidates)) if issue_time_candidates
+                        else pd.Timestamp(decision_point["issue_time_utc"])
                     )
 
-        frame = pd.DataFrame(rows)
-        if frame.empty:
-            _fc_proxy = features_df[["market_id"]].drop_duplicates() if not features_df.empty else pd.DataFrame()
-            _tr_proxy = truth_df[["market_id"]].drop_duplicates() if not truth_df.empty else pd.DataFrame()
-            msg = self._empty_materialization_message(snapshots, _fc_proxy, _tr_proxy)
+                    # Determine forecast source kind.
+                    source_kind = (
+                        "single_run" if any((mid, m, "single_run", horizon) in feature_lookup for m in selected_models)
+                        else "historical_forecast"
+                    )
+
+                    row: dict[str, object] = {
+                        "market_id": spec.market_id,
+                        "station_id": spec.station_id,
+                        "city": spec.city,
+                        "truth_track": spec.truth_track,
+                        "settlement_eligible": spec.settlement_eligible,
+                        "target_date": pd.Timestamp(spec.target_local_date),
+                        "decision_horizon": horizon,
+                        "decision_time_utc": pd.Timestamp(decision_point["decision_time_utc"]),
+                        "issue_time_utc": issue_time,
+                        "lead_hours": decision_point["lead_hours"],
+                        "market_spec_json": spec.model_dump_json(),
+                        "market_prices_json": json.dumps(snapshot.outcome_prices, sort_keys=True),
+                        "realized_daily_max": float(truth_row["daily_max"]),
+                        "winning_outcome": winning_outcome,
+                        "available_models_json": json.dumps(selected_models),
+                        "selected_models_json": json.dumps(selected_models),
+                        "forecast_source_kind": source_kind,
+                        **self._metadata_fields(source_priority=self._source_priority(source_kind)),
+                    }
+
+                    # Populate model features from the precomputed lookup.
+                    for model in self.models or []:
+                        feat = (
+                            feature_lookup.get((mid, model, "single_run", horizon))
+                            or feature_lookup.get((mid, model, "historical_forecast", "__historical__"))
+                            or feature_lookup.get((mid, model, "fixture", "__historical__"))
+                            or {}
+                        )
+                        raw_features = {
+                            "model_daily_max": float(feat.get("model_daily_max") or 0.0),
+                            "model_daily_mean": float(feat.get("model_daily_mean") or 0.0),
+                            "model_daily_min": float(feat.get("model_daily_min") or 0.0),
+                            "diurnal_amplitude": float(feat.get("diurnal_amplitude") or 0.0),
+                            "midday_temp": float(feat.get("midday_temp") or feat.get("model_daily_mean") or 0.0),
+                            "cloud_cover_mean": float(feat.get("cloud_cover_mean") or 0.0),
+                            "wind_speed_mean": float(feat.get("wind_speed_mean") or 0.0),
+                            "humidity_mean": float(feat.get("humidity_mean") or 0.0),
+                            "dew_point_mean": float(feat.get("dew_point_mean") or 0.0),
+                            "num_hours": float(feat.get("num_hours") or 0.0),
+                        }
+                        features = _convert_celsius_features(raw_features, spec.unit)
+                        for key, value in features.items():
+                            row[f"{model}_{key}"] = value
+                        if "model_daily_max" in features and "model_daily_max" not in row:
+                            row["model_daily_max"] = features["model_daily_max"]
+
+                    row["neighbor_mean_temp"] = float(
+                        _coerce_float(row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0)))
+                    )
+                    row["neighbor_spread"] = abs(
+                        _coerce_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
+                        - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
+                    )
+
+                    availability = {model: bool(model in selected_models) for model in (self.models or [])}
+                    row["contract_version"] = "v2"
+                    row["group_id"] = f"{spec.market_id}|{spec.target_local_date.isoformat()}"
+                    row["split_group"] = row["group_id"]
+                    row["feature_availability_json"] = json.dumps(availability, sort_keys=True)
+                    rows.append(row)
+
+                    if contract in {"sequence", "both"}:
+                        market_forecasts = forecast_by_market.get(mid, pd.DataFrame())
+                        selected_forecasts = self._select_forecasts_for_horizon(market_forecasts, horizon)
+                        sequence_rows.extend(
+                            self._build_sequence_rows(
+                                selected_forecasts=selected_forecasts,
+                                spec=spec,
+                                horizon=horizon,
+                                decision_point=decision_point,
+                                issue_time=issue_time,
+                                snapshot=snapshot,
+                                winning_outcome=winning_outcome,
+                                realized_daily_max=float(truth_row["daily_max"]),
+                            )
+                        )
+
+            # Convert chunk results to DataFrames and release per-chunk memory.
+            if rows:
+                chunk_frames.append(pd.DataFrame(rows))
+            if sequence_rows:
+                chunk_seq_frames.append(pd.DataFrame(sequence_rows))
+            del rows, sequence_rows, feature_lookup, truth_by_market, forecast_by_market
+            gc.collect()
+
+        if not chunk_frames:
+            msg = self._empty_materialization_message(snapshots, pd.DataFrame(), pd.DataFrame())
             raise ValueError(msg)
-        if not frame.empty:
-            numeric_columns = frame.select_dtypes(include=["number"]).columns
-            frame.loc[:, numeric_columns] = frame.loc[:, numeric_columns].fillna(0.0)
-        if contract in {"tabular", "both"} and not frame.empty:
+
+        frame = pd.concat(chunk_frames, ignore_index=True)
+        del chunk_frames
+        gc.collect()
+
+        numeric_columns = frame.select_dtypes(include=["number"]).columns
+        frame.loc[:, numeric_columns] = frame.loc[:, numeric_columns].fillna(0.0)
+        if contract in {"tabular", "both"}:
             self.warehouse.write_gold_table(
                 "gold_training_examples_tabular",
                 frame,
@@ -1857,8 +1822,9 @@ class BackfillPipeline:
                 relative_path=f"gold/v2/{output_name}_compat.parquet",
                 allow_canonical_overwrite=allow_canonical_overwrite,
             )
-        if contract in {"sequence", "both"} and sequence_rows:
-            sequence_frame = pd.DataFrame(sequence_rows)
+        if contract in {"sequence", "both"} and chunk_seq_frames:
+            sequence_frame = pd.concat(chunk_seq_frames, ignore_index=True)
+            del chunk_seq_frames
             self.warehouse.write_gold_table(
                 "gold_training_examples_sequence",
                 sequence_frame,

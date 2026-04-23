@@ -16,11 +16,13 @@ class OpenMeteoClient:
         base_url: str,
         archive_base_url: str,
         single_runs_base_url: str = "https://single-runs-api.open-meteo.com",
+        historical_weather_base_url: str = "https://archive-api.open-meteo.com",
     ) -> None:
         self.http = http
         self.base_url = base_url.rstrip("/")
         self.archive_base_url = archive_base_url.rstrip("/")
         self.single_runs_base_url = single_runs_base_url.rstrip("/")
+        self.historical_weather_base_url = historical_weather_base_url.rstrip("/")
 
     def forecast(
         self,
@@ -68,6 +70,32 @@ class OpenMeteoClient:
                 "latitude": latitude,
                 "longitude": longitude,
                 "models": model,
+                "hourly": ",".join(hourly),
+                "start_date": start_date,
+                "end_date": end_date,
+                "timezone": timezone,
+            },
+            use_cache=True,
+        )
+        return cast(dict[str, Any], payload)
+
+    def historical_weather(
+        self,
+        *,
+        latitude: float,
+        longitude: float,
+        hourly: list[str],
+        start_date: str,
+        end_date: str,
+        timezone: str = "UTC",
+    ) -> dict[str, Any]:
+        """Fetch historical observed weather. Cached indefinitely for training rebuilds."""
+
+        payload = self.http.get_json(
+            f"{self.historical_weather_base_url}/v1/archive",
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
                 "hourly": ",".join(hourly),
                 "start_date": start_date,
                 "end_date": end_date,
