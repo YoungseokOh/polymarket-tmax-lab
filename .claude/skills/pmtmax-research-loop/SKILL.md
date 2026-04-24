@@ -39,6 +39,10 @@ After paper-trader, check book_source in `artifacts/workspaces/ops_daily/signals
   keep stderr progress enabled unless a wrapper needs quiet output, and prefer
   short HTTP bounds (`--http-timeout-seconds 15 --http-retries 1`) for free-tier
   Open-Meteo historical-forecast collection.
+- The default orchestrator for repeated weather collection is the queue agent:
+  `scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py`
+  It advances the next `7`-day checker queue and auto-refreshes
+  `gaussian_emos` pretrain once the row-gap threshold is reached.
 - Latest observed collection state on April 24, 2026: `weather_train` gold has
   4,992 rows. Full successful ranges are `2024-01-03..2024-05-24` and
   `2026-01-01..2026-01-14`; partial coverage extends through `2024-05-30` and
@@ -46,6 +50,25 @@ After paper-trader, check book_source in `artifacts/workspaces/ops_daily/signals
 - Operational continuity for weather collection lives under `checker/`; update
   `checker/weather_train_status.md` and `checker/weather_train_collection_log.md`
   after every run.
+- Daily continuity for official price-history recovery also lives under
+  `checker/`; update `checker/historical_price_status.md` and
+  `checker/historical_price_collection_log.md` after every recovery run.
+- Parallel research ops rule: it is acceptable to run `weather_train` queue
+  collection in parallel with `historical_real backfill-price-history` because
+  those jobs use separate workspace roots. Do not overlap multiple mutating
+  `historical_real` jobs; finish `backfill-price-history` before
+  `materialize-backtest-panel`, and finish panel rebuild before benchmark or
+  publish gates.
+- The default daily orchestrator for official price-history recovery is:
+  `scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py`
+  It advances one checker shard by default and records the latest panel-ready
+  decision rows plus the latest backtest `priced_decision_rows` anchor.
+- The default checker-driven orchestrator for baseline retraining plus
+  autoresearch is:
+  `scripts/pmtmax-workspace historical_real uv run python scripts/run_model_research_agent.py`
+  It keeps one active autoresearch run aligned to the current dataset/panel
+  signatures, auto-creates the next small candidate YAML when needed, and
+  tracks train/step/gate/paper/promote state under `checker/model_research_*`.
 - before paper-trader records forward trades, verify active real CLOB books are available; missing/fixture paper trades are diagnostics and must not be recorded as forward evidence.
 - synthetic inventories, `synthetic_` market ids, fixture forecasts, and fabricated books are trust violations in canonical research.
 - `build-dataset` MUST use `--markets-path configs/market_inventory/full_training_set_snapshots.json`.
@@ -80,6 +103,10 @@ After paper-trader, check book_source in `artifacts/workspaces/ops_daily/signals
 - Canonical training build with existing forecast coverage reuse:
   `scripts/pmtmax-workspace historical_real uv run pmtmax build-dataset --markets-path configs/market_inventory/full_training_set_snapshots.json --forecast-missing-only --allow-canonical-overwrite`
 - Official-price panel rebuild:
+  `scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite`
+- Price-history recovery before backtest:
+  `scripts/pmtmax-workspace historical_real uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/full_training_set_snapshots.json`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history --markets-path configs/market_inventory/full_training_set_snapshots.json --only-missing --price-no-cache --limit-markets 25`
   `scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite`
 - Bootstrap refresh with existing forecast coverage reuse:
   `uv run pmtmax bootstrap-lab --forecast-missing-only`

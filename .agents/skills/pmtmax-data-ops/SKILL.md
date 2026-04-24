@@ -35,6 +35,16 @@ Use this skill for storage, bootstrap, and long-history data operations.
   `--http-timeout-seconds`, `--http-retries`,
   `--http-retry-wait-min-seconds`, `--http-retry-wait-max-seconds`, plus
   stderr progress by default.
+- Prefer the queue agent for repeated older-gap weather collection:
+  `scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py`
+  It reads `checker/weather_train_status.md`, advances the next `7`-day chunk,
+  updates checker markdown after every chunk, and auto-refreshes
+  `gaussian_emos` pretrain when the configured row-gap threshold is met.
+- Prefer the daily recovery agent for official price-history recovery:
+  `scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py`
+  It reads `checker/historical_price_status.md`, advances the next shard,
+  rebuilds the canonical backtest panel, refreshes the latest coverage JSON,
+  and updates the historical-price checker markdown files.
 - Latest observed field state on April 24, 2026:
   `weather_train` gold has 4,992 rows. Full successful ranges are
   `2024-01-03..2024-05-24` and `2026-01-01..2026-01-14`; partial coverage
@@ -44,6 +54,15 @@ Use this skill for storage, bootstrap, and long-history data operations.
 - Keep `checker/weather_train_status.md` and
   `checker/weather_train_collection_log.md` synchronized after every
   collection/pretrain turn.
+- Keep `checker/historical_price_status.md` and
+  `checker/historical_price_collection_log.md` synchronized after every daily
+  price recovery turn.
+- Safe parallelism: `weather_train` queue collection can run at the same time
+  as `historical_real` price-history collection because they write to separate
+  workspace roots and hit different upstream APIs. Do not run two mutating
+  `historical_real` jobs at once; `backfill-price-history`,
+  `materialize-backtest-panel`, `build-dataset`, and `backfill-forecasts`
+  should stay serialized within that workspace.
 - use variant `--output-name` values by default; only pass `--allow-canonical-overwrite` for intentional canonical promotion.
 - canonical overwrite now snapshots the old parquet + manifest under `artifacts/recovery/` first.
 - lag recovery truth probes should default to `--truth-per-source-limit 1`, and use `--truth-no-cache` when cached truth payloads look stale or malformed.
@@ -66,6 +85,11 @@ Use this skill for storage, bootstrap, and long-history data operations.
 - Official-price panel rebuild:
   `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history --markets-path configs/market_inventory/full_training_set_snapshots.json --only-missing --price-no-cache --limit-markets 25`
   `scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite`
+- Price-history coverage recovery loop:
+  `scripts/pmtmax-workspace historical_real uv run pmtmax summarize-price-history-coverage --markets-path configs/market_inventory/full_training_set_snapshots.json`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history --markets-path configs/market_inventory/full_training_set_snapshots.json --only-missing --price-no-cache --limit-markets 25 --offset-markets 0`
+  `scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite`
+  `scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py`
 - Seed/bootstrap refresh without forecast refetch:
   `uv run pmtmax bootstrap-lab --forecast-missing-only`
 

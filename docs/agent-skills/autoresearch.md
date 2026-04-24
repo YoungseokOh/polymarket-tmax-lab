@@ -34,6 +34,20 @@ bash scripts/autoresearch.sh init
 bash scripts/autoresearch.sh step --spec-path artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/my_candidate.yaml
 ```
 
+For checker-driven recurring operation, use the model research agent:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_model_research_agent.py
+```
+
+It keeps one active autoresearch run aligned to the current dataset/panel
+signatures, auto-creates one small YAML candidate when the queue is empty,
+processes one candidate per run, and records the current run/candidate/publish
+state under:
+- `checker/model_research_status.md`
+- `checker/model_research_log.md`
+- `checker/model_research_runbook.md`
+
 ## Candidate Spec
 - YAML-backed and agent-editable
 - one candidate at a time

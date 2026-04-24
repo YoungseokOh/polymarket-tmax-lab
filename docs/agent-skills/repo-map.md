@@ -21,7 +21,13 @@
 - 날씨/진실값: `docs/codebase/weather.md`
 - 모델/평가: `docs/codebase/modeling.md`, `docs/research/backtesting.md`
 - 저장소/운영: `docs/codebase/storage-and-configs.md`, `docs/agent-skills/data-ops.md`
-- 반복 데이터셋 체크: `checker/weather_train_status.md`, `checker/weather_train_collection_log.md`, `checker/weather_train_runbook.md`
+- 반복 데이터셋 체크:
+  `checker/weather_train_status.md`, `checker/weather_train_collection_log.md`, `checker/weather_train_runbook.md`,
+  `checker/historical_price_status.md`, `checker/historical_price_collection_log.md`, `checker/historical_price_runbook.md`,
+  `checker/model_research_status.md`, `checker/model_research_log.md`, `checker/model_research_runbook.md`
+- weather queue orchestrator: `scripts/run_weather_train_queue_agent.py`
+- historical price recovery orchestrator: `scripts/run_historical_price_recovery_agent.py`
+- model research orchestrator: `scripts/run_model_research_agent.py`
 - daily 운영 루프: `docs/agent-skills/research-loop.md`, `scripts/daily_experiment.sh`
 - release/검증: `docs/agent-skills/release-checklist.md`
 

@@ -20,6 +20,11 @@ Use this skill for the agent-driven autoresearch loop around `lgbm_emos`.
 - create or edit one candidate YAML at a time under `artifacts/workspaces/historical_real/autoresearch/<run_tag>/candidates/`.
 - run autoresearch against real-only `historical_real` data; synthetic augmentation is not allowed.
 - use `autoresearch-step` for quick keep/discard/crash, then `autoresearch-gate`, then `autoresearch-analyze-paper`.
+- for recurring checker-based operation, prefer
+  `scripts/pmtmax-workspace historical_real uv run python scripts/run_model_research_agent.py`
+  which can retrain the baseline when signatures change, create the next small
+  candidate YAML automatically, and advance one candidate through the loop while
+  updating `checker/model_research_*`.
 - canonical `historical_training_set*` / `historical_backtest_panel` stay immutable unless explicitly promoted elsewhere.
 - public `champion` publish is never implicit; `autoresearch-promote` only promotes YAML specs and `publish-champion` is the separate public-alias command.
 - promotion is fail-closed: require CLI gate leaderboard JSON/CSV, matching dataset/panel signatures, candidate calibrator, and paper `overall_gate_decision=GO`; `INCONCLUSIVE` blocks promotion.

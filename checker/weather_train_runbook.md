@@ -46,6 +46,33 @@ Use these unless there is a clear reason to change them:
 Keep stderr progress on for manual runs. Use `--no-progress` only when a wrapper
 script needs clean stdout JSON.
 
+## 2a. Automated Queue Agent
+For repeated older backfill, prefer the queue agent. It reads the checker
+state, advances the next `7`-day chunk, updates `checker/weather_train_status.md`
+and `checker/weather_train_collection_log.md` after every chunk, and stops on
+the first throttled chunk.
+
+```bash
+scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py
+```
+
+Useful overrides:
+
+```bash
+scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py \
+  --queue-start 2024-07-02 \
+  --chunk-days 7 \
+  --max-chunks 3 \
+  --pretrain-refresh-threshold-rows 500 \
+  --http-timeout-seconds 15 \
+  --http-retries 1
+```
+
+Default behavior: when the current `weather_train` gold row count exceeds the
+latest weather pretrain metadata by `500` rows or more, the queue agent runs
+`gaussian_emos` pretrain refresh automatically and records that in the checker
+log before continuing.
+
 ## 3. Past Gap-Fill Procedure
 When recent dates are heavily throttled, fill older gaps first.
 

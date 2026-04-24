@@ -378,7 +378,7 @@ def main() -> None:
         env = _city_env(city_root, config_path)
         dataset_name = f"{city_slug}_recent_training_set"
         panel_name = f"{city_slug}_recent_backtest_panel"
-        dataset_path = city_root / "parquet" / "gold" / f"{dataset_name}.parquet"
+        dataset_path = city_root / "parquet" / "gold" / "v2" / f"{dataset_name}.parquet"
         if prebuilt_dataset is not None:
             if not (args.reuse_existing and dataset_path.exists()):
                 _write_prebuilt_city_frame(
@@ -419,7 +419,7 @@ def main() -> None:
             city=city,
         )
 
-        panel_path = city_root / "parquet" / "gold" / f"{panel_name}.parquet"
+        panel_path = city_root / "parquet" / "gold" / "v2" / f"{panel_name}.parquet"
         if prebuilt_panel is not None:
             if not (args.reuse_existing and panel_path.exists()):
                 _write_prebuilt_city_frame(

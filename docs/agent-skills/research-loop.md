@@ -97,18 +97,55 @@ uv run python scripts/quick_eval.py
 
 `collect-weather-training` now emits station/date progress lines on stderr by default and keeps the final machine-readable JSON on stdout. When Open-Meteo starts throttling, prefer shorter `--http-timeout-seconds` / `--http-retries` values and resumable date chunks over large silent runs.
 
-Observed weather-train state on April 24, 2026:
-- gold rows: `4,992`
-- full successful ranges: `2024-01-03..2024-05-24`, `2026-01-01..2026-01-14`
-- partial coverage extends through `2024-05-30`, `2026-01-21`
-- slow crawl test: `2026-01-22..2026-01-28` with daily chunks, `--rate-limit-profile free`, `--http-timeout-seconds 15`, `--http-retries 1`, and 20-second inter-day cooldown still returned only `retryable_error`
-- same-day older backfill test: `2024-05-25..2024-05-30` still added `130` rows
+For repeated older-backfill collection, prefer the queue agent:
 
-So the current limit for newer dates is upstream Open-Meteo throttling, not silent local hangs. Keep recent-date retries resumable and do not assume a slower wrapper alone will break through that range.
+```bash
+scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py
+```
+
+It reads `checker/weather_train_status.md`, advances the next `7`-day queue,
+updates `checker/weather_train_status.md` / `checker/weather_train_collection_log.md`
+after every chunk, auto-refreshes `gaussian_emos` pretrain when the configured
+row-gap threshold is hit, and stops on the first throttled chunk. Read the
+checker files for the live row count and current next queue.
+
+This weather queue can run in parallel with
+`scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history`
+because the two jobs use different workspace roots. Inside `historical_real`,
+keep `backfill-price-history`, `materialize-backtest-panel`, and benchmark/publish
+steps serialized.
 
 Use `checker/weather_train_runbook.md` as the operational checklist and keep
 `checker/weather_train_status.md` / `checker/weather_train_collection_log.md`
 updated after every collection or pretrain refresh.
+
+For daily official price-history recovery, use the historical price agent:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py
+```
+
+It reads `checker/historical_price_status.md`, advances one missing-price shard
+by default, runs `backfill-price-history -> materialize-backtest-panel ->
+summarize-price-history-coverage`, updates
+`checker/historical_price_status.md` /
+`checker/historical_price_collection_log.md`, and keeps the latest
+`priced_decision_rows` anchor visible for daily tracking.
+
+For baseline training plus autoresearch queue management, use the model research
+agent:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_model_research_agent.py
+```
+
+It reuses the current dataset/panel signatures, retrains the baseline only when
+needed, auto-creates the next small YAML candidate when the queue is empty,
+processes one candidate through `step -> gate -> paper -> promote`, and updates
+`checker/model_research_status.md` /
+`checker/model_research_log.md`. Public champion publish stays disabled unless
+you explicitly pass `--enable-publish` with a candidate-specific recent-core GO
+summary path.
 
 `quick_eval.py` sorts by Celsius-normalized CRPS and prints the raw market-unit
 CRPS beside it for audit. Promotion still requires benchmark, paper, or shadow evidence.

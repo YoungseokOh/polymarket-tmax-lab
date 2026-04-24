@@ -72,12 +72,26 @@ scripts/pmtmax-workspace weather_train uv run pmtmax train-weather-pretrain --mo
 
 `collect-weather-training` prints one station/date progress line to stderr by default so long Open-Meteo runs can be monitored without breaking the final JSON on stdout. Use `--no-progress` only when you need a quiet stderr stream for wrapper scripts.
 
+For repeated older-gap backfill, use the queue agent instead of manually
+advancing the next week yourself. It reads `checker/weather_train_status.md`,
+runs the next `7`-day chunk, appends the collection log, refreshes the status
+board, and stops on the first throttled chunk:
+
+```bash
+scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py
+```
+
+By default the queue agent also refreshes the `gaussian_emos` weather pretrain
+artifact automatically whenever the current `weather_train` gold row count is
+at least `500` rows ahead of the latest pretrain metadata. Override with
+`--pretrain-refresh-threshold-rows`.
+
 Current observed `weather_train` state on April 24, 2026:
-- gold rows: `4,992`
-- full successful ranges: `2024-01-03..2024-05-24`, `2026-01-01..2026-01-14`
-- partial coverage extends through `2024-05-30`, `2026-01-21`
-- recent slow crawl result: `2026-01-22..2026-01-28` still returned only `retryable_error` even with daily chunks, `--rate-limit-profile free`, `--http-timeout-seconds 15`, `--http-retries 1`, and 20-second inter-day cooldown
-- same-day older backfill result: `2024-05-25..2024-05-30` still added `130` rows
+- see `checker/weather_train_status.md` for the current row count, coverage
+  ranges, and next queue start
+- `2026-01-22..2026-01-28` still remains the recent retry-only free-path probe
+- older backfill should continue through the queue agent until the first
+  throttled chunk appears
 
 4. Build the Polymarket real-only research dataset:
 
@@ -117,6 +131,37 @@ scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history \
 scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-panel --markets-path configs/market_inventory/full_training_set_snapshots.json --allow-canonical-overwrite
 scripts/pmtmax-workspace historical_real uv run pmtmax backtest --pricing-source real_history --model-name champion
 ```
+
+For repeated daily recovery, use the historical price agent instead of manually
+tracking `--offset-markets` yourself. It reads
+`checker/historical_price_status.md`, advances the next shard, rebuilds the
+canonical panel, refreshes the latest coverage summary, and appends the daily
+checker log:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py
+```
+
+By default it processes one shard (`25` markets) per run so the queue can be
+tracked day by day. The matching runbook is `checker/historical_price_runbook.md`.
+
+For baseline retraining plus recurring autoresearch, use the model research
+agent:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_model_research_agent.py
+```
+
+It reuses the current dataset/panel signatures, retrains the baseline only when
+needed, auto-creates the next small `lgbm_emos` YAML candidate when the queue
+is empty, processes one candidate through `autoresearch-step -> gate -> paper -> promote`,
+and updates:
+- `checker/model_research_status.md`
+- `checker/model_research_log.md`
+- `checker/model_research_runbook.md`
+
+Public `champion` publish stays disabled unless you explicitly pass
+`--enable-publish` together with a candidate-specific recent-core `GO` summary path.
 
 To run a diagnostic execution proxy without claiming exact historical bid/ask
 replay, use the same panel with `quote_proxy`. Do not use `quote_proxy` as a

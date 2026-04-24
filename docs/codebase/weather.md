@@ -29,18 +29,18 @@ feature building, lagged pseudo-ensemble support, and official truth retrieval.
 - Research backfills default to strict archive mode; real-only CLI paths reject fixture fallback and trust-check treats existing fixture rows as non-canonical.
 - Archive coverage should be inspected with `pmtmax summarize-forecast-availability` before changing the default model list.
 - Open-Meteo bulk weather collection should run only through `scripts/pmtmax-workspace weather_train uv run pmtmax collect-weather-training`, with small resumable date chunks and `--missing-only` by default.
+- Repeated older-gap backfill can run through
+  `scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py`,
+  which reads the checker state, advances the next queue, and refreshes the
+  checker markdown files after each chunk. It can also auto-refresh the
+  weather-only pretrain artifact when the configured row-gap threshold is met.
 - `collect-weather-training` now has explicit HTTP control flags for Open-Meteo:
   `--http-timeout-seconds`, `--http-retries`,
   `--http-retry-wait-min-seconds`, and `--http-retry-wait-max-seconds`.
   It also emits station/date stderr progress by default while keeping the final
   summary JSON on stdout.
-- Field note as of April 24, 2026: `weather_train` successfully collected
-  full ranges `2024-01-03..2024-05-24` and `2026-01-01..2026-01-14`, with
-  partial coverage extending through `2024-05-30` and `2026-01-21`. A slow
-  day-by-day crawl over `2026-01-22..2026-01-28` still returned only
-  `retryable_error`, while `2024-05-25..2024-05-30` still added `130` rows,
-  indicating date-sensitive upstream throttling on the free path rather than a
-  simple whole-day stop.
+- Read `checker/weather_train_status.md` for the current field state instead of
+  relying on duplicated row counts in docs.
 
 ## Change Checklist
 - Truth-source changes should be reflected in `docs/markets/market-rules.md` when settlement behavior changes.
