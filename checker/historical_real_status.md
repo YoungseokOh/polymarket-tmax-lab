@@ -1,41 +1,60 @@
 # Historical Real Collection Status
 
-Updated: 2026-04-26 KST
+Updated: 2026-04-27 KST
 
 ## Current Snapshot
 - workspace: `historical_real`
 - dataset profile: `real_market`
 - curated inventory: `configs/market_inventory/historical_temperature_snapshots.json`
-- curated snapshots: `2,101`
-- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,103` URLs)
+- curated snapshots: `2,169`
+- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,171` URLs)
 - checked-in training baseline inventory: `configs/market_inventory/full_training_set_snapshots.json` (`1,834` snapshots)
 - readiness artifact: `artifacts/dataset_readiness.json`
 - forecast availability artifact: `artifacts/forecast_availability.json`
 
 ## Latest Collection
-- Targeted gap-fill on 2026-04-26 for Dallas, Atlanta, and Miami fetched/classified existing pending candidates and appended `60` truth-ready URLs: Atlanta `20`, Dallas `20`, Miami `20`.
-- Target-only inventory validation: `60` curated snapshots, issues `0`; merged local curated inventory now has `2,101` snapshots.
-- Remaining target-city collection status: Dallas `142` collected / `0` pending, Atlanta `141` collected / `0` pending, Miami `89` collected with `6` old `parse_failed` rows from missing cached event HTML.
-- Trust check on merged curated inventory: `ok=true`, `inventory_rows=2101`.
-- `backfill-markets`: `bronze_market_snapshots=5995`, `silver_market_specs=2191`.
-- `backfill-truth`: `bronze_truth_snapshots=2548`, `silver_observations_daily=2380`, status counts `ok=2380`, `error=131`, `lag=37`.
-- Targeted `backfill-forecasts` with `ecmwf_ifs025` and `gfs_seamless` across `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=359`, `single_run_err=0`, no two-consecutive-`429` cancellation, `bronze_forecast_requests=35586`, `silver_forecast_runs_hourly=1163970`.
-- Current curated single-run coverage: `ecmwf_ifs025` and `gfs_seamless` cover all `2,101` markets for all three horizons; `kma_gdps` covers `815`; `ecmwf_aifs025_single` covers `219`.
+- Targeted gap-fill on 2026-04-27 for Beijing, Chengdu, Chongqing, and Madrid fetched/classified existing pending candidates and appended `68` truth-ready URLs: Beijing `20`, Chengdu `21`, Chongqing `20`, Madrid `7`.
+- Target-only inventory validation: `68` curated snapshots, issues `0`; merged local curated inventory now has `2,169` snapshots.
+- Remaining target-city collection status: Beijing `36` collected / `0` pending, Chengdu `36` collected / `0` pending, Chongqing `36` collected / `0` pending, Madrid `27` collected / `13` pending.
+- Trust check on merged curated inventory: `ok=true`, `inventory_rows=2169`.
+- `backfill-markets`: `bronze_market_snapshots=6063`, `silver_market_specs=2259`.
+- `backfill-truth`: `bronze_truth_snapshots=2575`, `silver_observations_daily=2410`, status counts `ok=2410`, `error=128`, `lag=37`.
+- Targeted `backfill-forecasts` with `ecmwf_ifs025` and `gfs_seamless` across `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=402`, `single_run_err=0`, no two-consecutive-`429` cancellation, `bronze_forecast_requests=36250`, `silver_forecast_runs_hourly=1186434`.
 
 ## Verified Readiness
-- `artifacts/dataset_readiness.json`: detail rows `2,101`, summary rows `30`.
-- `forecast_ready=true`: `2,101`; `truth_ready=true`: `2,101`; `gold_ready=true`: `2,098`; `gold_ready=false`: `3`.
-- `readiness_status`: `ready=2,098`, `gold_missing=3`.
-- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,096`.
-- `truth_status`: `ok=2,101`.
-- Current non-canonical gold row sum: `6,294` rows from `2,098` markets; market ids `282535`, `285758`, and `289186` still lack valid horizon forecasts.
-- `artifacts/forecast_availability.json` summary rows: `645`; recommended rows: `318`; min/max availability ratio `1.0`; errors `0`; unavailable `0`.
+- `artifacts/dataset_readiness.json`: detail rows `2,169`, summary rows `30`.
+- `forecast_ready=true`: `2,169`; `truth_ready=true`: `2,169`; `gold_ready=true`: `2,165`; `gold_ready=false`: `4`.
+- `readiness_status`: `ready=2,165`, `gold_missing=4`.
+- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,164`.
+- `truth_status`: `ok=2,169`.
+- Current non-canonical gold row sum: `6,495` rows from `2,165` markets; market ids `282535`, `285758`, `289186`, and `412000` currently materialize no gold rows.
+- `artifacts/forecast_availability.json` summary rows: `645`; recommended rows: `318`; min/max availability ratio `0.0/1.0`, with the `0.0` rows limited to old `kma_ldps` London/NYC availability records.
 
 ## Current Judgment
-- The curated `2,101`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,098` markets after the sentinel feature-validity guard skips three invalid-forecast markets.
+- The curated `2,169`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,165` markets after gold materialization skips four no-row markets.
 - The canonical checked-in training set and panel are not automatically replaced. Use variant `--output-name` values first and only promote canonical after evaluation.
-- Re-running ECMWF/GFS forecast top-off immediately should be a no-op unless inventory changes. Next data work should be targeted city expansion or KMA/AIFS expansion, not another blind ECMWF/GFS run.
+- Re-running ECMWF/GFS forecast top-off immediately should be a no-op unless inventory changes. Next data work should finish the remaining Madrid pending URLs or expand another tail-loss city, not another blind ECMWF/GFS run.
 - `weather_train` remains separate and should wait for the Open-Meteo free-path limit cooldown before continuing.
+
+## Latest Targeted Beijing/Chengdu/Chongqing/Madrid Expansion
+- Target URLs:
+  `artifacts/targeted_historical_refresh_20260427/east_madrid_event_urls.json`.
+- Target snapshots:
+  `artifacts/targeted_historical_refresh_20260427/east_madrid_snapshots.json`.
+- Target training set:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_east_madrid_20260427.parquet`
+  has `201` rows, `67` markets, all three supported horizons, `ecmwf_ifs025` + `gfs_seamless` features, and `0` all-zero daily-max rows.
+- Full local backlog variant:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set_curated_multisource_targeted_east_madrid_20260427.parquet`
+  has `6,495` rows, `2,165` markets, all three supported horizons, and `0` all-zero daily-max rows.
+- Target price history:
+  `backfill-price-history --only-missing --price-no-cache` selected `68` markets, wrote `748` ok requests and `36,030` official price points.
+- Target panel:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_east_madrid_backtest_panel_20260427.parquet`
+  has `2,211` token rows with coverage `ok=1,868`, `missing=302`, `stale=41`.
+- Full local backlog panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_curated_multisource_targeted_east_madrid_20260427.parquet`
+  has `54,261` token rows with coverage `ok=17,820`, `missing=36,349`, `stale=92`.
 
 ## Latest Targeted Dallas/Atlanta/Miami Expansion
 - Target URLs:
