@@ -135,6 +135,11 @@ def test_lgbm_emos_returns_gaussian_mean_and_std(tmp_path: Path) -> None:
     assert np.all(std > 0.0)
     assert artifact.variant is None  # None means "default" (not explicitly specified)
 
+    missing_spread_frame = frame.iloc[:3].drop(columns=["gfs_seamless_model_daily_max"]).copy()
+    missing_mean, missing_std = model.predict(missing_spread_frame)
+    assert missing_mean.shape == (3,)
+    assert np.all(missing_std > 0.0)
+
     forecast = predict_market(Path(artifact.path), "lgbm_emos", spec, frame.iloc[[0]])
     assert forecast.distribution_family == "gaussian"
     assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
@@ -149,6 +154,23 @@ def test_lgbm_emos_returns_gaussian_mean_and_std(tmp_path: Path) -> None:
     assert fast_mean.shape == (3,)
     assert np.all(fast_std > 0.0)
     assert fast_artifact.variant == "fast"
+
+    single_source_frame = frame.drop(
+        columns=[column for column in frame.columns if column.startswith("ecmwf_ifs025_")]
+    )
+    single_source_artifact = train_model(
+        "lgbm_emos",
+        single_source_frame,
+        tmp_path / "lgbm_single_source",
+        split_policy="market_day",
+        seed=42,
+        variant="fast",
+    )
+    single_source_model = load_model(Path(single_source_artifact.path))
+    extra_mean, extra_std = single_source_model.predict(frame.iloc[:3].copy())
+
+    assert extra_mean.shape == (3,)
+    assert np.all(extra_std > 0.0)
 
 
 def test_ablation_variants_support_gaussian_and_mixture_contracts(tmp_path: Path) -> None:

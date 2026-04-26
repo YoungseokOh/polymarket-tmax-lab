@@ -41,3 +41,29 @@ Append-only operational log for `weather_train`.
 | 2026-04-24 | `2024-09-10..2024-09-16` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-09-17`. |
 | 2026-04-24 | `2024-09-17..2024-09-23` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-09-24`. |
 | 2026-04-24 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `630`; refreshed on `8,442` rows with dataset signature `f273242a8dd2f0427351e80de93861391d4a0aeea7c3855d45e752d43c1a182a`. |
+| 2026-04-25 | `2024-09-24..2024-09-30` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-10-01`. |
+| 2026-04-25 | `2024-10-01..2024-10-07` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-10-08`. |
+| 2026-04-25 | `2024-10-08..2024-10-14` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-10-15`. |
+| 2026-04-25 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `630`; refreshed on `9,072` rows with dataset signature `b66291b9100750fa5b9155a5164fdd896f5bb3960af8ba1f952e15e89dd83e94`. |
+| 2026-04-25 | `2024-10-15..2024-10-21` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-10-22`. |
+| 2026-04-25 | `2024-10-22..2024-10-28` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-10-29`. |
+| 2026-04-25 | `2024-10-29..2024-11-04` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-11-05`. |
+| 2026-04-25 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `630`; refreshed on `9,702` rows with dataset signature `0c6e3d7ab94c5fd9519ff7b9c84cc5b58330ef6f0106c0c9deab4f3c2d0208e4`. |
+| 2026-04-25 | `2024-11-05..2024-11-11` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-11-12`. |
+| 2026-04-25 | `2024-11-12..2024-11-18` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-11-19`. |
+| 2026-04-25 | `2024-11-19..2024-11-25` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-11-26`. |
+| 2026-04-25 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `630`; refreshed on `10,332` rows with dataset signature `c40313779dce9294275f74b937a982ebc88c1ac885cedf9cc59cdcd42bd72093`. |
+| 2026-04-25 | `2024-11-26..2024-12-02` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-12-03`. |
+| 2026-04-25 | `2024-12-03..2024-12-09` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-12-10`. |
+| 2026-04-25 | `2024-12-10..2024-12-16` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-12-17`. |
+| 2026-04-25 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `630`; refreshed on `10,962` rows with dataset signature `e3a8bd503e6a9adeb1c0c21543784cc8562250c396875e7632f1d2ef05672a6a`. |
+| 2026-04-25 | `2024-12-17..2024-12-23` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-12-24`. |
+| 2026-04-25 | `2024-12-24..2024-12-30` | 7-day queue agent | success | 210 | Full `210/210 available`; next older-backfill queue is `2024-12-31`. |
+| 2026-04-25 | `2024-12-31..2025-01-06` | 7-day queue agent | partial | 117 | `117/210` available; `93` retryable_error. Queue stops on the first throttled chunk. |
+| 2026-04-25 | `weather_train pretrain auto-refresh` | gaussian_emos | success | 0 | Triggered at dataset row gap `537`; refreshed on `11,499` rows with dataset signature `8cc575eedb0ce67c35c82a29fbe75f154b43a039e5460dc7693f6dcf28102c45`. |
+| 2026-04-25 | `2024-12-31..2025-01-06` | 7-day queue agent | interrupted | 0 | Run stopped without a clean success classification; inspect stderr progress and request payloads. |
+| 2026-04-25 | `2024-12-31..2025-01-06` | 7-day queue agent | interrupted | 0 | Run stopped without a clean success classification; inspect stderr progress and request payloads. |
+| 2026-04-25 | `2025-01-07..2025-01-13` | 7-day queue agent | retry-only | 0 | All `210/210` requests ended `retryable_error`; queue stops here and should retry later. |
+| 2026-04-25 | `2025-01-14..2025-01-20` | 7-day queue agent | retry-only | 0 | All `210/210` requests ended `retryable_error`; queue stops here and should retry later. |
+| 2026-04-25 | `2025-01-21..2025-01-27` | 7-day queue agent | retry-only | 0 | All `210/210` requests ended `retryable_error`; queue stops here and should retry later. |
+| 2026-04-25 | `429 early-cancel policy` | weather queue/checker rule | recorded | 0 | Future Open-Meteo free-path runs cancel after `2` consecutive `429` responses, record `rate-limit-cancelled`, and retry only after cooldown or an API-key path. |

@@ -41,6 +41,7 @@ Use these unless there is a clear reason to change them:
 --http-retries 1
 --http-retry-wait-min-seconds 1
 --http-retry-wait-max-seconds 8
+--max-consecutive-429 2
 ```
 
 Keep stderr progress on for manual runs. Use `--no-progress` only when a wrapper
@@ -49,8 +50,9 @@ script needs clean stdout JSON.
 ## 2a. Automated Queue Agent
 For repeated older backfill, prefer the queue agent. It reads the checker
 state, advances the next `7`-day chunk, updates `checker/weather_train_status.md`
-and `checker/weather_train_collection_log.md` after every chunk, and stops on
-the first throttled chunk.
+and `checker/weather_train_collection_log.md` after every chunk. If it sees
+two consecutive Open-Meteo `429` responses, it cancels the remaining chunk and
+records the run as `rate-limit-cancelled`.
 
 ```bash
 scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py
@@ -65,7 +67,8 @@ scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_q
   --max-chunks 3 \
   --pretrain-refresh-threshold-rows 500 \
   --http-timeout-seconds 15 \
-  --http-retries 1
+  --http-retries 1 \
+  --max-consecutive-429 2
 ```
 
 Default behavior: when the current `weather_train` gold row count exceeds the
@@ -112,7 +115,11 @@ scripts/pmtmax-workspace weather_train uv run pmtmax collect-weather-training \
 
 Interpretation:
 - any `available > 0`: continue older backfill; this is not a full-day hard stop
-- all `retryable_error`: back off, log it, and try a different day later
+- two consecutive `429`: daily limit is effectively hit; cancel the remaining
+  chunk, log `rate-limit-cancelled`, and retry only after cooldown/reset or an
+  API-key path
+- all `retryable_error` without the early-cancel path: back off, log it, and try
+  a different day later
 
 ## 4. Recent-Date Probe Procedure
 Use this only as a low-frequency probe while free-tier throttling remains active.
@@ -142,7 +149,7 @@ Always record:
 - attempted range
 - chunk style (`single day`, `3-day`, `7-day`)
 - rows added
-- whether the result was `success`, `partial`, `retry-only`, or `interrupted`
+- whether the result was `success`, `partial`, `retry-only`, `rate-limit-cancelled`, or `interrupted`
 - any interpretation about throttling
 
 ## 6. Pretrain Refresh

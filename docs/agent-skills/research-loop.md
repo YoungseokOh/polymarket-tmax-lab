@@ -95,7 +95,7 @@ uv run pmtmax train-advanced --model-name lgbm_emos --variant high_neighbor_oof
 uv run python scripts/quick_eval.py
 ```
 
-`collect-weather-training` now emits station/date progress lines on stderr by default and keeps the final machine-readable JSON on stdout. When Open-Meteo starts throttling, prefer shorter `--http-timeout-seconds` / `--http-retries` values and resumable date chunks over large silent runs.
+`collect-weather-training` now emits station/date progress lines on stderr by default and keeps the final machine-readable JSON on stdout. When Open-Meteo starts throttling, prefer shorter `--http-timeout-seconds` / `--http-retries` values and resumable date chunks over large silent runs. Keep `--max-consecutive-429 2`: two consecutive `429` responses mean the free-path daily limit is effectively hit, so cancel the remaining chunk and record `rate-limit-cancelled` in checker state.
 
 For repeated older-backfill collection, prefer the queue agent:
 
@@ -106,8 +106,8 @@ scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_q
 It reads `checker/weather_train_status.md`, advances the next `7`-day queue,
 updates `checker/weather_train_status.md` / `checker/weather_train_collection_log.md`
 after every chunk, auto-refreshes `gaussian_emos` pretrain when the configured
-row-gap threshold is hit, and stops on the first throttled chunk. Read the
-checker files for the live row count and current next queue.
+row-gap threshold is hit, and defaults to the two-consecutive-`429` cancel rule.
+Read the checker files for the live row count and current next queue.
 
 This weather queue can run in parallel with
 `scripts/pmtmax-workspace historical_real uv run pmtmax backfill-price-history`
@@ -149,9 +149,15 @@ summary path.
 
 `quick_eval.py` sorts by Celsius-normalized CRPS and prints the raw market-unit
 CRPS beside it for audit. Promotion still requires benchmark, paper, or shadow evidence.
-`train-advanced --pretrained-weather-model <path>` records the weather pretrain
-lineage while fitting on `historical_real` Polymarket rows. Public promotion
-still requires a `real_history` recent-core `GO` summary.
+`train-advanced --pretrained-weather-model <path>` injects
+`weather_pretrain_mean`, `weather_pretrain_std`, and
+`weather_pretrain_delta_vs_gfs` into the `historical_real` model frame and wraps
+the saved model so the same augmentation is applied at prediction time. The
+first `high_neighbor_oof` quick eval with active injection worsened `CRPS_C`
+from `0.8004` to `0.8241`, and the `delta_only` follow-up still worsened to
+`0.8111`; treat these as experiments that need a candidate-specific gate before
+any promotion. Public promotion still requires a `real_history` recent-core
+`GO` summary.
 
 ## Dataset Build — SAFETY RULE
 ```bash
@@ -174,6 +180,10 @@ When the warehouse already has most forecast payloads, add `--forecast-missing-o
 to `build-dataset` to avoid refetching existing forecast request keys.
 `bootstrap-lab`에도 같은 shortcut이 있고, `scripts/run_full_historical_batch.sh`의
 forecast 단계는 기본적으로 missing-only top-off를 사용한다.
+For curated multi-source variants, pass repeated `--model` values to
+`build-dataset` or `materialize-training-set`; otherwise a config default can
+silently materialize a GFS-only dataset with the same row count but fewer NWP
+feature columns.
 Canonical `historical_training_set*` / `historical_backtest_panel` outputs are immutable
 unless you pass `--allow-canonical-overwrite`, and the writer now snapshots the existing
 parquet + manifest under `artifacts/recovery/` first.
@@ -198,6 +208,81 @@ scripts/pmtmax-workspace historical_real uv run pmtmax train-advanced --model-na
 uv run python scripts/quick_eval.py
 scripts/pmtmax-workspace historical_real uv run pmtmax benchmark-models --retrain-stride 30
 ```
+
+Non-canonical curated multi-source experiment:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run pmtmax materialize-training-set \
+    --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+    --model ecmwf_ifs025 \
+    --model ecmwf_aifs025_single \
+    --model kma_gdps \
+    --model gfs_seamless \
+    --output-name <variant>
+```
+
+April 25, 2026 check: `historical_training_set_curated_multisource_20260425`
+restored all four NWP source groups and improved canonical baseline holdout
+CRPS_C (`0.8004` -> `0.6749`), but on the curated holdout it worsened CRPS_C
+versus GFS-only (`2.0559` -> `2.8771`) while improving Brier/DirAcc. The
+failure mode was under-dispersed, cold-biased tails, so promotion needs
+variance/tail calibration first.
+
+Tail calibration diagnostic:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_tail_calibration_experiment.py
+```
+
+The April 26, 2026 run wrote
+`artifacts/curated_multisource_tailcal_experiment_20260426.json` and diagnostic
+wrapper models under
+`artifacts/workspaces/historical_real/models/curated_multisource_tailcal_20260426/`.
+The balanced wrapper reduced curated holdout CRPS_C from `2.8771` to `1.7195`
+and kept baseline holdout near canonical baseline (`0.8043`), but the root
+signal was zero-Celsius sentinel NWP daily-max features (`32F` in F markets,
+`0C` in C markets) marked as available. Treat tailcal as diagnostic until that
+feature-validity bug is fixed upstream and re-evaluated without holdout-tuned
+fallback heuristics.
+
+Sentinel-fix follow-up:
+`historical_training_set_curated_multisource_sentinelfix_20260426` removed
+all-source zero-C sentinel rows (`1083 -> 0`) and retrained
+`lgbm_emos/high_neighbor_oof`, but curated holdout CRPS_C remained worse than
+same-holdout GFS-only (`2.7690` vs `2.1103`). Keep this as a diagnostic base,
+not a promotion candidate.
+
+Source-gating follow-up:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_source_gating_experiment.py
+```
+
+`scripts/run_source_gating_experiment.py` trained binary, fallback-regret
+weighted, and absolute-regret weighted gates between the sentinel-fix
+multi-source model and GFS-only. Best curated holdout CRPS_C only moved
+`2.7690 -> 2.7607`, still worse than same-holdout GFS-only `2.1103`, while
+baseline holdout stayed safe/slightly better (`0.4965 -> 0.4932`). The gate
+selected fallback for only about `2%` of curated holdout rows because fit-side
+labels favored multi-source and the holdout failures are city/region distribution
+shift. Keep source-gating artifacts diagnostic; next experiment should target
+source-disagreement/region-driven variance calibration or proper OOF stacking.
+
+Disagreement calibration follow-up:
+
+```bash
+scripts/pmtmax-workspace historical_real uv run python scripts/run_disagreement_calibration_experiment.py
+```
+
+The April 26, 2026 run added `DisagreementCalibratedGaussianModel`. Variance-only
+source-disagreement calibration improved sentinel-fix curated holdout CRPS_C
+`2.7690 -> 2.2342`, but still lost to same-holdout GFS-only `2.1103`. The best
+positive primary-vs-GFS disagreement mean-shrink + variance wrapper improved
+curated holdout CRPS_C to `1.3153`, Brier to `0.0748`, and ECE to `0.0214`,
+but baseline holdout CRPS_C worsened from raw `0.4965` to `0.5627`. Keep these
+wrappers diagnostic only. The next serious candidate should make the
+disagreement rule non-holdout-tuned, either as explicit `lgbm_emos` features or
+as a proper OOF stacker.
 
 ## Autoresearch Loop
 `karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `lgbm_emos`.

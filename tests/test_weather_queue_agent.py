@@ -8,6 +8,8 @@ import pandas as pd
 from pmtmax.weather.queue_agent import (
     CollectionLogEntry,
     append_collection_log_entry,
+    build_collection_note,
+    classify_collection_outcome,
     infer_next_queue_start,
     load_weather_train_snapshot,
     parse_collection_log,
@@ -15,7 +17,11 @@ from pmtmax.weather.queue_agent import (
     render_status_markdown,
     should_refresh_pretrain,
 )
-from pmtmax.weather.training_data import default_weather_training_paths
+from pmtmax.weather.training_data import (
+    WeatherTrainingCollectionResult,
+    WeatherTrainingPaths,
+    default_weather_training_paths,
+)
 
 
 def test_infer_next_queue_start_prefers_status_hint(tmp_path: Path) -> None:
@@ -158,6 +164,33 @@ def test_render_status_markdown_drops_retry_only_dates_that_later_succeeded(tmp_
     )
 
     assert "`2024-06-01`: `0/2 available`" not in markdown
+
+
+def test_rate_limit_cancelled_outcome_is_logged_with_attempted_rows(tmp_path: Path) -> None:
+    result = WeatherTrainingCollectionResult(
+        paths=WeatherTrainingPaths(
+            bronze_path=tmp_path / "bronze.parquet",
+            silver_path=tmp_path / "silver.parquet",
+            gold_path=tmp_path / "gold.parquet",
+        ),
+        requested_rows=210,
+        attempted_rows=2,
+        collected_rows=0,
+        skipped_existing_rows=0,
+        failed_rows=2,
+        status_counts={"retryable_error": 2},
+        failures=[],
+        workers_requested=1,
+        workers_effective=1,
+        early_stop_reason="consecutive_429:2",
+    )
+
+    outcome = classify_collection_outcome(result)
+    note = build_collection_note(result=result, outcome=outcome, next_queue_start=date(2025, 1, 28))
+
+    assert outcome == "rate-limit-cancelled"
+    assert "Cancelled after `2` consecutive `429` responses" in note
+    assert "`2/210` planned requests attempted" in note
 
 
 def test_should_refresh_pretrain_uses_row_gap_threshold(tmp_path: Path) -> None:

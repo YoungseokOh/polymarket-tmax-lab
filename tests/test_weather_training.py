@@ -103,9 +103,42 @@ def test_collect_weather_training_records_429_without_fake_rows(tmp_path: Path) 
     gold = pd.read_parquet(paths.gold_path)
 
     assert result.collected_rows == 0
+    assert result.attempted_rows == 1
     assert result.failed_rows == 1
     assert bronze.loc[0, "status"] == "retryable_error"
     assert gold.empty
+
+
+def test_collect_weather_training_cancels_after_two_consecutive_429s(tmp_path: Path) -> None:
+    events: list[WeatherTrainingProgressEvent] = []
+
+    result = collect_weather_training_data(
+        openmeteo=_RateLimitedOpenMeteo(),  # type: ignore[arg-type]
+        raw_root=tmp_path / "raw",
+        parquet_root=tmp_path / "parquet",
+        station_cities=["Seoul"],
+        date_from=date(2026, 1, 1),
+        date_to=date(2026, 1, 3),
+        model="gfs_seamless",
+        missing_only=True,
+        rate_limit_profile="test",
+        progress_callback=events.append,
+        max_consecutive_429=2,
+    )
+
+    paths = default_weather_training_paths(tmp_path / "parquet")
+    bronze = pd.read_parquet(paths.bronze_path)
+    gold = pd.read_parquet(paths.gold_path)
+
+    assert result.requested_rows == 3
+    assert result.attempted_rows == 2
+    assert result.collected_rows == 0
+    assert result.failed_rows == 2
+    assert result.status_counts == {"retryable_error": 2}
+    assert result.early_stop_reason == "consecutive_429:2"
+    assert bronze["target_date"].tolist() == ["2026-01-01", "2026-01-02"]
+    assert gold.empty
+    assert [event.phase for event in events] == ["start", "retryable_error", "start", "retryable_error"]
 
 
 def test_collect_weather_training_emits_progress_events(tmp_path: Path) -> None:

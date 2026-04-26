@@ -1,6 +1,6 @@
 # Historical Price Status
 
-Updated: 2026-04-24 KST
+Updated: 2026-04-25 KST
 
 ## Current Snapshot
 - workspace: `historical_real`
@@ -9,6 +9,7 @@ Updated: 2026-04-24 KST
 - inventory markets: `1,834`
 - gold panel: `data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet`
 - coverage artifact: `artifacts/workspaces/historical_real/coverage/latest_price_history_coverage.json`
+- related market/truth/forecast checker: `checker/historical_real_status.md`
 - tracked token request rows: `14,674`
 - tracked decision rows: `5,364`
 
@@ -32,13 +33,15 @@ Updated: 2026-04-24 KST
 
 ## Current Judgment
 - Daily price agent runs one shard at a time (`25` markets default) and keeps `backfill-price-history -> materialize-backtest-panel -> summarize-price-history-coverage` serialized.
-- Latest successful shard: `0..24 / 1834`; decision-ready delta `+0`.
+- Latest successful shard: `475..499 / 1834`; decision-ready delta `+0`.
 - Dominant blocker: official `/prices-history` empties still outweigh recovered rows, and many empties show `last_trade_present`, so retention-limited history remains the main constraint.
+- April 25 curated market/truth/forecast collection is now tracked in `checker/historical_real_status.md`: `2,021` curated snapshots are forecast/truth-ready, but all are `gold_missing` for official-price panel purposes.
 
 ## Next Recovery Queue
-1. Continue missing-price recovery from shard `25..49` (`25` markets, dates `2026-01-22..2026-03-19`, cities `Ankara`).
-2. `weather_train` queue can run in parallel in a separate session; do not overlap another mutating `historical_real` job.
-3. Re-run `real_history` evaluation after a meaningful panel-ready gain or after one full shard cycle completes.
+1. If expanding the training inventory, materialize a non-canonical variant from `historical_temperature_snapshots.json` first; do not conflate that with official price-history recovery.
+2. If staying on the current checked-in inventory, continue missing-price recovery from shard `500..524` (`25` markets, dates `2025-12-02..2025-12-31`, cities `London`).
+3. `weather_train` queue can run in parallel in a separate session; do not overlap another mutating `historical_real` job.
+4. Re-run `real_history` evaluation after a meaningful panel-ready gain or after the training inventory is intentionally expanded.
 
 ## Daily Agent Command
 

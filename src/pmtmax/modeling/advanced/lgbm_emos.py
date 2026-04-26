@@ -695,6 +695,33 @@ class LgbmEMOSModel:
             return pd.concat([x, pd.DataFrame(extra, index=x.index)], axis=1)
         return x
 
+    @staticmethod
+    def _feature_names_from_model(model: LGBMRegressor | None) -> list[str]:
+        if model is None:
+            return []
+        names = getattr(model, "feature_name_", None)
+        if names is not None:
+            return [str(name) for name in names]
+        booster = getattr(model, "booster_", None)
+        if booster is not None:
+            try:
+                return [str(name) for name in booster.feature_name()]
+            except Exception:
+                return []
+        return []
+
+    def _align_to_trained_features(self, x: pd.DataFrame) -> pd.DataFrame:
+        """Keep prediction matrices compatible with the fitted LightGBM schema."""
+
+        feature_names = self._feature_names_from_model(self._mean_model)
+        if not feature_names:
+            return x
+        aligned = x.copy()
+        for column in feature_names:
+            if column not in aligned.columns:
+                aligned[column] = 0.0
+        return aligned.loc[:, feature_names].copy()
+
     def predict(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         if self._mean_model is None:
             size = len(frame)
@@ -706,6 +733,7 @@ class LgbmEMOSModel:
         x = pd.concat([x_base, x_extra], axis=1)
         if self._variant_config.use_neighbor_delta:
             x = self._add_neighbor_delta(x, frame_reset)
+        x = self._align_to_trained_features(x)
         mean = np.asarray(self._mean_model.predict(x), dtype=float)
 
         if self._variant_config.use_quantile_loss and self._q10_model is not None and self._q90_model is not None:

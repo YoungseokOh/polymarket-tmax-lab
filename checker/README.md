@@ -20,6 +20,11 @@ without rediscovering the whole context.
   official Polymarket price-history shards and panel-readiness deltas.
 - `historical_price_runbook.md`: step-by-step commands and decision rules for
   continuing daily price-history recovery.
+- `historical_real_status.md`: current authoritative snapshot for curated
+  `historical_real` market/truth/forecast collection, readiness, and next
+  materialization strategy.
+- `historical_real_collection_log.md`: append-only collection history for
+  curated historical market inventories, truth backfills, and forecast top-offs.
 - `model_research_status.md`: current authoritative snapshot for baseline
   training, autoresearch run state, candidate statuses, and publish blockers.
 - `model_research_log.md`: append-only operational log for model-research-agent

@@ -6,6 +6,9 @@ from signal generation and broker behavior.
 
 ## backtest
 - `dataset_builder.py`: builds no-lookahead training rows from market specs, forecast inputs, and official truth
+- `BackfillPipeline.materialize_training_set` owns warehouse-to-gold feature validity. It must not materialize
+  all-zero target-day forecast aggregates as real `0C` / `32F` features; invalid single-run source rows should
+  fall back to valid archived forecast rows or remain unavailable.
 - `rolling_origin.py`: train/test split logic for research evaluation
 - `market_replay.py`: replay helpers for archived market states
 - `metrics.py` and `pnl.py`: forecast skill and realized paper-PnL utilities

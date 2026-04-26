@@ -4,10 +4,12 @@ import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import httpx
 import pandas as pd
 import pytest
 
 from pmtmax.backfill import BackfillPipeline
+from pmtmax.backfill.pipeline import ForecastRateLimitError
 from pmtmax.http import CachedHttpClient
 from pmtmax.markets.repository import bundled_market_snapshots
 from pmtmax.storage.warehouse import DataWarehouse
@@ -32,6 +34,22 @@ class _FailIfForecastFetchedClient:
         raise AssertionError("unexpected single_run call")
 
 
+class _RateLimitedOpenMeteoClient:
+    def _raise_429(self) -> None:
+        request = httpx.Request("GET", "https://historical-forecast-api.open-meteo.com/v1/forecast")
+        response = httpx.Response(429, request=request, json={"reason": "daily API limit exceeded"})
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    def historical_forecast(self, **_: object) -> dict:
+        self._raise_429()
+
+    def forecast(self, **_: object) -> dict:
+        self._raise_429()
+
+    def single_run(self, **_: object) -> dict:
+        self._raise_429()
+
+
 def _load_fixture(city: str) -> dict:
     fixture_name = city.lower().replace(" ", "_") + "_daily.json"
     return json.loads((Path("tests/fixtures/openmeteo") / fixture_name).read_text())
@@ -47,6 +65,13 @@ class _SingleRunOpenMeteoClient:
     def single_run(self, *, latitude: float, longitude: float, model: str, hourly: list[str], run: str, forecast_days: int, timezone: str) -> dict:  # noqa: ARG002
         payload = _load_fixture("Seoul")
         payload["hourly"]["temperature_2m"] = [value + 1.0 for value in payload["hourly"]["temperature_2m"]]
+        return payload
+
+
+class _ZeroSingleRunOpenMeteoClient(_SingleRunOpenMeteoClient):
+    def single_run(self, *, latitude: float, longitude: float, model: str, hourly: list[str], run: str, forecast_days: int, timezone: str) -> dict:  # noqa: ARG002
+        payload = _load_fixture("Seoul")
+        payload["hourly"]["temperature_2m"] = [0.0 for _ in payload["hourly"]["temperature_2m"]]
         return payload
 
 
@@ -278,6 +303,32 @@ def test_backfill_forecasts_parallel_worker_errors_surface(
         pipeline.backfill_forecasts(snapshots, workers=2)
 
 
+def test_backfill_forecasts_cancels_after_two_consecutive_429s(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul", "NYC"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "rate_limit.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_RateLimitedOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pipeline.backfill_forecasts(snapshots, max_consecutive_429=2)
+
+    assert isinstance(exc_info.value.__cause__, ForecastRateLimitError)
+    bronze = warehouse.read_table("bronze_forecast_requests")
+    assert len(bronze.loc[bronze["http_status"] == 429]) == 2
+
+
 def test_backfill_forecasts_missing_only_skips_existing_request_keys(tmp_path: Path) -> None:
     snapshots = bundled_market_snapshots(["Seoul"])
     warehouse = DataWarehouse.from_paths(
@@ -360,6 +411,45 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
     availability = pipeline.summarize_forecast_availability(top_k=2)
     assert not availability["summary"].empty
     assert not availability["recommended"].empty
+
+
+def test_materialize_training_set_ignores_zero_c_sentinel_single_run(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "zero_single_run.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_ZeroSingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets(snapshots, source_name="zero_single_run_test")
+    pipeline.backfill_forecasts(snapshots, strict_archive=True)
+    pipeline.backfill_forecasts(
+        snapshots,
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+    )
+    pipeline.backfill_truth(snapshots)
+    gold = pipeline.materialize_training_set(
+        snapshots,
+        output_name="zero_single_run_training_set",
+        decision_horizons=["morning_of"],
+    )
+
+    row = gold.iloc[0]
+    assert row["forecast_source_kind"] == "historical_forecast"
+    assert json.loads(str(row["selected_models_json"])) == ["ecmwf_ifs025"]
+    assert json.loads(str(row["feature_availability_json"])) == {"ecmwf_ifs025": True}
+    assert row["ecmwf_ifs025_model_daily_max"] != 0.0
 
 
 def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: Path) -> None:

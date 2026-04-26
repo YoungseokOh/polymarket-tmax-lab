@@ -12,6 +12,11 @@ daily-max forecasts, calibrates them, and maps them onto Polymarket outcomes.
 - `design_matrix.py`: shared contextual featurization for availability, missingness, city, horizon, and seasonality
 - `daily_max.py`: hourly-to-daily-max transforms
 - `bin_mapper.py`: exact Polymarket outcome mapping for parametric or sample forecasts
+- `tail_calibration.py`: post-hoc Gaussian mean/std wrappers for diagnostic tail fallback experiments
+- `source_gating.py`: post-hoc train-side Gaussian source blend wrappers for diagnostic
+  multi-source vs GFS-only gate experiments
+- `disagreement_calibration.py`: post-hoc Gaussian wrappers for diagnostic
+  source-disagreement mean/variance calibration experiments
 - `calibration.py`, `evaluation.py`, `sampling.py`, `champion.py`: supporting evaluation and selection utilities
 
 ## Data Contract

@@ -65,6 +65,10 @@ class ForecastBackfillResult(TypedDict):
     silver_forecast_runs_hourly: pd.DataFrame | None
 
 
+class ForecastRateLimitError(RuntimeError):
+    """Raised when forecast collection hits the configured 429 stop guard."""
+
+
 ForecastRequestKey = tuple[str, str, str, str, str | None, str]
 
 
@@ -114,6 +118,68 @@ def _coerce_optional_float(value: object) -> float | None:
     if pd.isna(numeric):
         return None
     return float(numeric)
+
+
+def _finite_feature_value(value: object) -> float | None:
+    """Return a finite feature value or None when the aggregate is unusable."""
+
+    numeric = _coerce_optional_float(value)
+    if numeric is None or not pd.notna(numeric):
+        return None
+    return float(numeric)
+
+
+def _raw_forecast_feature_map(feat: dict[str, object]) -> dict[str, float | None]:
+    """Normalize one precomputed forecast aggregate row without inventing zero values."""
+
+    mean_value = _finite_feature_value(feat.get("model_daily_mean"))
+    midday_value = _finite_feature_value(feat.get("midday_temp"))
+    return {
+        "model_daily_max": _finite_feature_value(feat.get("model_daily_max")),
+        "model_daily_mean": mean_value,
+        "model_daily_min": _finite_feature_value(feat.get("model_daily_min")),
+        "diurnal_amplitude": _finite_feature_value(feat.get("diurnal_amplitude")),
+        "midday_temp": midday_value if midday_value is not None else mean_value,
+        "cloud_cover_mean": _finite_feature_value(feat.get("cloud_cover_mean")),
+        "wind_speed_mean": _finite_feature_value(feat.get("wind_speed_mean")),
+        "humidity_mean": _finite_feature_value(feat.get("humidity_mean")),
+        "dew_point_mean": _finite_feature_value(feat.get("dew_point_mean")),
+        "num_hours": _finite_feature_value(feat.get("num_hours")),
+    }
+
+
+def _forecast_features_are_valid(features: dict[str, float | None]) -> bool:
+    """Return whether a forecast aggregate is usable for model features."""
+
+    num_hours = features.get("num_hours")
+    if num_hours is None or num_hours <= 0:
+        return False
+    required = (
+        features.get("model_daily_max"),
+        features.get("model_daily_mean"),
+        features.get("model_daily_min"),
+    )
+    if any(value is None for value in required):
+        return False
+    daily_max = float(cast(float, features["model_daily_max"]))
+    daily_mean = float(cast(float, features["model_daily_mean"]))
+    daily_min = float(cast(float, features["model_daily_min"]))
+    diurnal = float(features.get("diurnal_amplitude") or 0.0)
+    # Open-Meteo occasionally returns a full target-day vector of zero Celsius
+    # for an otherwise available request. Treat that as missing so it does not
+    # become 32F in Fahrenheit markets or a false 0C forecast in Celsius markets.
+    return not (
+        abs(daily_max) <= 1e-9
+        and abs(daily_mean) <= 1e-9
+        and abs(daily_min) <= 1e-9
+        and abs(diurnal) <= 1e-9
+    )
+
+
+def _materializable_features(features: dict[str, float | None]) -> dict[str, float]:
+    """Drop None values after validity checks so missing columns stay NaN."""
+
+    return {key: float(value) for key, value in features.items() if value is not None}
 
 
 def _rows_for_market(frame: pd.DataFrame, market_id: str) -> pd.DataFrame:
@@ -453,6 +519,7 @@ class BackfillPipeline:
         missing_only: bool = False,
         return_tables: bool = False,
         workers: int = 1,
+        max_consecutive_429: int | None = 2,
     ) -> ForecastBackfillResult:
         """Persist raw forecast payloads and normalize hourly forecast rows."""
 
@@ -511,6 +578,7 @@ class BackfillPipeline:
             src_rows: list[dict[str, object]] = []
             sr_ok = 0
             sr_err = 0
+            consecutive_429 = 0
             since_chk = 0
             since_parquet = 0
             shard_processed = 0
@@ -523,6 +591,24 @@ class BackfillPipeline:
                 s_rows.clear()
                 m_rows.clear()
                 src_rows.clear()
+
+            def record_request_outcomes(rows: list[dict[str, object]]) -> None:
+                nonlocal consecutive_429
+                for row in rows:
+                    http_status = row.get("http_status")
+                    status = str(row.get("status", ""))
+                    if http_status == 429:
+                        consecutive_429 += 1
+                    elif http_status is not None or status in {"ok", "fixture", "error"}:
+                        consecutive_429 = 0
+                    if (
+                        max_consecutive_429 is not None
+                        and max_consecutive_429 > 0
+                        and consecutive_429 >= max_consecutive_429
+                    ):
+                        flush_local(force=True)
+                        msg = f"forecast collection cancelled after {consecutive_429} consecutive 429 responses"
+                        raise ForecastRateLimitError(msg)
 
             for snapshot in shard_snapshots:
                 spec = snapshot.spec
@@ -575,6 +661,7 @@ class BackfillPipeline:
                                 timezone=timezone, endpoint_kind=endpoint_kind, fetched_at=fetched_at,
                             )
                             b_rows.append(probe_row)
+                            record_request_outcomes([probe_row])
                             if missing_only:
                                 local_existing[probe_key] = {
                                     "status": str(probe_row.get("status", "")),
@@ -633,6 +720,7 @@ class BackfillPipeline:
                                 })
                             b_rows.extend(single_run_bronze)
                             s_rows.extend(single_run_silver)
+                            record_request_outcomes(single_run_bronze)
                         continue
 
                     try:
@@ -681,6 +769,7 @@ class BackfillPipeline:
                                 variables=variables, error_message=error_message,
                                 http_status=http_status, reason=reason, query_signature=query_signature,
                             ))
+                            record_request_outcomes([b_rows[-1]])
                             continue
 
                     relative_path = (
@@ -697,6 +786,7 @@ class BackfillPipeline:
                         raw_path=artifact.relative_path, raw_hash=artifact.content_hash,
                         http_status=http_status, reason=reason, query_signature=query_signature,
                     ))
+                    record_request_outcomes([b_rows[-1]])
                     s_rows.extend(self._normalize_forecast_rows(
                         spec=spec, model_name=model, endpoint_kind=endpoint_kind,
                         payload=cast(dict[str, Any], payload),
@@ -726,6 +816,7 @@ class BackfillPipeline:
                             })
                         b_rows.extend(single_run_bronze)
                         s_rows.extend(single_run_silver)
+                        record_request_outcomes(single_run_bronze)
                     src_rows.append({
                         "source_key": stable_hash(f"open-meteo|{endpoint_kind}|{model}")[:16],
                         "source_name": "open-meteo",
@@ -1627,6 +1718,25 @@ class BackfillPipeline:
                 feature_lookup[key] = {col: getattr(frow, col) for col in _feat_cols}
             del features_df
 
+            def _select_feature_record(
+                market_id: str,
+                model: str,
+                horizon: str,
+                lookup: dict[tuple[str, str, str, str], dict[str, object]],
+            ) -> tuple[dict[str, object], str] | None:
+                candidates = (
+                    ("single_run", horizon),
+                    ("historical_forecast", "__historical__"),
+                    ("fixture", "__historical__"),
+                )
+                for endpoint_kind, dh_key in candidates:
+                    feat = lookup.get((market_id, model, endpoint_kind, dh_key))
+                    if not feat:
+                        continue
+                    if _forecast_features_are_valid(_raw_forecast_feature_map(feat)):
+                        return feat, endpoint_kind
+                return None
+
             truth_by_market: dict[str, pd.Series] = {}
             if not truth_df.empty and "market_id" in truth_df.columns:
                 for mid, grp in truth_df.groupby("market_id", sort=False):
@@ -1682,10 +1792,16 @@ class BackfillPipeline:
                     decision_point = self._decision_point(spec, horizon)
                     # Resolve available models for this horizon using the feature lookup.
                     selected_models: list[str] = []
+                    selected_features: dict[str, dict[str, object]] = {}
+                    selected_sources: dict[str, str] = {}
                     for model in (self.models or []):
                         # Prefer single_run for this horizon, fall back to historical_forecast/fixture.
-                        if (mid, model, "single_run", horizon) in feature_lookup or (mid, model, "historical_forecast", "__historical__") in feature_lookup or (mid, model, "fixture", "__historical__") in feature_lookup:
+                        selected = _select_feature_record(mid, model, horizon, feature_lookup)
+                        if selected is not None:
+                            feat, endpoint_kind = selected
                             selected_models.append(model)
+                            selected_features[model] = feat
+                            selected_sources[model] = endpoint_kind
 
                     if not selected_models:
                         LOGGER.warning(
@@ -1696,9 +1812,7 @@ class BackfillPipeline:
 
                     # Determine issue_time from the latest precomputed timestamp.
                     issue_time_candidates = [
-                        feature_lookup.get((mid, m, "single_run", horizon), {}).get("latest_issue_time_utc")
-                        or feature_lookup.get((mid, m, "historical_forecast", "__historical__"), {}).get("latest_issue_time_utc")
-                        or feature_lookup.get((mid, m, "fixture", "__historical__"), {}).get("latest_issue_time_utc")
+                        selected_features[m].get("latest_issue_time_utc")
                         for m in selected_models
                     ]
                     issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
@@ -1709,7 +1823,7 @@ class BackfillPipeline:
 
                     # Determine forecast source kind.
                     source_kind = (
-                        "single_run" if any((mid, m, "single_run", horizon) in feature_lookup for m in selected_models)
+                        "single_run" if any(selected_sources[m] == "single_run" for m in selected_models)
                         else "historical_forecast"
                     )
 
@@ -1736,24 +1850,10 @@ class BackfillPipeline:
 
                     # Populate model features from the precomputed lookup.
                     for model in self.models or []:
-                        feat = (
-                            feature_lookup.get((mid, model, "single_run", horizon))
-                            or feature_lookup.get((mid, model, "historical_forecast", "__historical__"))
-                            or feature_lookup.get((mid, model, "fixture", "__historical__"))
-                            or {}
-                        )
-                        raw_features = {
-                            "model_daily_max": float(feat.get("model_daily_max") or 0.0),
-                            "model_daily_mean": float(feat.get("model_daily_mean") or 0.0),
-                            "model_daily_min": float(feat.get("model_daily_min") or 0.0),
-                            "diurnal_amplitude": float(feat.get("diurnal_amplitude") or 0.0),
-                            "midday_temp": float(feat.get("midday_temp") or feat.get("model_daily_mean") or 0.0),
-                            "cloud_cover_mean": float(feat.get("cloud_cover_mean") or 0.0),
-                            "wind_speed_mean": float(feat.get("wind_speed_mean") or 0.0),
-                            "humidity_mean": float(feat.get("humidity_mean") or 0.0),
-                            "dew_point_mean": float(feat.get("dew_point_mean") or 0.0),
-                            "num_hours": float(feat.get("num_hours") or 0.0),
-                        }
+                        feat = selected_features.get(model)
+                        if not feat:
+                            continue
+                        raw_features = _materializable_features(_raw_forecast_feature_map(feat))
                         features = _convert_celsius_features(raw_features, spec.unit)
                         for key, value in features.items():
                             row[f"{model}_{key}"] = value
@@ -1777,7 +1877,11 @@ class BackfillPipeline:
 
                     if contract in {"sequence", "both"}:
                         market_forecasts = forecast_by_market.get(mid, pd.DataFrame())
-                        selected_forecasts = self._select_forecasts_for_horizon(market_forecasts, horizon)
+                        selected_forecasts = self._filter_forecasts_for_selected_sources(
+                            market_forecasts,
+                            selected_sources=selected_sources,
+                            horizon=horizon,
+                        )
                         sequence_rows.extend(
                             self._build_sequence_rows(
                                 selected_forecasts=selected_forecasts,
@@ -1807,8 +1911,6 @@ class BackfillPipeline:
         del chunk_frames
         gc.collect()
 
-        numeric_columns = frame.select_dtypes(include=["number"]).columns
-        frame.loc[:, numeric_columns] = frame.loc[:, numeric_columns].fillna(0.0)
         if contract in {"tabular", "both"}:
             self.warehouse.write_gold_table(
                 "gold_training_examples_tabular",
@@ -1915,7 +2017,7 @@ class BackfillPipeline:
         timezone: str,
     ) -> dict[str, float]:
         if frame.empty:
-            return self._empty_feature_map()
+            return {}
         local_time = pd.to_datetime(frame["forecast_time_local"], utc=True).dt.tz_convert(timezone)
         payload_frame = pd.DataFrame(
             {
@@ -1929,7 +2031,7 @@ class BackfillPipeline:
         )
         package = build_hourly_feature_frame({"hourly": payload_frame.to_dict(orient="list")})
         features = target_day_features(package, target_date)
-        return features or self._empty_feature_map()
+        return _materializable_features(features) if _forecast_features_are_valid(features) else {}
 
     def _build_sequence_rows(
         self,
@@ -2008,6 +2110,31 @@ class BackfillPipeline:
             return historical
         generic = market_forecasts.loc[market_forecasts["decision_horizon"].isna()].copy()
         return generic if not generic.empty else market_forecasts
+
+    @staticmethod
+    def _filter_forecasts_for_selected_sources(
+        market_forecasts: pd.DataFrame,
+        *,
+        selected_sources: dict[str, str],
+        horizon: str,
+    ) -> pd.DataFrame:
+        if market_forecasts.empty or not selected_sources:
+            return pd.DataFrame()
+        parts: list[pd.DataFrame] = []
+        for model_name, endpoint_kind in selected_sources.items():
+            subset = market_forecasts.loc[
+                (market_forecasts["model_name"].astype(str) == model_name)
+                & (market_forecasts["endpoint_kind"].astype(str) == endpoint_kind)
+            ].copy()
+            if endpoint_kind == "single_run" and "decision_horizon" in subset.columns:
+                subset = subset.loc[subset["decision_horizon"].astype(str) == horizon].copy()
+            elif "decision_horizon" in subset.columns:
+                subset = subset.loc[subset["decision_horizon"].isna()].copy()
+            if not subset.empty:
+                parts.append(subset)
+        if not parts:
+            return pd.DataFrame()
+        return pd.concat(parts, ignore_index=True)
 
     @staticmethod
     def _materialized_issue_time(selected_forecasts: pd.DataFrame, fallback_issue_time: object) -> pd.Timestamp:

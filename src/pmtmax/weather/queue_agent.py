@@ -213,13 +213,17 @@ def infer_next_queue_start(
     return current
 
 
-def classify_collection_outcome(result: WeatherTrainingCollectionResult) -> Literal["success", "partial", "retry-only", "interrupted"]:
+def classify_collection_outcome(
+    result: WeatherTrainingCollectionResult,
+) -> Literal["success", "partial", "retry-only", "rate-limit-cancelled", "interrupted"]:
     retryable = int(result.status_counts.get("retryable_error", 0) or 0)
+    if result.early_stop_reason is not None:
+        return "rate-limit-cancelled"
     if result.failed_rows == 0:
         return "success"
     if result.collected_rows > 0:
         return "partial"
-    if retryable == result.requested_rows:
+    if result.attempted_rows > 0 and retryable == result.attempted_rows:
         return "retry-only"
     return "interrupted"
 
@@ -246,6 +250,12 @@ def build_collection_note(
         return (
             f"All `{result.requested_rows}/{result.requested_rows}` requests ended `retryable_error`; "
             f"queue stops here and should retry later."
+        )
+    if outcome == "rate-limit-cancelled":
+        return (
+            f"Cancelled after `{retryable}` consecutive `429` responses "
+            f"(`{result.attempted_rows}/{result.requested_rows}` planned requests attempted); "
+            "treat as Open-Meteo daily-limit and retry only after cooldown or an API-key path."
         )
     return "Run stopped without a clean success classification; inspect stderr progress and request payloads."
 
@@ -314,7 +324,7 @@ def refresh_weather_pretrain(
 def extract_retry_only_dates(entries: list[CollectionLogEntry]) -> list[date]:
     dates: list[date] = []
     for entry in entries:
-        if entry.outcome != "retry-only":
+        if entry.outcome not in {"retry-only", "rate-limit-cancelled"}:
             continue
         dates.extend(parse_dates_from_range_text(entry.range_text))
     return dates
@@ -357,7 +367,7 @@ def render_status_markdown(
         ]
     )
     latest_success = _latest_collection_entry(entries, outcomes={"success"})
-    latest_throttle = _latest_collection_entry(entries, outcomes={"partial", "retry-only", "interrupted"})
+    latest_throttle = _latest_collection_entry(entries, outcomes={"partial", "retry-only", "rate-limit-cancelled", "interrupted"})
 
     pretrain_path = str(pretrain_metadata.get("path", "artifacts/workspaces/weather_train/models/v2/gaussian_emos.pkl"))
     metadata_path = "artifacts/workspaces/weather_train/models/v2/gaussian_emos.json"
@@ -403,16 +413,16 @@ def render_status_markdown(
     if retry_only_ranges:
         for start_date, end_date in retry_only_ranges:
             lines.append(
-                f"- `{format_date_range(start_date, end_date)}`: `0/{full_count} available`, "
-                f"`{full_count}/{full_count} retryable_error` every day"
+                f"- `{format_date_range(start_date, end_date)}`: `0/{full_count} available` on recorded probes; "
+                "`retryable_error` / free-path daily-limit"
             )
     else:
         lines.append("- none recorded")
 
     lines.extend(["", "## Current Judgment"])
     lines.append(
-        f"- Queue agent advances older gap-fill in `{chunk_days}`-day chunks and stops on the first "
-        "`retryable_error` / `429` chunk."
+        f"- Queue agent advances older gap-fill in `{chunk_days}`-day chunks; `2` consecutive Open-Meteo "
+        "`429` responses are treated as a daily-limit hit and cancel the remaining chunk."
     )
     if latest_success is not None:
         lines.append(
@@ -438,7 +448,7 @@ def render_status_markdown(
             f"- pretrain trained at:\n  `{trained_at}`",
             "",
             "## Next Collection Queue",
-            f"1. Continue older gap-fill from `{next_queue_start.isoformat()}` forward with `{chunk_days}`-day chunks while the free path remains open.",
+            f"1. Continue older gap-fill from `{next_queue_start.isoformat()}` forward with `{chunk_days}`-day chunks only after the free path cooldown/reset.",
             "2. Keep isolated retry-only gaps as separate probes; do not block the forward older-backfill queue on them.",
             "3. Retry `2026-01-22..2026-01-28` only as low-frequency probes or after moving to a paid/API-key path.",
             "",
@@ -487,6 +497,7 @@ def run_weather_train_queue_agent(
     http_retry_wait_min_seconds: float,
     http_retry_wait_max_seconds: float,
     progress: bool,
+    max_consecutive_429: int,
     pretrain_refresh_threshold_rows: int,
     pretrain_model_name: str,
     pretrain_variant: str | None,
@@ -557,6 +568,7 @@ def run_weather_train_queue_agent(
                 workers=workers,
                 rate_limit_profile=rate_limit_profile,
                 progress_callback=_render_weather_training_progress if progress else None,
+                max_consecutive_429=max_consecutive_429,
             )
             after = load_weather_train_snapshot(paths.gold_path)
             rows_added = max(after.total_rows - before.total_rows, 0)
@@ -564,7 +576,7 @@ def run_weather_train_queue_agent(
             chunks_attempted += 1
             outcome = classify_collection_outcome(result)
             last_outcome = outcome
-            next_queue_start = end_date + timedelta(days=1) if outcome == "success" else start_date
+            next_queue_start = end_date + timedelta(days=1) if outcome in {"success", "rate-limit-cancelled"} else start_date
             append_collection_log_entry(
                 collection_log_path,
                 CollectionLogEntry(
@@ -648,9 +660,11 @@ def run_weather_train_queue_agent(
                         "outcome": outcome,
                         "rows_added": rows_added,
                         "requested_rows": result.requested_rows,
+                        "attempted_rows": result.attempted_rows,
                         "collected_rows": result.collected_rows,
                         "failed_rows": result.failed_rows,
                         "status_counts": result.status_counts,
+                        "early_stop_reason": result.early_stop_reason,
                         "next_queue_start": next_queue_start.isoformat(),
                         "dataset_rows": after.total_rows,
                     },

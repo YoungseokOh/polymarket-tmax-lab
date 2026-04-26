@@ -5,3 +5,22 @@ Append-only operational log for `historical_real` official price-history recover
 | Run Date | Shard | Mode | Outcome | Markets | Ready Delta | Notes |
 | --- | --- | --- | --- | ---: | ---: | --- |
 | 2026-04-24 | `0..24 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=179`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `25..49`. |
+| 2026-04-25 | `25..49 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=91`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `50..74`. |
+| 2026-04-25 | `50..74 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=91`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `75..99`. |
+| 2026-04-25 | `75..99 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=189`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `100..124`. |
+| 2026-04-25 | `100..124 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=164`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `125..149`. |
+| 2026-04-25 | `125..149 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=147`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `150..174`. |
+| 2026-04-25 | `150..174 / 1834` | daily price recovery agent | success | 25 | +0 | No missing token requests in shard; token `ok` delta `+0`, decision-ready delta `+0`; next shard `175..199`. |
+| 2026-04-25 | `175..199 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=175`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `200..224`. |
+| 2026-04-25 | `200..224 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=170`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `225..249`. |
+| 2026-04-25 | `225..249 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=175`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `250..274`. |
+| 2026-04-25 | `250..274 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=70`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `275..299`. |
+| 2026-04-25 | `275..299 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=96`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `300..324`. |
+| 2026-04-25 | `300..324 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=161`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `325..349`. |
+| 2026-04-25 | `325..349 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=7`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `350..374`. |
+| 2026-04-25 | `350..374 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=140`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `375..399`. |
+| 2026-04-25 | `375..399 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=179`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `400..424`. |
+| 2026-04-25 | `400..424 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=168`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `425..449`. |
+| 2026-04-25 | `425..449 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=98`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `450..474`. |
+| 2026-04-25 | `450..474 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=84`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `475..499`. |
+| 2026-04-25 | `475..499 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=175`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `500..524`. |

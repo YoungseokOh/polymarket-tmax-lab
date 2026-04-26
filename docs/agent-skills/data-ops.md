@@ -61,7 +61,7 @@ scripts/pmtmax-workspace historical_real uv run pmtmax collection-preflight --ma
 scripts/pmtmax-workspace historical_real uv run pmtmax trust-check --markets-path configs/market_inventory/historical_temperature_snapshots.json
 scripts/pmtmax-workspace historical_real uv run pmtmax init-warehouse
 scripts/pmtmax-workspace historical_real uv run pmtmax backfill-markets --markets-path configs/market_inventory/historical_temperature_snapshots.json
-scripts/pmtmax-workspace historical_real uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of
+scripts/pmtmax-workspace historical_real uv run pmtmax backfill-forecasts --markets-path configs/market_inventory/historical_temperature_snapshots.json --model ecmwf_ifs025 --strict-archive --missing-only --single-run-horizon market_open --single-run-horizon previous_evening --single-run-horizon morning_of --max-consecutive-429 2
 scripts/pmtmax-workspace historical_real uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json --truth-no-cache
 scripts/pmtmax-workspace historical_real uv run pmtmax summarize-truth-coverage
 scripts/pmtmax-workspace historical_real uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
@@ -76,6 +76,13 @@ scripts/pmtmax-workspace historical_real uv run pmtmax compact-warehouse
 기존 canonical warehouse를 이어서 채우는 incremental run이면
 `backfill-forecasts`에 `--missing-only`를 추가해서
 `bronze_forecast_requests`에 없는 key만 수집할 수 있다.
+historical forecast backfill도 `--max-consecutive-429 2`를 유지한다. 두 번
+연속 `429`가 나오면 이미 적재한 행을 flush한 뒤 취소하고 checker에
+`rate-limit-cancelled`로 기록한다.
+multi-source variant를 만들 때는 `backfill-forecasts`, `build-dataset`,
+`materialize-training-set`에 `--model`을 반복해서 명시한다. base config가
+`gfs_seamless`만 가리키면 row count는 같아도 feature schema가 GFS-only로
+축소될 수 있다.
 `scripts/run_full_historical_batch.sh`는 이 동작을 기본 forecast backfill로 사용한다.
 `bootstrap-lab`도 `--forecast-missing-only`로 같은 top-off semantics를 쓸 수 있다.
 
@@ -96,7 +103,7 @@ inventory라서 자동으로 sync되지 않는다. training inventory를 갱신�
 - `historical_training_set.parquet` materializes model rows from that inventory
   and supported decision horizons. The latest trusted build had 5,478 training rows.
 - `historical_temperature_snapshots.json` is the curated collection backlog, not
-  the automatically-used training set. Its latest audit count was 1,826 snapshots.
+  the automatically-used training set. Its latest audit count was 2,021 snapshots.
 - More real data can be collected. The hard rule is that new markets must be
   closed, parseable, truth-ready, forecast-backed, and intentionally curated
   before replacing the checked-in training inventory.
@@ -108,12 +115,16 @@ inventory라서 자동으로 sync되지 않는다. training inventory를 갱신�
   profile unless an API-key/paid profile is intentionally added. The collector
   prints station/date progress to stderr by default; keep shorter
   `--http-timeout-seconds` / `--http-retries` settings when monitoring long
-  free-tier runs.
+  free-tier runs. Keep `--max-consecutive-429 2`: two consecutive Open-Meteo
+  `429` responses are treated as a free-path daily-limit hit, not a signal to
+  keep burning requests.
 - For repeated older-gap backfill, prefer
   `scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py`.
   It reads the checker state, advances the next `7`-day queue, updates both
   checker markdown files after every chunk, auto-refreshes weather pretrain
-  when the row-gap threshold is hit, and stops on the first throttled chunk.
+  when the row-gap threshold is hit, and cancels the remaining chunk after two
+  consecutive `429` responses. Record that as `rate-limit-cancelled` and retry
+  only after cooldown/reset or an API-key path.
 - For daily official price-history recovery, prefer
   `scripts/pmtmax-workspace historical_real uv run python scripts/run_historical_price_recovery_agent.py`.
   It reads `checker/historical_price_status.md`, advances the next missing-price
@@ -133,6 +144,11 @@ inventory라서 자동으로 sync되지 않는다. training inventory를 갱신�
   `checker/weather_train_status.md`; do not duplicate row counts in this doc.
 - Old official CLOB `/prices-history` gaps may be retention-limited. Preserve
   `empty` / `missing` coverage explicitly instead of filling with synthetic prices.
+- Forecast materialization must preserve feature validity. All-zero target-day
+  temperature aggregates from Open-Meteo are treated as invalid source features,
+  not real `0C` / `32F` forecasts. Re-materialize a non-canonical variant after
+  changing this logic and compare source availability plus sentinel counts before
+  retraining.
 - To improve `priced_decision_rows`, use this order inside `historical_real`:
   `summarize-price-history-coverage` -> `backfill-price-history --only-missing --price-no-cache` ->
   `materialize-backtest-panel`. Keep those three steps serialized even if

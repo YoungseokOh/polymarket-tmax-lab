@@ -91,6 +91,7 @@ class WeatherTrainingPaths:
 class WeatherTrainingCollectionResult:
     paths: WeatherTrainingPaths
     requested_rows: int
+    attempted_rows: int
     collected_rows: int
     skipped_existing_rows: int
     failed_rows: int
@@ -98,6 +99,7 @@ class WeatherTrainingCollectionResult:
     failures: list[dict[str, str]]
     workers_requested: int
     workers_effective: int
+    early_stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,6 +297,7 @@ def collect_weather_training_data(
     workers: int = 1,
     rate_limit_profile: str = "free",
     progress_callback: Callable[[WeatherTrainingProgressEvent], None] | None = None,
+    max_consecutive_429: int | None = 2,
 ) -> WeatherTrainingCollectionResult:
     """Collect weather-only rows without Polymarket market ids or prices."""
 
@@ -312,6 +315,9 @@ def collect_weather_training_data(
     failures: list[dict[str, str]] = []
     skipped = 0
     item_index = 0
+    consecutive_429 = 0
+    early_stop_reason: str | None = None
+    stop_collection = False
 
     for station in stations:
         for target_date in dates:
@@ -460,6 +466,7 @@ def collect_weather_training_data(
                         "observation_raw_hash": observation_hash,
                     }
                 )
+                consecutive_429 = 0
                 if progress_callback is not None:
                     progress_callback(
                         WeatherTrainingProgressEvent(
@@ -478,6 +485,7 @@ def collect_weather_training_data(
             except Exception as exc:  # noqa: BLE001
                 status_code = _status_code_from_exception(exc)
                 status = "retryable_error" if status_code == 429 else "error"
+                consecutive_429 = consecutive_429 + 1 if status_code == 429 else 0
                 error = str(exc)
                 failures.append(
                     {
@@ -520,8 +528,15 @@ def collect_weather_training_data(
                             message=error,
                         )
                     )
+                if max_consecutive_429 is not None and max_consecutive_429 > 0 and consecutive_429 >= max_consecutive_429:
+                    early_stop_reason = f"consecutive_429:{consecutive_429}"
+                    stop_collection = True
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
+            if stop_collection:
+                break
+        if stop_collection:
+            break
 
     _merge_and_write(
         paths.bronze_path,
@@ -549,6 +564,7 @@ def collect_weather_training_data(
     return WeatherTrainingCollectionResult(
         paths=paths,
         requested_rows=len(stations) * len(dates),
+        attempted_rows=len(bronze_rows),
         collected_rows=len(gold_rows),
         skipped_existing_rows=skipped,
         failed_rows=len(failures),
@@ -556,4 +572,5 @@ def collect_weather_training_data(
         failures=failures,
         workers_requested=workers,
         workers_effective=workers_effective,
+        early_stop_reason=early_stop_reason,
     )

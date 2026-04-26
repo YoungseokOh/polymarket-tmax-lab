@@ -66,16 +66,18 @@ scripts/pmtmax-workspace weather_train uv run pmtmax collect-weather-training \
   --model gfs_seamless \
   --http-timeout-seconds 15 \
   --http-retries 1 \
+  --max-consecutive-429 2 \
   --missing-only
 scripts/pmtmax-workspace weather_train uv run pmtmax train-weather-pretrain --model-name gaussian_emos
 ```
 
-`collect-weather-training` prints one station/date progress line to stderr by default so long Open-Meteo runs can be monitored without breaking the final JSON on stdout. Use `--no-progress` only when you need a quiet stderr stream for wrapper scripts.
+`collect-weather-training` prints one station/date progress line to stderr by default so long Open-Meteo runs can be monitored without breaking the final JSON on stdout. Use `--no-progress` only when you need a quiet stderr stream for wrapper scripts. The default `--max-consecutive-429 2` treats two consecutive Open-Meteo `429` responses as a free-path daily-limit hit and cancels the remaining batch.
 
 For repeated older-gap backfill, use the queue agent instead of manually
 advancing the next week yourself. It reads `checker/weather_train_status.md`,
 runs the next `7`-day chunk, appends the collection log, refreshes the status
-board, and stops on the first throttled chunk:
+board, and records `rate-limit-cancelled` when the two-consecutive-`429` rule
+fires:
 
 ```bash
 scripts/pmtmax-workspace weather_train uv run python scripts/run_weather_train_queue_agent.py
@@ -86,12 +88,13 @@ artifact automatically whenever the current `weather_train` gold row count is
 at least `500` rows ahead of the latest pretrain metadata. Override with
 `--pretrain-refresh-threshold-rows`.
 
-Current observed `weather_train` state on April 24, 2026:
+Current observed `weather_train` state on April 25, 2026:
 - see `checker/weather_train_status.md` for the current row count, coverage
   ranges, and next queue start
-- `2026-01-22..2026-01-28` still remains the recent retry-only free-path probe
-- older backfill should continue through the queue agent until the first
-  throttled chunk appears
+- `2025-01-07..2025-01-27` and `2026-01-22..2026-01-28` are retry-only/free-path
+  daily-limit ranges
+- older backfill should continue through the queue agent only after cooldown or
+  an API-key path when consecutive `429` appears
 
 4. Build the Polymarket real-only research dataset:
 
@@ -112,6 +115,13 @@ scripts/pmtmax-workspace historical_real uv run pmtmax materialize-backtest-pane
 ```bash
 scripts/pmtmax-workspace historical_real uv run pmtmax train-baseline --model-name gaussian_emos
 ```
+
+For `lgbm_emos`, `--pretrained-weather-model` injects `weather_pretrain_*`
+prediction features into the market model and stores a wrapped model that
+applies the same augmentation at prediction time. Treat this as an experiment:
+the first `high_neighbor_oof` quick eval with active injection worsened
+`CRPS_C` from `0.8004` to `0.8241`; the `delta_only` follow-up still worsened
+to `0.8111`, so promotion still needs a candidate-specific gate.
 
 6. Run a research backtest:
 
@@ -495,16 +505,22 @@ scripts/pmtmax-workspace historical_real uv run pmtmax init-warehouse
 scripts/pmtmax-workspace historical_real uv run pmtmax backfill-markets --markets-path configs/market_inventory/historical_temperature_snapshots.json
 scripts/pmtmax-workspace historical_real uv run pmtmax backfill-forecasts \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --model ecmwf_ifs025 \
   --strict-archive \
   --missing-only \
   --single-run-horizon market_open \
   --single-run-horizon previous_evening \
-  --single-run-horizon morning_of
+  --single-run-horizon morning_of \
+  --max-consecutive-429 2
 scripts/pmtmax-workspace historical_real uv run pmtmax backfill-truth --markets-path configs/market_inventory/historical_temperature_snapshots.json --truth-no-cache
 scripts/pmtmax-workspace historical_real uv run pmtmax summarize-truth-coverage
 scripts/pmtmax-workspace historical_real uv run pmtmax summarize-dataset-readiness --markets-path configs/market_inventory/historical_temperature_snapshots.json
 scripts/pmtmax-workspace historical_real uv run pmtmax materialize-training-set \
   --markets-path configs/market_inventory/historical_temperature_snapshots.json \
+  --model ecmwf_ifs025 \
+  --model ecmwf_aifs025_single \
+  --model kma_gdps \
+  --model gfs_seamless \
   --decision-horizon market_open \
   --decision-horizon previous_evening \
   --decision-horizon morning_of \
@@ -527,6 +543,13 @@ If you are topping off an existing warehouse and only want forecast keys that ar
 absent from `bronze_forecast_requests`, add `--missing-only` to
 `backfill-forecasts`. `scripts/run_full_historical_batch.sh` now uses this
 incremental forecast top-off by default.
+Keep `--max-consecutive-429 2` on free-path Open-Meteo forecast backfills. Two
+consecutive `429` responses are treated as a daily-limit hit: the run flushes
+already collected rows, cancels, and should be recorded in checker state rather
+than retried immediately. For multi-source variants, pass repeated `--model`
+values to `backfill-forecasts`, `build-dataset`, or `materialize-training-set`;
+otherwise the active config can materialize the same markets as a GFS-only
+feature set.
 
 Price-history note: the public CLOB `/prices-history` endpoint is retention-limited in practice. Use `--only-missing --price-no-cache` for gap recovery so tokens that already have archived official price points in `silver_price_timeseries` are not overwritten by late empty responses. Add `--limit-markets` / `--offset-markets` or `--target-date-from` / `--target-date-to` for small checkpointable batches. Once older official-history payloads have been captured into `data/raw/bronze`, `bronze_price_history_requests`, and `silver_price_timeseries`, prefer re-materializing `gold_backtest_panel` and `artifacts/price_history_coverage.json` from the archived warehouse.
 
@@ -550,6 +573,9 @@ and materialization steps in one command. Research mode defaults to strict Open-
 archive usage, and `build-dataset` will request exact `single_run` archives for the
 selected decision horizons when available. Bundled forecast fixtures are test/demo-only
 and are rejected by real-only dataset and forecast backfill commands.
+`build-dataset` and `materialize-training-set` accept repeated `--model` values;
+use them explicitly for multi-source experiments because config defaults may only
+include `gfs_seamless`.
 If the canonical gold already exists, `build-dataset` also requires
 `--allow-canonical-overwrite`; otherwise use a variant `--output-name`.
 `bootstrap-lab` accepts the same forecast-top-off shortcut via

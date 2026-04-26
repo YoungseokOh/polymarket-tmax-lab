@@ -27,6 +27,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--http-retries", type=int, default=1)
     parser.add_argument("--http-retry-wait-min-seconds", type=float, default=1.0)
     parser.add_argument("--http-retry-wait-max-seconds", type=float, default=8.0)
+    parser.add_argument("--max-consecutive-429", type=int, default=2)
     parser.add_argument("--pretrain-refresh-threshold-rows", type=int, default=500)
     parser.add_argument("--pretrain-model-name", default="gaussian_emos")
     parser.add_argument("--pretrain-variant", default=None)
@@ -54,6 +55,7 @@ def main() -> None:
         http_retry_wait_min_seconds=args.http_retry_wait_min_seconds,
         http_retry_wait_max_seconds=args.http_retry_wait_max_seconds,
         progress=bool(args.progress),
+        max_consecutive_429=args.max_consecutive_429,
         pretrain_refresh_threshold_rows=args.pretrain_refresh_threshold_rows,
         pretrain_model_name=args.pretrain_model_name,
         pretrain_variant=args.pretrain_variant,

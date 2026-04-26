@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import pickle
 import shutil
 from collections import Counter
 from collections.abc import Mapping
@@ -92,11 +93,18 @@ from pmtmax.modeling.evaluation import (
 from pmtmax.modeling.predict import predict_market
 from pmtmax.modeling.quick_eval import evaluate_saved_model, quick_eval_holdout
 from pmtmax.modeling.train import (
+    load_model,
     require_supported_model_name,
     require_supported_variant,
     supported_ablation_variants,
     supported_model_names,
     train_model,
+)
+from pmtmax.modeling.weather_pretrain import (
+    WeatherPretrainAugmentedModel,
+    WeatherPretrainFeatureMode,
+    append_weather_pretrain_features,
+    weather_pretrain_feature_columns,
 )
 from pmtmax.monitoring.hope_hunt import HopeHuntRunner
 from pmtmax.monitoring.observation_station import (
@@ -4115,6 +4123,11 @@ def collect_weather_training(
     http_retries: int = typer.Option(1, min=0, help="Extra HTTP retries per Open-Meteo request."),
     http_retry_wait_min_seconds: float = typer.Option(1.0, min=0.0, help="Minimum retry backoff seconds."),
     http_retry_wait_max_seconds: float = typer.Option(8.0, min=0.0, help="Maximum retry backoff seconds."),
+    max_consecutive_429: int = typer.Option(
+        2,
+        min=0,
+        help="Cancel the remaining batch after this many consecutive Open-Meteo 429 responses; 0 disables.",
+    ),
     progress: Annotated[bool, typer.Option("--progress/--no-progress")] = True,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
 ) -> None:
@@ -4170,6 +4183,7 @@ def collect_weather_training(
             workers=workers,
             rate_limit_profile=rate_limit_profile,
             progress_callback=_render_weather_training_progress if progress else None,
+            max_consecutive_429=max_consecutive_429,
         )
     finally:
         http.close()
@@ -4186,10 +4200,12 @@ def collect_weather_training(
             "gold": str(result.paths.gold_path),
         },
         "requested_rows": result.requested_rows,
+        "attempted_rows": result.attempted_rows,
         "collected_rows": result.collected_rows,
         "skipped_existing_rows": result.skipped_existing_rows,
         "failed_rows": result.failed_rows,
         "status_counts": result.status_counts,
+        "early_stop_reason": result.early_stop_reason,
         "failures": result.failures[:20],
         "workers_requested": result.workers_requested,
         "workers_effective": result.workers_effective,
@@ -4205,6 +4221,7 @@ def collect_weather_training(
 def build_dataset(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    models: Annotated[list[str] | None, typer.Option("--model")] = None,
     decision_horizons: Annotated[list[str] | None, typer.Option("--decision-horizon")] = None,
     single_run_horizons: Annotated[list[str] | None, typer.Option("--single-run-horizon")] = None,
     forecast_missing_only: Annotated[bool, typer.Option("--forecast-missing-only/--no-forecast-missing-only")] = False,
@@ -4238,6 +4255,8 @@ def build_dataset(
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo, use_truth_cache=not truth_no_cache)
+    if models:
+        pipeline.models = list(dict.fromkeys(models))
     run = pipeline.warehouse.start_run(
         command="build-dataset",
         config_hash=_config_hash(
@@ -4245,6 +4264,7 @@ def build_dataset(
             "build-dataset",
             markets_path=markets_path,
             cities=cities,
+            models=models,
             decision_horizons=decision_horizons,
             single_run_horizons=single_run_horizons,
             forecast_missing_only=forecast_missing_only,
@@ -4262,6 +4282,7 @@ def build_dataset(
         pipeline.backfill_markets(snapshots, source_name="build_dataset")
         pipeline.backfill_forecasts(
             snapshots,
+            models=models,
             strict_archive=strict_archive,
             allow_fixture_fallback=allow_demo_fixture_fallback,
             single_run_horizons=single_run_horizons or decision_horizons or config.backtest.decision_horizons or None,
@@ -4358,6 +4379,10 @@ def backfill_forecasts(
     strict_archive: Annotated[bool, typer.Option("--strict-archive/--no-strict-archive")] = True,
     allow_demo_fixture_fallback: bool = False,
     workers: Annotated[int, typer.Option("--workers")] = 1,
+    max_consecutive_429: Annotated[
+        int,
+        typer.Option("--max-consecutive-429", help="Cancel forecast backfill after this many consecutive 429 responses; 0 disables."),
+    ] = 2,
 ) -> None:
     """Backfill forecast payloads and normalized hourly forecast tables."""
 
@@ -4395,6 +4420,7 @@ def backfill_forecasts(
             single_run_horizons=single_run_horizons,
             missing_only=missing_only,
             workers=workers,
+            max_consecutive_429=max_consecutive_429,
         )
         pipeline.warehouse.finish_run(run, status="completed")
     except Exception as exc:  # noqa: BLE001
@@ -4721,6 +4747,7 @@ def materialize_backtest_panel(
 def materialize_training_set(
     markets_path: Path | None = None,
     cities: Annotated[list[str] | None, typer.Option("--city")] = None,
+    models: Annotated[list[str] | None, typer.Option("--model")] = None,
     decision_horizons: Annotated[list[str] | None, typer.Option("--decision-horizon")] = None,
     contract: str = "both",
     output_name: str = "historical_training_set",
@@ -4739,6 +4766,8 @@ def materialize_training_set(
     )
     snapshots = _load_snapshots(markets_path=markets_path, cities=cities)
     pipeline = _backfill_pipeline(config, http, openmeteo)
+    if models:
+        pipeline.models = list(dict.fromkeys(models))
     run = pipeline.warehouse.start_run(
         command="materialize-training-set",
         config_hash=_config_hash(
@@ -4746,6 +4775,7 @@ def materialize_training_set(
             "materialize-training-set",
             markets_path=markets_path,
             cities=cities,
+            models=models,
             decision_horizons=decision_horizons,
             contract=contract,
             output_name=output_name,
@@ -5203,6 +5233,7 @@ def train_advanced(
     variant: str | None = None,
     variant_spec: Path | None = None,
     pretrained_weather_model: Path | None = None,
+    weather_pretrain_feature_mode: WeatherPretrainFeatureMode = "full",
     publish_champion: bool = False,
 ) -> None:
     """Train an advanced probabilistic model inside the active workspace."""
@@ -5215,6 +5246,15 @@ def train_advanced(
     config, _ = load_settings()
     _require_dataset_profile(config, {"real_market"}, command="train-advanced")
     frame = pd.read_parquet(dataset_path)
+    raw_dataset_signature = _frame_signature(frame)
+    weather_pretrain_model = None
+    if pretrained_weather_model is not None:
+        weather_pretrain_model = load_model(Path(pretrained_weather_model))
+        frame = append_weather_pretrain_features(
+            frame,
+            weather_pretrain_model,
+            feature_mode=weather_pretrain_feature_mode,
+        )
     resolved_variant, resolved_variant_config, _ = _resolve_lgbm_variant_inputs(
         model_name=model_name,
         variant=variant,
@@ -5229,12 +5269,26 @@ def train_advanced(
         variant=resolved_variant,
         variant_config=resolved_variant_config,
     )
-    if pretrained_weather_model is not None:
-        sidecar = Path(str(artifact.path)).with_suffix(".json")
-        payload = artifact.model_dump(mode="json")
+    model_path = Path(str(artifact.path))
+    sidecar = model_path.with_suffix(".json")
+    payload = artifact.model_dump(mode="json")
+    if pretrained_weather_model is not None and weather_pretrain_model is not None:
+        base_model = load_model(model_path)
+        wrapped_model = WeatherPretrainAugmentedModel(
+            base_model=base_model,
+            weather_pretrain_model=weather_pretrain_model,
+            pretrained_weather_model_path=str(pretrained_weather_model),
+            feature_mode=weather_pretrain_feature_mode,
+        )
+        with model_path.open("wb") as handle:
+            pickle.dump(wrapped_model, handle)
         payload["pretrained_weather_model"] = str(pretrained_weather_model)
-        payload["adaptation_note"] = "Trained on real Polymarket rows with weather pretrain artifact recorded for two-stage lineage."
-        dump_json(sidecar, payload)
+        payload["weather_pretrain_feature_mode"] = weather_pretrain_feature_mode
+        payload["weather_pretrain_features"] = list(weather_pretrain_feature_columns(weather_pretrain_feature_mode))
+        payload["source_dataset_signature"] = raw_dataset_signature
+        payload["weather_pretrain_augmented_dataset_signature"] = payload.get("dataset_signature")
+        payload["adaptation_note"] = "Trained on real Polymarket rows with weather-pretrain prediction features injected at fit and predict time."
+    dump_json(sidecar, payload)
     console.print(f"Trained {model_name} -> {artifact.path}")
 
 
