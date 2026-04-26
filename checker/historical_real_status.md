@@ -6,35 +6,76 @@ Updated: 2026-04-26 KST
 - workspace: `historical_real`
 - dataset profile: `real_market`
 - curated inventory: `configs/market_inventory/historical_temperature_snapshots.json`
-- curated snapshots: `2,021`
-- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,023` URLs)
+- curated snapshots: `2,101`
+- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,103` URLs)
 - checked-in training baseline inventory: `configs/market_inventory/full_training_set_snapshots.json` (`1,834` snapshots)
 - readiness artifact: `artifacts/dataset_readiness.json`
 - forecast availability artifact: `artifacts/forecast_availability.json`
 
 ## Latest Collection
-- Inventory validation: `2,021` curated snapshots, issues `0`.
-- Preflight: `ready=true`; official sources Wunderground `2,016`, Central Weather Administration `5`; truth tracks research_public `2,016`, exact_public `5`.
-- Trust check: `ok=true`.
-- `backfill-markets`: `bronze_market_snapshots=5915`, `silver_market_specs=2111`.
-- `backfill-truth`: `bronze_truth_snapshots=2516`, `silver_observations_daily=2342`, status counts `ok=2342`, `error=137`, `lag=37`.
-- `backfill-forecasts --strict-archive --missing-only` with GFS `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=3618`, `single_run_err=0`, `bronze_forecast_requests=30885`, `silver_forecast_runs_hourly=959978`.
-- `backfill-forecasts --model ecmwf_ifs025 --strict-archive --missing-only` with the same three single-run horizons: `single_run_ok=3618`, `single_run_err=0`, no new two-consecutive-`429` cancellation, `bronze_forecast_requests=34813`, `silver_forecast_runs_hourly=1137474`.
-- Current curated single-run coverage: `ecmwf_ifs025` and `gfs_seamless` cover all `2,021` markets for all three horizons; `kma_gdps` covers `815`; `ecmwf_aifs025_single` covers `219`.
+- Targeted gap-fill on 2026-04-26 for Dallas, Atlanta, and Miami fetched/classified existing pending candidates and appended `60` truth-ready URLs: Atlanta `20`, Dallas `20`, Miami `20`.
+- Target-only inventory validation: `60` curated snapshots, issues `0`; merged local curated inventory now has `2,101` snapshots.
+- Remaining target-city collection status: Dallas `142` collected / `0` pending, Atlanta `141` collected / `0` pending, Miami `89` collected with `6` old `parse_failed` rows from missing cached event HTML.
+- Trust check on merged curated inventory: `ok=true`, `inventory_rows=2101`.
+- `backfill-markets`: `bronze_market_snapshots=5995`, `silver_market_specs=2191`.
+- `backfill-truth`: `bronze_truth_snapshots=2548`, `silver_observations_daily=2380`, status counts `ok=2380`, `error=131`, `lag=37`.
+- Targeted `backfill-forecasts` with `ecmwf_ifs025` and `gfs_seamless` across `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=359`, `single_run_err=0`, no two-consecutive-`429` cancellation, `bronze_forecast_requests=35586`, `silver_forecast_runs_hourly=1163970`.
+- Current curated single-run coverage: `ecmwf_ifs025` and `gfs_seamless` cover all `2,101` markets for all three horizons; `kma_gdps` covers `815`; `ecmwf_aifs025_single` covers `219`.
 
 ## Verified Readiness
-- `artifacts/dataset_readiness.json`: detail rows `2,021`, summary rows `30`.
-- `forecast_ready=true`: `2,021`; `truth_ready=true`: `2,021`; `gold_ready=true`: `0`.
-- `readiness_status`: `gold_missing=2,021`.
-- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,016`.
-- `truth_status`: `ok=2,021`.
-- `artifacts/forecast_availability.json` recommended rows: `276`; min/max availability ratio `1.0`; errors `0`; unavailable `0`; requests `16,478`.
+- `artifacts/dataset_readiness.json`: detail rows `2,101`, summary rows `30`.
+- `forecast_ready=true`: `2,101`; `truth_ready=true`: `2,101`; `gold_ready=true`: `2,098`; `gold_ready=false`: `3`.
+- `readiness_status`: `ready=2,098`, `gold_missing=3`.
+- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,096`.
+- `truth_status`: `ok=2,101`.
+- Current non-canonical gold row sum: `6,294` rows from `2,098` markets; market ids `282535`, `285758`, and `289186` still lack valid horizon forecasts.
+- `artifacts/forecast_availability.json` summary rows: `645`; recommended rows: `318`; min/max availability ratio `1.0`; errors `0`; unavailable `0`.
 
 ## Current Judgment
-- The curated `2,021`-market surface is fully forecast/truth-ready for research-public modeling, but it is not official-gold ready.
+- The curated `2,101`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,098` markets after the sentinel feature-validity guard skips three invalid-forecast markets.
 - The canonical checked-in training set and panel are not automatically replaced. Use variant `--output-name` values first and only promote canonical after evaluation.
-- Re-running ECMWF/GFS forecast top-off immediately should be a no-op unless inventory changes. Next data work should be price-history recovery or targeted KMA/AIFS expansion, not another blind ECMWF/GFS run.
+- Re-running ECMWF/GFS forecast top-off immediately should be a no-op unless inventory changes. Next data work should be targeted city expansion or KMA/AIFS expansion, not another blind ECMWF/GFS run.
 - `weather_train` remains separate and should wait for the Open-Meteo free-path limit cooldown before continuing.
+
+## Latest Targeted Dallas/Atlanta/Miami Expansion
+- Target URLs:
+  `artifacts/targeted_historical_refresh_20260426/dallas_atlanta_miami_event_urls.json`.
+- Target snapshots:
+  `artifacts/targeted_historical_refresh_20260426/dallas_atlanta_miami_snapshots.json`.
+- Target training set:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_dallas_atlanta_miami_20260426.parquet`
+  has `180` rows, `60` markets, all three supported horizons, `ecmwf_ifs025` + `gfs_seamless` features, and `0` all-zero daily-max rows.
+- Full local backlog variant:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set_curated_multisource_targeted_south_20260426.parquet`
+  has `6,294` rows, `2,098` markets, all three supported horizons, and `0` all-zero daily-max rows.
+- Target price history:
+  `backfill-price-history --only-missing --price-no-cache` selected `60` markets, wrote `660` ok requests and `35,365` official price points.
+- Target panel:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_dallas_atlanta_miami_backtest_panel_20260426.parquet`
+  has `1,980` token rows with coverage `ok=1,941`, `missing=11`, `stale=28`.
+- Full local backlog panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_curated_multisource_targeted_south_20260426.parquet`
+  has `52,050` token rows with coverage `ok=15,952`, `missing=36,047`, `stale=51`.
+
+## Latest Targeted Ankara Expansion
+- Target URLs:
+  `artifacts/targeted_historical_refresh_20260426/ankara_event_urls.json`.
+- Target snapshots:
+  `artifacts/targeted_historical_refresh_20260426/ankara_snapshots.json`.
+- Target training set:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_ankara_20260426.parquet`
+  has `60` rows, `20` markets, all three supported horizons, `ecmwf_ifs025` + `gfs_seamless` features, and `0` all-zero daily-max rows.
+- Full local backlog variant:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set_curated_multisource_targeted_ankara_20260426.parquet`
+  has `6,114` rows, `2,038` markets, all three supported horizons, and `0` all-zero daily-max rows.
+- Target price history:
+  `backfill-price-history --only-missing --price-no-cache` selected `20` markets, wrote `220` ok requests and `11,036` official price points.
+- Target panel:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_ankara_backtest_panel_20260426.parquet`
+  has `660` token rows with coverage `ok=641`, `missing=14`, `stale=5`.
+- Full local backlog panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_curated_multisource_targeted_ankara_20260426.parquet`
+  has `50,070` token rows with coverage `ok=14,011`, `missing=36,036`, `stale=23`.
 
 ## Latest Dataset/Model Experiment
 - GFS-only curated variant:

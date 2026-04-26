@@ -1511,6 +1511,13 @@ class BackfillPipeline:
         request_summary = pd.DataFrame()
         request_details = pd.DataFrame()
         if not bronze.empty:
+            def _truthy_count(series: pd.Series) -> int:
+                values = series.dropna()
+                if values.empty:
+                    return 0
+                normalized = values.astype(str).str.strip().str.lower()
+                return int(normalized.isin({"true", "1", "1.0", "yes", "y"}).sum())
+
             summary_agg: dict[str, tuple[str, object]] = {
                 "request_count": ("token_id", "size"),
                 "market_count": ("market_id", lambda series: series.astype(str).nunique()),
@@ -1518,10 +1525,7 @@ class BackfillPipeline:
             }
             if "last_trade_present" in bronze.columns:
                 summary_agg["last_trade_probe_count"] = ("last_trade_present", lambda series: series.notna().sum())
-                summary_agg["last_trade_present_count"] = (
-                    "last_trade_present",
-                    lambda series: series.fillna(False).astype(bool).sum(),
-                )
+                summary_agg["last_trade_present_count"] = ("last_trade_present", _truthy_count)
             if "empty_reason" in bronze.columns:
                 summary_agg["history_empty_with_last_trade_count"] = (
                     "empty_reason",

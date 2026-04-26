@@ -118,6 +118,14 @@ Use this skill for the research and trading simulation loop.
   `0.5627` from raw `0.4965`. Treat as the strongest diagnostic wrapper so far,
   not promotion. Next serious candidate should be a non-holdout-tuned LGBM
   disagreement feature variant or proper OOF stacker.
+- April 26, 2026 targeted Ankara data expansion:
+  plus Dallas/Atlanta/Miami gap-fill brought the local curated backlog to 2,101
+  snapshots. Non-canonical variant
+  `historical_training_set_curated_multisource_targeted_south_20260426`
+  has 6,294 rows / 2,098 markets and zero all-source daily-max sentinels.
+  Target panel coverage: Ankara 641/660 `ok`, Dallas/Atlanta/Miami 1,941/1,980
+  `ok`; full local backlog panel coverage is 15,952/52,050 `ok`. This is data
+  expansion, not a model promotion.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
 - observation weather-station loop: `observation-report`, `observation-shadow`, `observation-daemon`, `approve-live-candidate`.
 - zero-fill paper diagnostics: `paper-multimodel-report`, `execution-sensitivity-report`, `market-bottleneck-report`.

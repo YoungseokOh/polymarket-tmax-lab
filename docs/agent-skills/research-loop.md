@@ -284,6 +284,18 @@ wrappers diagnostic only. The next serious candidate should make the
 disagreement rule non-holdout-tuned, either as explicit `lgbm_emos` features or
 as a proper OOF stacker.
 
+Targeted data expansion follow-up:
+
+The April 26, 2026 Ankara refresh plus Dallas/Atlanta/Miami gap-fill appended
+`80` curated snapshots and brought the local curated backlog to `2,101`
+snapshots. Non-canonical variant
+`historical_training_set_curated_multisource_targeted_south_20260426` has
+`6,294` rows / `2,098` markets with zero all-source daily-max sentinels.
+Target panels have strong official price coverage: Ankara `641/660` token rows
+`ok`, Dallas/Atlanta/Miami `1,941/1,980` `ok`; the full local backlog panel has
+`15,952/52,050` `ok` token rows. Treat this as data expansion only; model
+promotion still requires a candidate-specific gate.
+
 ## Autoresearch Loop
 `karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `lgbm_emos`.
 Run it through the `historical_real` workspace wrapper so it cannot accidentally

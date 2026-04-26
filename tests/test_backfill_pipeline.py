@@ -839,6 +839,55 @@ def test_summarize_price_history_coverage_uses_latest_request_per_token(tmp_path
     assert int(empty_summary["history_empty_without_last_trade_count"]) == 0
 
 
+def test_summarize_price_history_coverage_counts_nullable_int_last_trade_flags(tmp_path: Path) -> None:
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "summary_nullable_int.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_SingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=None,
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+    requested_at = pd.Timestamp(datetime(2026, 4, 26, tzinfo=UTC))
+    warehouse.upsert_table(
+        "bronze_price_history_requests",
+        pd.DataFrame(
+            {
+                "market_id": ["m1", "m1", "m1"],
+                "token_id": ["t1", "t2", "t3"],
+                "requested_at": [requested_at, requested_at, requested_at],
+                "status": ["empty", "empty", "empty"],
+                "city": ["Ankara", "Ankara", "Ankara"],
+                "target_local_date": [date(2026, 4, 26), date(2026, 4, 26), date(2026, 4, 26)],
+                "outcome_label": ["A", "B", "C"],
+                "point_count": [0, 0, 0],
+                "empty_reason": [
+                    "history_unavailable_last_trade_present",
+                    "history_unavailable_last_trade_missing",
+                    "history_unavailable_last_trade_error",
+                ],
+                "last_trade_present": pd.Series([1, 0, None], dtype="Int32"),
+            }
+        ),
+    )
+
+    summary = pipeline.summarize_price_history_coverage({"m1"})
+
+    empty_summary = summary["request_summary"].iloc[0]
+    assert int(empty_summary["last_trade_probe_count"]) == 2
+    assert int(empty_summary["last_trade_present_count"]) == 1
+    assert int(empty_summary["history_empty_with_last_trade_count"]) == 1
+    assert int(empty_summary["history_empty_without_last_trade_count"]) == 1
+    assert int(empty_summary["history_empty_last_trade_error_count"]) == 1
+
+
 def test_backfill_price_history_only_missing_skips_tokens_with_existing_points(tmp_path: Path) -> None:
     snapshot = bundled_market_snapshots(["Seoul"])[0]
     spec = snapshot.spec
