@@ -103,9 +103,10 @@ inventory라서 자동으로 sync되지 않는다. training inventory를 갱신�
 - `historical_training_set.parquet` materializes model rows from that inventory
   and supported decision horizons. The latest trusted build had 5,478 training rows.
 - `historical_temperature_snapshots.json` is the curated collection backlog, not
-  the automatically-used training set. Its latest local audit count was 2,169
-  snapshots after the April 27, 2026 targeted Ankara, Dallas/Atlanta/Miami, and
-  Beijing/Chengdu/Chongqing/Madrid expansions.
+  the automatically-used training set. Its latest local audit count was `2,602`
+  snapshots after the April 27, 2026 discovery120 expansion. Follow-up
+  discovery160 appended `0` URLs, so the latest collection turn stopped on the
+  no-new-truth-ready-backlog condition.
 - More real data can be collected. The hard rule is that new markets must be
   closed, parseable, truth-ready, forecast-backed, and intentionally curated
   before replacing the checked-in training inventory.

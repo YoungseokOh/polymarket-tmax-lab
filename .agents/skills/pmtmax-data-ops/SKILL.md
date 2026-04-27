@@ -60,12 +60,14 @@ Use this skill for storage, bootstrap, and long-history data operations.
   `2025-01-07..2025-01-27` and `2026-01-22..2026-01-28` are retry-only/free-path
   daily-limit ranges. Read the live row count from `checker/weather_train_status.md`.
 - Latest observed `historical_real` collection state on April 27, 2026:
-  targeted Ankara, Dallas/Atlanta/Miami, and Beijing/Chengdu/Chongqing/Madrid
-  expansions appended 148 event URLs, merged the local curated backlog to 2,169
-  snapshots, and materialized
-  `historical_training_set_curated_multisource_targeted_east_madrid_20260427`
-  with 6,495 rows / 2,165 markets. Latest target price-history coverage:
-  Beijing/Chengdu/Chongqing/Madrid `1,868/2,211` token rows `ok`.
+  discovery120 appended `1` Tokyo event URL after the completed discovery80
+  batch, merged the local curated backlog to `2,602` snapshots, and materialized
+  `historical_training_set_curated_multisource_discovery120_20260427` with
+  `7,794` rows / `2,598` markets. No two-consecutive-`429` cancellation
+  occurred, and follow-up discovery160 appended `0` URLs, satisfying the
+  no-new-backlog stop condition. Latest target price-history coverage:
+  discovery120 `22/33` token rows `ok`; full local backlog panel
+  `30,615/68,550` token rows `ok`.
   Read live details from `checker/historical_real_status.md`.
 - Keep `checker/weather_train_status.md` and
   `checker/weather_train_collection_log.md` synchronized after every
@@ -84,7 +86,7 @@ Use this skill for storage, bootstrap, and long-history data operations.
 - lag recovery truth probes should default to `--truth-per-source-limit 1`, and use `--truth-no-cache` when cached truth payloads look stale or malformed.
 - `historical_temperature_snapshots.json` is the canonical curated backlog for data collection. Use this when the task is “collect the latest historical markets”.
 - `full_training_set_snapshots.json` is a checked-in training inventory, not an auto-refreshed mirror of the canonical historical backlog.
-- latest audit semantics: `full_training_set_snapshots.json` has 1,834 trusted market snapshots, which materialize to 5,478 training rows across supported horizons; this is not a hard cap. The local curated collection backlog currently has 2,169 snapshots, but it is not automatically used as the checked-in training inventory.
+- latest audit semantics: `full_training_set_snapshots.json` has 1,834 trusted market snapshots, which materialize to 5,478 training rows across supported horizons; this is not a hard cap. The local curated collection backlog currently has 2,602 snapshots, but it is not automatically used as the checked-in training inventory.
 - more real data can be collected, but it must be closed, parseable, truth-ready, forecast-backed, and intentionally curated before replacing the checked-in training inventory.
 - daily `ops_daily` collection records forward evidence only; it does not auto-append to `full_training_set_snapshots.json` or retrain the champion.
 - When topping off an existing warehouse, prefer `backfill-forecasts --missing-only` so the run only fetches forecast request keys that are absent from `bronze_forecast_requests`.

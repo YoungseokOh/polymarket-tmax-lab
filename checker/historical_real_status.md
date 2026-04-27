@@ -6,35 +6,55 @@ Updated: 2026-04-27 KST
 - workspace: `historical_real`
 - dataset profile: `real_market`
 - curated inventory: `configs/market_inventory/historical_temperature_snapshots.json`
-- curated snapshots: `2,169`
-- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,171` URLs)
+- curated snapshots: `2,602`
+- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,604` URLs)
 - checked-in training baseline inventory: `configs/market_inventory/full_training_set_snapshots.json` (`1,834` snapshots)
-- readiness artifact: `artifacts/dataset_readiness.json`
+- readiness artifact: `artifacts/targeted_historical_refresh_20260427/discovery120_dataset_readiness.json`
 - forecast availability artifact: `artifacts/forecast_availability.json`
 
 ## Latest Collection
-- Targeted gap-fill on 2026-04-27 for Beijing, Chengdu, Chongqing, and Madrid fetched/classified existing pending candidates and appended `68` truth-ready URLs: Beijing `20`, Chengdu `21`, Chongqing `20`, Madrid `7`.
-- Target-only inventory validation: `68` curated snapshots, issues `0`; merged local curated inventory now has `2,169` snapshots.
-- Remaining target-city collection status: Beijing `36` collected / `0` pending, Chengdu `36` collected / `0` pending, Chongqing `36` collected / `0` pending, Madrid `27` collected / `13` pending.
-- Trust check on merged curated inventory: `ok=true`, `inventory_rows=2169`.
-- `backfill-markets`: `bronze_market_snapshots=6063`, `silver_market_specs=2259`.
-- `backfill-truth`: `bronze_truth_snapshots=2575`, `silver_observations_daily=2410`, status counts `ok=2410`, `error=128`, `lag=37`.
-- Targeted `backfill-forecasts` with `ecmwf_ifs025` and `gfs_seamless` across `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=402`, `single_run_err=0`, no two-consecutive-`429` cancellation, `bronze_forecast_requests=36250`, `silver_forecast_runs_hourly=1186434`.
+- Discovery120 expansion on 2026-04-27 scanned `2,934` supported closed events, fetched `2` new candidate pages, classified `72` fetched events, and appended `1` truth-ready URL: Tokyo `1`.
+- Follow-up discovery160 expansion scanned the same `2,934` supported closed events, fetched `0` new candidate pages, classified `71` retryable/source-lag fetched events, and appended `0` URLs. This satisfies the no-new-truth-ready-backlog stop condition.
+- Target-only inventory validation: `1` curated snapshot, issues `0`; merged local curated inventory now has `2,602` snapshots.
+- Trust check on merged curated inventory: `ok=true`, `inventory_rows=2602`.
+- `backfill-markets`: `bronze_market_snapshots=6496`, `silver_market_specs=2689`.
+- `backfill-truth`: `bronze_truth_snapshots=2731`, `silver_observations_daily=2610`, status counts `ok=2610`, `error=97`, `lag=24`.
+- Targeted `backfill-forecasts` with `ecmwf_ifs025` and `gfs_seamless` across `market_open`, `previous_evening`, and `morning_of`: `single_run_ok=6`, `single_run_err=0`, no two-consecutive-`429` cancellation, `bronze_forecast_requests=40444`, `silver_forecast_runs_hourly=1330156`.
 
 ## Verified Readiness
-- `artifacts/dataset_readiness.json`: detail rows `2,169`, summary rows `30`.
-- `forecast_ready=true`: `2,169`; `truth_ready=true`: `2,169`; `gold_ready=true`: `2,165`; `gold_ready=false`: `4`.
-- `readiness_status`: `ready=2,165`, `gold_missing=4`.
-- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,164`.
-- `truth_status`: `ok=2,169`.
-- Current non-canonical gold row sum: `6,495` rows from `2,165` markets; market ids `282535`, `285758`, `289186`, and `412000` currently materialize no gold rows.
+- `artifacts/targeted_historical_refresh_20260427/discovery120_dataset_readiness.json`: detail rows `2,602`, summary rows `30`.
+- `forecast_ready=true`: `2,602`; `truth_ready=true`: `2,602`; `gold_ready=true`: `2,598`; `gold_ready=false`: `4`.
+- `readiness_status`: `ready=2,598`, `gold_missing=4`.
+- `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,597`.
+- `truth_status`: `ok=2,602`.
+- Current non-canonical gold row sum: `7,794` rows from `2,598` markets; market ids `282535`, `285758`, `289186`, and `412000` currently materialize no gold rows.
 - `artifacts/forecast_availability.json` summary rows: `645`; recommended rows: `318`; min/max availability ratio `0.0/1.0`, with the `0.0` rows limited to old `kma_ldps` London/NYC availability records.
 
 ## Current Judgment
-- The curated `2,169`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,165` markets after gold materialization skips four no-row markets.
+- The curated `2,602`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,598` markets after gold materialization skips four no-row markets.
 - The canonical checked-in training set and panel are not automatically replaced. Use variant `--output-name` values first and only promote canonical after evaluation.
-- Re-running ECMWF/GFS forecast top-off immediately should be a no-op unless inventory changes. Next data work should finish the remaining Madrid pending URLs or expand another tail-loss city, not another blind ECMWF/GFS run.
+- Discovery120 added one truth-ready URL after expansion; follow-up discovery160 appended `0` URLs, so historical collection should stop here until Gamma exposes new closed truth-ready markets or source-lag entries become ready.
 - `weather_train` remains separate and should wait for the Open-Meteo free-path limit cooldown before continuing.
+
+## Latest Discovery120 Expansion
+- Target URLs:
+  `artifacts/targeted_historical_refresh_20260427/discovery120_event_urls.json`.
+- Target snapshots:
+  `artifacts/targeted_historical_refresh_20260427/discovery120_snapshots.json`.
+- Target training set:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_discovery120_20260427.parquet`
+  has `3` rows, `1` market, all three supported horizons, `ecmwf_ifs025` + `gfs_seamless` features, and `0` all-zero daily-max rows.
+- Full local backlog variant:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set_curated_multisource_discovery120_20260427.parquet`
+  has `7,794` rows, `2,598` markets, all three supported horizons, all four configured source feature groups, and `0` all-zero daily-max rows.
+- Target price history:
+  `backfill-price-history --only-missing --price-no-cache` selected `1` market, wrote `11` ok requests and `565` official price points.
+- Target panel:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_discovery120_backtest_panel_20260427.parquet`
+  has `33` token rows with coverage `ok=22`, `missing=11`, `stale=0`.
+- Full local backlog panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_curated_multisource_discovery120_20260427.parquet`
+  has `68,550` token rows with coverage `ok=30,615`, `missing=37,501`, `stale=434`.
 
 ## Latest Targeted Beijing/Chengdu/Chongqing/Madrid Expansion
 - Target URLs:

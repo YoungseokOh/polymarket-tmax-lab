@@ -286,14 +286,16 @@ as a proper OOF stacker.
 
 Targeted data expansion follow-up:
 
-The April 26-27, 2026 Ankara, Dallas/Atlanta/Miami, and
-Beijing/Chengdu/Chongqing/Madrid refreshes appended `148` curated snapshots and
-brought the local curated backlog to `2,169` snapshots. Non-canonical variant
-`historical_training_set_curated_multisource_targeted_east_madrid_20260427` has
-`6,495` rows / `2,165` markets with zero all-source daily-max sentinels.
-Latest target panel coverage is `1,868/2,211` token rows `ok`; the full local
-backlog panel has `17,820/54,261` `ok` token rows. Treat this as data expansion
-only; model promotion still requires a candidate-specific gate.
+The April 26-27, 2026 Ankara, Dallas/Atlanta/Miami,
+Beijing/Chengdu/Chongqing/Madrid, discovery80, and discovery120 refreshes
+brought the local curated backlog to `2,602` snapshots. Non-canonical variant
+`historical_training_set_curated_multisource_discovery120_20260427` has
+`7,794` rows / `2,598` markets with zero all-source daily-max sentinels.
+Latest discovery120 target panel coverage is `22/33` token rows `ok`; the full
+local backlog panel has `30,615/68,550` `ok` token rows. Discovery120 did not
+hit the two-consecutive-`429` cancellation path, and follow-up discovery160
+appended `0` URLs, satisfying the no-new-backlog stop condition. Treat this as
+data expansion only; model promotion still requires a candidate-specific gate.
 
 ## Autoresearch Loop
 `karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `lgbm_emos`.

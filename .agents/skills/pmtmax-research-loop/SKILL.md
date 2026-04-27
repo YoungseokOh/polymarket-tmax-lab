@@ -119,13 +119,16 @@ Use this skill for the research and trading simulation loop.
   not promotion. Next serious candidate should be a non-holdout-tuned LGBM
   disagreement feature variant or proper OOF stacker.
 - April 27, 2026 targeted data expansion:
-  Ankara, Dallas/Atlanta/Miami, and Beijing/Chengdu/Chongqing/Madrid gap-fills
-  brought the local curated backlog to 2,169 snapshots. Non-canonical variant
-  `historical_training_set_curated_multisource_targeted_east_madrid_20260427`
-  has 6,495 rows / 2,165 markets and zero all-source daily-max sentinels.
-  Latest target panel coverage is 1,868/2,211 `ok`; full local backlog panel
-  coverage is 17,820/54,261 `ok`. This is data expansion, not a model
-  promotion.
+  Ankara, Dallas/Atlanta/Miami, Beijing/Chengdu/Chongqing/Madrid, discovery80,
+  and discovery120 gap-fills brought the local curated backlog to `2,602`
+  snapshots. Non-canonical variant
+  `historical_training_set_curated_multisource_discovery120_20260427` has
+  `7,794` rows / `2,598` markets and zero all-source daily-max sentinels.
+  Latest discovery120 target panel coverage is `22/33` `ok`; full local backlog
+  panel coverage is `30,615/68,550` `ok`. No two-consecutive-`429`
+  cancellation occurred in discovery120, and follow-up discovery160 appended
+  `0` URLs, satisfying the no-new-backlog stop condition. This is data
+  expansion, not a model promotion.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
 - observation weather-station loop: `observation-report`, `observation-shadow`, `observation-daemon`, `approve-live-candidate`.
 - zero-fill paper diagnostics: `paper-multimodel-report`, `execution-sensitivity-report`, `market-bottleneck-report`.

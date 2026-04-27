@@ -15,6 +15,7 @@ Updated: 2026-04-27 KST
 - targeted Ankara coverage artifact: `artifacts/targeted_historical_refresh_20260426/ankara_price_coverage_summary.json`
 - targeted Dallas/Atlanta/Miami coverage artifact: `artifacts/targeted_historical_refresh_20260426/dallas_atlanta_miami_price_coverage_summary.json`
 - targeted Beijing/Chengdu/Chongqing/Madrid coverage artifact: `artifacts/targeted_historical_refresh_20260427/east_madrid_price_coverage_summary.json`
+- targeted discovery120 coverage artifact: `artifacts/targeted_historical_refresh_20260427/discovery120_price_coverage_summary.json`
 
 ## Request Coverage
 - status `ok`: `5,213`
@@ -38,9 +39,20 @@ Updated: 2026-04-27 KST
 - Daily price agent runs one shard at a time (`25` markets default) and keeps `backfill-price-history -> materialize-backtest-panel -> summarize-price-history-coverage` serialized.
 - Latest successful shard: `475..499 / 1834`; decision-ready delta `+0`.
 - Dominant blocker: official `/prices-history` empties still outweigh recovered rows, and many empties show `last_trade_present`, so retention-limited history remains the main constraint.
-- April 27 curated market/truth/forecast collection is now tracked in `checker/historical_real_status.md`: `2,169` curated snapshots are forecast/truth-ready, and the current non-canonical gold variant materializes `2,165` markets.
+- April 27 curated market/truth/forecast collection is now tracked in `checker/historical_real_status.md`: `2,602` curated snapshots are forecast/truth-ready, and the current non-canonical gold variant materializes `2,598` markets.
 
 ## Latest Targeted Price Backfill
+- Scope: `artifacts/targeted_historical_refresh_20260427/discovery120_snapshots.json` (`1` Tokyo market).
+- `backfill-price-history --only-missing --price-no-cache`: selected `1` market, wrote `11` ok request rows and `565` official price points.
+- Target panel:
+  `data/workspaces/historical_real/parquet/gold/v2/targeted_discovery120_backtest_panel_20260427.parquet`
+  has `33` token rows with coverage `ok=22`, `missing=11`, `stale=0`.
+- Full local backlog panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_curated_multisource_discovery120_20260427.parquet`
+  has `68,550` token rows with coverage `ok=30,615`, `missing=37,501`, `stale=434`.
+- This targeted run does not advance the checked-in inventory daily shard queue; continue from `500..524 / 1834` if running the price recovery agent.
+
+## Previous Targeted Price Backfill
 - Scope: `artifacts/targeted_historical_refresh_20260427/east_madrid_snapshots.json` (`68` Beijing/Chengdu/Chongqing/Madrid markets).
 - `backfill-price-history --only-missing --price-no-cache`: selected `68` markets, wrote `748` ok request rows and `36,030` official price points.
 - Target panel:
@@ -51,7 +63,7 @@ Updated: 2026-04-27 KST
   has `54,261` token rows with coverage `ok=17,820`, `missing=36,349`, `stale=92`.
 - This targeted run does not advance the checked-in inventory daily shard queue; continue from `500..524 / 1834` if running the price recovery agent.
 
-## Previous Targeted Price Backfill
+## Earlier Targeted Price Backfill
 - Scope: `artifacts/targeted_historical_refresh_20260426/dallas_atlanta_miami_snapshots.json` (`60` Dallas/Atlanta/Miami markets).
 - `backfill-price-history --only-missing --price-no-cache`: selected `60` markets, wrote `660` ok request rows and `35,365` official price points.
 - Target panel:
@@ -62,7 +74,7 @@ Updated: 2026-04-27 KST
   has `52,050` token rows with coverage `ok=15,952`, `missing=36,047`, `stale=51`.
 - This targeted run does not advance the checked-in inventory daily shard queue; continue from `500..524 / 1834` if running the price recovery agent.
 
-## Earlier Targeted Price Backfill
+## Oldest Targeted Price Backfill
 - Scope: `artifacts/targeted_historical_refresh_20260426/ankara_snapshots.json` (`20` Ankara markets).
 - `backfill-price-history --only-missing --price-no-cache`: selected `20` markets, wrote `220` ok request rows and `11,036` official price points.
 - Target panel:
