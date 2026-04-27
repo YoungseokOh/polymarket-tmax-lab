@@ -15,6 +15,7 @@ from pmtmax.backtest.recent_core_benchmark import (
     classify_profitability,
     summarize_recent_core_profitability,
 )
+from pmtmax.markets.repository import load_market_snapshot_payloads
 from pmtmax.utils import dump_json, load_json, load_yaml_with_extends
 
 DEFAULT_MARKETS = Path("configs/market_inventory/recent_core_temperature_snapshots.json")
@@ -341,7 +342,7 @@ def main() -> None:
     prebuilt_dataset = pd.read_parquet(prebuilt_dataset_path) if prebuilt_dataset_path is not None else None
     prebuilt_panel = pd.read_parquet(prebuilt_panel_path) if prebuilt_panel_path is not None else None
 
-    snapshots = load_json(markets_path)
+    snapshots = load_market_snapshot_payloads(markets_path)
     snapshot_counts: dict[str, int] = {}
     snapshot_ranges: dict[str, dict[str, str]] = {}
     for city in cities:

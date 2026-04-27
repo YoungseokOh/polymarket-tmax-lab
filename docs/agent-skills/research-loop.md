@@ -24,8 +24,10 @@
 - metadata: `artifacts/public_models/champion.json`
 - promotion rule: only `uv run pmtmax publish-champion ...` may update the public alias
 - current published model family/variant: `lgbm_emos / high_neighbor_oof`
-- trusted training inventory is market-level; the latest audit was 1,834 markets
-  materialized into 5,478 training rows across supported horizons
+- trusted training inventory is market-level; the April 27, 2026 dataset
+  promotion moved it to `2,602` snapshots in a sharded manifest. Canonical v2
+  materializes `7,794` training rows / `2,598` markets across supported
+  horizons.
 
 ## Daily Data Collection
 ```bash
@@ -288,14 +290,16 @@ Targeted data expansion follow-up:
 
 The April 26-27, 2026 Ankara, Dallas/Atlanta/Miami,
 Beijing/Chengdu/Chongqing/Madrid, discovery80, and discovery120 refreshes
-brought the local curated backlog to `2,602` snapshots. Non-canonical variant
-`historical_training_set_curated_multisource_discovery120_20260427` has
-`7,794` rows / `2,598` markets with zero all-source daily-max sentinels.
-Latest discovery120 target panel coverage is `22/33` token rows `ok`; the full
-local backlog panel has `30,615/68,550` `ok` token rows. Discovery120 did not
-hit the two-consecutive-`429` cancellation path, and follow-up discovery160
-appended `0` URLs, satisfying the no-new-backlog stop condition. Treat this as
-data expansion only; model promotion still requires a candidate-specific gate.
+brought the local curated backlog to `2,602` snapshots. That verified backlog
+was promoted into `full_training_set_snapshots.json` as a sharded manifest plus
+`full_training_set_snapshots.d/part-000..003.json`; canonical v2
+`historical_training_set` now has `7,794` rows / `2,598` markets with zero
+all-source daily-max sentinels. Canonical v2 `historical_backtest_panel` has
+`68,550` token rows with `30,615` `ok`, `37,501` `missing`, and `434` `stale`.
+Discovery120 did not hit the two-consecutive-`429` cancellation path, and
+follow-up discovery160 appended `0` URLs. A later broader discovery appended
+`22` URL-manifest entries that still need snapshot promotion. Treat this as
+dataset promotion only; model promotion still requires a candidate-specific gate.
 
 ## Autoresearch Loop
 `karpathy/autoresearch`-style exploration is now a first-class YAML candidate loop around `lgbm_emos`.

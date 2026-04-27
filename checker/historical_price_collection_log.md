@@ -4,6 +4,7 @@ Append-only operational log for `historical_real` official price-history recover
 
 | Run Date | Shard | Mode | Outcome | Markets | Ready Delta | Notes |
 | --- | --- | --- | --- | ---: | ---: | --- |
+| 2026-04-27 | `promotion / 2602` | canonical v2 panel rebuild + coverage summary | success | 2,602 | n/a | Promoted inventory panel `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel.parquet` has `68550` token rows with `ok=30615`, `missing=37501`, `stale=434`. Refreshed `artifacts/price_history_coverage.json` with `21441` request rows and `7794` decision rows; all-token-ok decision rows `2706`. |
 | 2026-04-24 | `0..24 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=179`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `25..49`. |
 | 2026-04-25 | `25..49 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=91`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `50..74`. |
 | 2026-04-25 | `50..74 / 1834` | daily price recovery agent | success | 25 | +0 | `empty=91`; token `ok` delta `+0`, decision-ready delta `+0`; next shard `75..99`. |

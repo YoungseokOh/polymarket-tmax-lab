@@ -50,7 +50,9 @@ from pmtmax.markets.inventory import (
 from pmtmax.markets.market_spec import MarketSpec
 from pmtmax.markets.repository import (
     bundled_market_snapshots,
+    count_market_snapshot_payloads,
     load_market_snapshots,
+    market_snapshot_inventory_contains,
     save_market_snapshots,
 )
 from pmtmax.markets.station_registry import lookup_city_stations, lookup_station
@@ -3689,14 +3691,7 @@ _REAL_MARKET_INVENTORIES = {
 def _count_snapshot_file(path: Path) -> int | None:
     """Count JSON snapshot records without loading large inventories into memory."""
 
-    if not path.exists():
-        return None
-    count = 0
-    marker = b'"captured_at"'
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            count += chunk.count(marker)
-    return count
+    return count_market_snapshot_payloads(path)
 
 
 def _inventory_dataset_profile(markets_path: Path | None) -> str | None:
@@ -3922,7 +3917,9 @@ def _trust_check_report(
 
     inventory_profile = _inventory_dataset_profile(markets_path)
     dataset_profile = config.app.dataset_profile
-    synthetic_marker_found = bool(markets_path is not None and _file_contains_marker(markets_path, b"synthetic_"))
+    synthetic_marker_found = bool(
+        markets_path is not None and market_snapshot_inventory_contains(markets_path, b"synthetic_")
+    )
     contamination_counts = _duckdb_real_only_contamination_counts(config.app.duckdb_path)
     parquet_contamination_counts = _parquet_real_only_contamination_counts(config.app.parquet_dir)
     issues: list[dict[str, str]] = []

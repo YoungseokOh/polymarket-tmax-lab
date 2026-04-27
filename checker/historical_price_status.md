@@ -6,30 +6,30 @@ Updated: 2026-04-27 KST
 - workspace: `historical_real`
 - dataset profile: `real_market`
 - inventory: `configs/market_inventory/full_training_set_snapshots.json`
-- inventory markets: `1,834`
-- gold panel: `data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet`
-- coverage artifact: `artifacts/workspaces/historical_real/coverage/latest_price_history_coverage.json`
+- inventory markets: `2,602`
+- canonical v2 gold panel: `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel.parquet`
+- latest coverage artifact: `artifacts/price_history_coverage.json`
 - related market/truth/forecast checker: `checker/historical_real_status.md`
-- tracked token request rows for the latest checked-in inventory recovery agent snapshot: `14,674`
-- tracked decision rows for the latest checked-in inventory recovery agent snapshot: `5,364`
+- tracked token request rows for the promoted inventory coverage snapshot: `21,441`
+- tracked decision rows for the promoted inventory coverage snapshot: `7,794`
 - targeted Ankara coverage artifact: `artifacts/targeted_historical_refresh_20260426/ankara_price_coverage_summary.json`
 - targeted Dallas/Atlanta/Miami coverage artifact: `artifacts/targeted_historical_refresh_20260426/dallas_atlanta_miami_price_coverage_summary.json`
 - targeted Beijing/Chengdu/Chongqing/Madrid coverage artifact: `artifacts/targeted_historical_refresh_20260427/east_madrid_price_coverage_summary.json`
 - targeted discovery120 coverage artifact: `artifacts/targeted_historical_refresh_20260427/discovery120_price_coverage_summary.json`
 
 ## Request Coverage
-- status `ok`: `5,213`
-- status `empty`: `9,461`
+- status `ok`: `11,651`
+- status `empty`: `9,790`
 - status `http_error`: `0`
 - status `error`: `0`
-- `empty` with `last_trade_present=true`: `9,461` / `9,461`
-- last-trade probes recorded: `9,461`
+- `empty` with `last_trade_present=true`: tracked in `artifacts/price_history_coverage.json`
+- last-trade probes recorded: tracked in `artifacts/price_history_coverage.json`
 
 ## Panel Readiness
-- token coverage `ok`: `11,886`
-- token coverage `missing`: `30,618`
-- token coverage `stale`: `0`
-- panel-ready decision rows: `1,207` / `5,364` (`22.5%`)
+- token coverage `ok`: `30,615`
+- token coverage `missing`: `37,501`
+- token coverage `stale`: `434`
+- panel-ready decision rows: `2,706` / `7,794` (`34.7%`)
 - latest backtest `priced_decision_rows`: `1,155`
 - latest backtest `PnL`: `1029.24`
 - latest backtest metrics artifact: `artifacts/workspaces/historical_real/backtests/v2/backtest_metrics_real_history.json`
@@ -37,9 +37,20 @@ Updated: 2026-04-27 KST
 
 ## Current Judgment
 - Daily price agent runs one shard at a time (`25` markets default) and keeps `backfill-price-history -> materialize-backtest-panel -> summarize-price-history-coverage` serialized.
-- Latest successful shard: `475..499 / 1834`; decision-ready delta `+0`.
+- Latest successful recovery-agent shard was `475..499 / 1834` before inventory promotion. After promotion, the checked-in inventory denominator is `2,602`, so the next recovery turn should refresh shard accounting against the promoted inventory before comparing deltas.
 - Dominant blocker: official `/prices-history` empties still outweigh recovered rows, and many empties show `last_trade_present`, so retention-limited history remains the main constraint.
-- April 27 curated market/truth/forecast collection is now tracked in `checker/historical_real_status.md`: `2,602` curated snapshots are forecast/truth-ready, and the current non-canonical gold variant materializes `2,598` markets.
+- April 27 promotion is tracked in `checker/historical_real_status.md`: `2,602` snapshots are now the checked-in training inventory, canonical v2 training materializes `2,598` markets, and canonical v2 panel has `68,550` token rows.
+
+## Latest Canonical Promotion Panel
+- Scope: promoted `configs/market_inventory/full_training_set_snapshots.json` (`2,602` snapshots).
+- Training set:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set.parquet`
+  has `7,794` rows / `2,598` markets.
+- Backtest panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel.parquet`
+  has `68,550` token rows with coverage `ok=30,615`, `missing=37,501`, `stale=434`.
+- Coverage summary:
+  `artifacts/price_history_coverage.json` has `21,441` request rows and `68,550` panel detail rows.
 
 ## Latest Targeted Price Backfill
 - Scope: `artifacts/targeted_historical_refresh_20260427/discovery120_snapshots.json` (`1` Tokyo market).

@@ -109,6 +109,41 @@ def test_trust_check_rejects_synthetic_inventory(tmp_path: Path) -> None:
     assert "synthetic_inventory_forbidden" in issue_checks
 
 
+def test_trust_check_counts_sharded_training_inventory(tmp_path: Path) -> None:
+    shard_dir = tmp_path / "full_training_set_snapshots.d"
+    shard_dir.mkdir()
+    (shard_dir / "part-000.json").write_text(
+        '[{"captured_at": "2026-01-01T00:00:00Z", "market": {"id": "1"}}]',
+        encoding="utf-8",
+    )
+    (shard_dir / "part-001.json").write_text(
+        '[{"captured_at": "2026-01-02T00:00:00Z", "market": {"id": "2"}}]',
+        encoding="utf-8",
+    )
+    inventory = tmp_path / "full_training_set_snapshots.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "format": "pmtmax.market_snapshots.sharded.v1",
+                "snapshot_count": 2,
+                "shards": [
+                    {"path": "full_training_set_snapshots.d/part-000.json", "snapshot_count": 1},
+                    {"path": "full_training_set_snapshots.d/part-001.json", "snapshot_count": 1},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _trust_check_report(
+        config=_trust_config(tmp_path, workspace_name="historical_real", dataset_profile="real_market"),
+        markets_path=inventory,
+    )
+
+    assert report["ok"] is True
+    assert report["inventory_rows"] == 2
+
+
 def test_trust_check_rejects_synthetic_inventory_even_with_matching_legacy_profile(tmp_path: Path) -> None:
     inventory = tmp_path / "synthetic_historical_snapshots.json"
     inventory.write_text('[{"captured_at": "2026-01-01T00:00:00Z"}]')

@@ -7,10 +7,27 @@ Updated: 2026-04-27 KST
 - dataset profile: `real_market`
 - curated inventory: `configs/market_inventory/historical_temperature_snapshots.json`
 - curated snapshots: `2,602`
-- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,604` URLs)
-- checked-in training baseline inventory: `configs/market_inventory/full_training_set_snapshots.json` (`1,834` snapshots)
+- event URL manifest: `configs/market_inventory/historical_temperature_event_urls.json` (`2,626` URLs)
+- checked-in training inventory: `configs/market_inventory/full_training_set_snapshots.json` (`2,602` snapshots; sharded manifest)
+- checked-in training shards: `configs/market_inventory/full_training_set_snapshots.d/part-000..003.json`
+- canonical v2 training set: `data/workspaces/historical_real/parquet/gold/v2/historical_training_set.parquet`
+- canonical v2 backtest panel: `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel.parquet`
 - readiness artifact: `artifacts/targeted_historical_refresh_20260427/discovery120_dataset_readiness.json`
 - forecast availability artifact: `artifacts/forecast_availability.json`
+
+## Latest Promotion
+- On 2026-04-27, promoted the verified curated `2,602`-snapshot backlog to the checked-in training inventory. The inventory is stored as a small sharded manifest plus four shard files to stay under GitHub's `100MB` single-file limit.
+- Promotion candidate:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_training_set_promotion_candidate_20260427.parquet`
+  has `7,794` rows / `2,598` markets, all three supported horizons, and matches the previous discovery120 variant on all business columns. Differences are limited to run metadata (`run_id`, `data_version`, `created_at`).
+- Candidate panel:
+  `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel_promotion_candidate_20260427.parquet`
+  has `68,550` token rows with coverage `ok=30,615`, `missing=37,501`, `stale=434`.
+- Canonical v2 training set was refreshed with `--allow-canonical-overwrite`: `7,794` rows / `2,598` markets, horizon counts `2,598` each for `market_open`, `morning_of`, and `previous_evening`.
+- Canonical v2 panel was refreshed from the promoted v2 training set: `68,550` token rows / `2,598` markets with coverage `ok=30,615`, `missing=37,501`, `stale=434`.
+- Trust check after promotion: `ok=true`, `inventory_rows=2602`, `v2_dataset_rows=7794`, no synthetic or parquet contamination. Warning remains for a stale DuckDB lock file.
+- Recovery backup observed: `artifacts/recovery/20260427T122129Z/manifests/warehouse_manifest.json`.
+- Latest `22` newly discovered event URLs remain URL-manifest only and are not included in this `2,602`-snapshot promotion.
 
 ## Latest Collection
 - Discovery120 expansion on 2026-04-27 scanned `2,934` supported closed events, fetched `2` new candidate pages, classified `72` fetched events, and appended `1` truth-ready URL: Tokyo `1`.
@@ -27,13 +44,13 @@ Updated: 2026-04-27 KST
 - `readiness_status`: `ready=2,598`, `gold_missing=4`.
 - `settlement_eligible=true`: `5`; `settlement_eligible=false`: `2,597`.
 - `truth_status`: `ok=2,602`.
-- Current non-canonical gold row sum: `7,794` rows from `2,598` markets; market ids `282535`, `285758`, `289186`, and `412000` currently materialize no gold rows.
+- Current canonical v2 gold row sum: `7,794` rows from `2,598` markets; market ids `282535`, `285758`, `289186`, and `412000` currently materialize no gold rows.
 - `artifacts/forecast_availability.json` summary rows: `645`; recommended rows: `318`; min/max availability ratio `0.0/1.0`, with the `0.0` rows limited to old `kma_ldps` London/NYC availability records.
 
 ## Current Judgment
-- The curated `2,602`-market surface is fully forecast/truth-ready for research-public modeling. The current non-canonical gold variant is ready for `2,598` markets after gold materialization skips four no-row markets.
-- The canonical checked-in training set and panel are not automatically replaced. Use variant `--output-name` values first and only promote canonical after evaluation.
-- Discovery120 added one truth-ready URL after expansion; follow-up discovery160 appended `0` URLs, so historical collection should stop here until Gamma exposes new closed truth-ready markets or source-lag entries become ready.
+- The curated `2,602`-snapshot surface is now the checked-in training inventory. Canonical v2 train/panel outputs have been promoted from the verified discovery120 surface.
+- The legacy gold path still contains the older `5,478` row / `1,826` market dataset; new promotion-sensitive work should use the canonical v2 path unless a legacy command explicitly requires the old path.
+- Discovery120 added one truth-ready URL after expansion, and the later broader discovery appended `22` URL-manifest entries but did not complete snapshot promotion. Those `22` URLs are next-round backlog.
 - `weather_train` remains separate and should wait for the Open-Meteo free-path limit cooldown before continuing.
 
 ## Latest Discovery120 Expansion

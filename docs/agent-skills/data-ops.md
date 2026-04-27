@@ -99,14 +99,18 @@ inventory라서 자동으로 sync되지 않는다. training inventory를 갱신�
   pretraining. It is not a Polymarket dataset and must not contain market ids,
   market rule JSON, CLOB books, price history, or champion publish evidence.
 - `full_training_set_snapshots.json` currently represents the trusted checked-in
-  training market inventory. The latest audit count was 1,834 market snapshots.
-- `historical_training_set.parquet` materializes model rows from that inventory
-  and supported decision horizons. The latest trusted build had 5,478 training rows.
-- `historical_temperature_snapshots.json` is the curated collection backlog, not
-  the automatically-used training set. Its latest local audit count was `2,602`
-  snapshots after the April 27, 2026 discovery120 expansion. Follow-up
-  discovery160 appended `0` URLs, so the latest collection turn stopped on the
-  no-new-truth-ready-backlog condition.
+  training market inventory. It was promoted on April 27, 2026 to the verified
+  `2,602`-snapshot curated backlog and is stored as a sharded manifest plus
+  `full_training_set_snapshots.d/part-000..003.json`.
+- Canonical v2 `historical_training_set.parquet` now materializes `7,794` rows /
+  `2,598` markets from that inventory across the three supported decision
+  horizons. The legacy gold path may still contain the older `5,478` row /
+  `1,826` market dataset.
+- `historical_temperature_snapshots.json` remains the curated collection
+  backlog. It currently matches the promoted `2,602`-snapshot training
+  inventory. Follow-up discovery160 appended `0` URLs, while a later broader
+  discovery appended `22` URL-manifest entries that still need snapshot
+  promotion.
 - More real data can be collected. The hard rule is that new markets must be
   closed, parseable, truth-ready, forecast-backed, and intentionally curated
   before replacing the checked-in training inventory.

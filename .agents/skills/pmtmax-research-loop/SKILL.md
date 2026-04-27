@@ -121,14 +121,16 @@ Use this skill for the research and trading simulation loop.
 - April 27, 2026 targeted data expansion:
   Ankara, Dallas/Atlanta/Miami, Beijing/Chengdu/Chongqing/Madrid, discovery80,
   and discovery120 gap-fills brought the local curated backlog to `2,602`
-  snapshots. Non-canonical variant
-  `historical_training_set_curated_multisource_discovery120_20260427` has
-  `7,794` rows / `2,598` markets and zero all-source daily-max sentinels.
-  Latest discovery120 target panel coverage is `22/33` `ok`; full local backlog
-  panel coverage is `30,615/68,550` `ok`. No two-consecutive-`429`
-  cancellation occurred in discovery120, and follow-up discovery160 appended
-  `0` URLs, satisfying the no-new-backlog stop condition. This is data
-  expansion, not a model promotion.
+  snapshots. That verified backlog was promoted into
+  `full_training_set_snapshots.json` as a sharded manifest plus
+  `full_training_set_snapshots.d/part-000..003.json`; canonical v2
+  `historical_training_set` now has `7,794` rows / `2,598` markets and zero
+  all-source daily-max sentinels. Canonical v2 `historical_backtest_panel` has
+  `68,550` token rows with `30,615` `ok`, `37,501` `missing`, and `434` `stale`. No
+  two-consecutive-`429` cancellation occurred in discovery120, and follow-up
+  discovery160 appended `0` URLs. A later broader discovery appended `22`
+  URL-manifest entries that still need snapshot promotion. This is dataset
+  promotion, not model promotion.
 - Quick eval: `uv run python scripts/quick_eval.py` (champion baseline + OOF variants).
 - observation weather-station loop: `observation-report`, `observation-shadow`, `observation-daemon`, `approve-live-candidate`.
 - zero-fill paper diagnostics: `paper-multimodel-report`, `execution-sensitivity-report`, `market-bottleneck-report`.
