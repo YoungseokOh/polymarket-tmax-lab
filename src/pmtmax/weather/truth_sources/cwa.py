@@ -42,7 +42,11 @@ class CwaTruthSource(TruthSource):
             )
 
         payload = self._fetch_codis_payload(spec.station_id, target_date)
-        value = self._parse_codis_daily_max(payload["response"], target_date)
+        response_payload = payload.get("response")
+        if not isinstance(response_payload, dict):
+            msg = "CWA CODiS response payload is malformed"
+            raise ValueError(msg)
+        value = self._parse_codis_daily_max(response_payload, target_date)
         observation = ObservationRecord(
             source="Central Weather Administration",
             station_id=spec.station_id,
@@ -103,10 +107,17 @@ class CwaTruthSource(TruthSource):
             msg = f"CWA CODiS request failed: {payload.get('message')}"
             raise RuntimeError(msg)
 
-        for station_payload in payload.get("data", []):
+        data_rows = payload.get("data", [])
+        if not isinstance(data_rows, list):
+            msg = "CWA CODiS payload data is malformed"
+            raise ValueError(msg)
+        for station_payload in data_rows:
             if not isinstance(station_payload, dict):
                 continue
-            for row in station_payload.get("dts", []):
+            dts_rows = station_payload.get("dts", [])
+            if not isinstance(dts_rows, list):
+                continue
+            for row in dts_rows:
                 if not isinstance(row, dict):
                     continue
                 data_date = row.get("DataDate")

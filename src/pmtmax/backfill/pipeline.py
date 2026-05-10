@@ -1829,13 +1829,15 @@ class BackfillPipeline:
                         continue
 
                     # Determine issue_time from the latest precomputed timestamp.
-                    issue_time_candidates = [
-                        selected_features[m].get("latest_issue_time_utc")
-                        for m in selected_models
-                    ]
-                    issue_time_candidates = [t for t in issue_time_candidates if t is not None and not (hasattr(t, 'dtype') and pd.isna(t))]
+                    issue_time_candidates: list[pd.Timestamp] = []
+                    for selected_model in selected_models:
+                        candidate = selected_features[selected_model].get("latest_issue_time_utc")
+                        if candidate is None or pd.isna(candidate):
+                            continue
+                        issue_time_candidates.append(pd.Timestamp(candidate))
                     issue_time: pd.Timestamp = (
-                        pd.Timestamp(max(issue_time_candidates)) if issue_time_candidates
+                        max(issue_time_candidates)
+                        if issue_time_candidates
                         else pd.Timestamp(decision_point["issue_time_utc"])
                     )
 
@@ -1867,14 +1869,14 @@ class BackfillPipeline:
                     }
 
                     # Populate model features from the precomputed lookup.
-                    for model in self.models or []:
-                        feat = selected_features.get(model)
-                        if not feat:
+                    for model_name in self.models or []:
+                        selected_feature = selected_features.get(model_name)
+                        if selected_feature is None:
                             continue
-                        raw_features = _materializable_features(_raw_forecast_feature_map(feat))
+                        raw_features = _materializable_features(_raw_forecast_feature_map(selected_feature))
                         features = _convert_celsius_features(raw_features, spec.unit)
-                        for key, value in features.items():
-                            row[f"{model}_{key}"] = value
+                        for feature_key, value in features.items():
+                            row[f"{model_name}_{feature_key}"] = value
                         if "model_daily_max" in features and "model_daily_max" not in row:
                             row["model_daily_max"] = features["model_daily_max"]
 
@@ -2048,7 +2050,7 @@ class BackfillPipeline:
             }
         )
         package = build_hourly_feature_frame({"hourly": payload_frame.to_dict(orient="list")})
-        features = target_day_features(package, target_date)
+        features: dict[str, float | None] = dict(target_day_features(package, target_date))
         return _materializable_features(features) if _forecast_features_are_valid(features) else {}
 
     def _build_sequence_rows(

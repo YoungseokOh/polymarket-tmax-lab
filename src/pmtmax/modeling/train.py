@@ -6,7 +6,7 @@ import json
 import pickle
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -101,23 +101,24 @@ def _resolve_lgbm_training_variant(
     """Resolve one built-in, promoted, or ephemeral LGBM variant."""
 
     if variant_config is not None:
-        effective_variant = variant or variant_config.name
-        if effective_variant is None:
+        effective_variant_obj = variant or variant_config.name
+        if effective_variant_obj is None:
             msg = "LGBM external variant configs must define a candidate name."
             raise ValueError(msg)
+        effective_variant = cast(str, effective_variant_obj)
         if variant_config.name != effective_variant:
             variant_config = LgbmEMOSVariantConfig(**{**asdict(variant_config), "name": effective_variant})
         return effective_variant, variant_config
 
-    effective_variant = require_supported_variant("lgbm_emos", variant)
-    if effective_variant is None:
+    requested_variant = require_supported_variant("lgbm_emos", variant)
+    if requested_variant is None:
         resolved = resolve_lgbm_emos_variant(None)
         return None, resolved
 
-    promoted = load_promoted_lgbm_emos_variant(effective_variant)
+    promoted = load_promoted_lgbm_emos_variant(requested_variant)
     if promoted is not None:
-        return effective_variant, promoted
-    return effective_variant, resolve_lgbm_emos_variant(effective_variant)
+        return requested_variant, promoted
+    return requested_variant, resolve_lgbm_emos_variant(requested_variant)
 
 
 def sanitize_model_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -290,8 +291,8 @@ def train_model(
     features = default_feature_names(clean_frame)
     model: Any
     if model_name == "gaussian_emos":
-        resolved_variant = resolve_gaussian_emos_variant(variant)
-        model = GaussianEMOSModel(features, variant=resolved_variant.name)
+        gaussian_variant = resolve_gaussian_emos_variant(variant)
+        model = GaussianEMOSModel(features, variant=gaussian_variant.name)
         model.fit(fit_frame)
     elif model_name == "det2prob_nn":
         try:
@@ -305,24 +306,24 @@ def train_model(
                 raise RuntimeError(msg) from exc
             raise
 
-        resolved_variant = resolve_det2prob_variant(variant)
-        model = Det2ProbNNModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        det2prob_variant = resolve_det2prob_variant(variant)
+        model = Det2ProbNNModel(features, split_policy=split_policy, variant=det2prob_variant.name)
         model.fit(fit_frame)
     elif model_name == "tuned_ensemble":
-        resolved_variant = resolve_tuned_ensemble_variant(variant)
-        model = TunedEnsembleModel(features, split_policy=split_policy, variant=resolved_variant.name)
+        tuned_variant = resolve_tuned_ensemble_variant(variant)
+        model = TunedEnsembleModel(features, split_policy=split_policy, variant=tuned_variant.name)
         model.fit(fit_frame)
     elif model_name == "lgbm_emos":
-        resolved_variant_name, resolved_variant = _resolve_lgbm_training_variant(variant, variant_config)
+        resolved_variant_name, lgbm_variant = _resolve_lgbm_training_variant(variant, variant_config)
         model = LgbmEMOSModel(
             features,
             split_policy=split_policy,
             variant=resolved_variant_name,
-            variant_config=resolved_variant,
+            variant_config=lgbm_variant,
         )
         model.fit(fit_frame)
         if variant_config is not None or variant is not None:
-            variant = resolved_variant.name
+            variant = lgbm_variant.name
     else:
         msg = f"Unsupported trainable model: {model_name}"
         raise ValueError(msg)
