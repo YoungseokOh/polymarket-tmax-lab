@@ -1727,18 +1727,26 @@ class BackfillPipeline:
                 model: str,
                 horizon: str,
                 lookup: dict[tuple[str, str, str, str], dict[str, object]],
+                decision_issue_time: object,
             ) -> tuple[dict[str, object], str] | None:
                 candidates = (
                     ("single_run", horizon),
-                    ("historical_forecast", "__historical__"),
                     ("fixture", "__historical__"),
+                    ("historical_forecast", "__historical__"),
                 )
                 for endpoint_kind, dh_key in candidates:
                     feat = lookup.get((market_id, model, endpoint_kind, dh_key))
                     if not feat:
                         continue
-                    if _forecast_features_are_valid(_raw_forecast_feature_map(feat)):
-                        return feat, endpoint_kind
+                    if not _forecast_features_are_valid(_raw_forecast_feature_map(feat)):
+                        continue
+                    if endpoint_kind == "historical_forecast":
+                        latest_issue_time = feat.get("latest_issue_time_utc")
+                        if latest_issue_time is None or pd.isna(latest_issue_time):
+                            continue
+                        if pd.Timestamp(latest_issue_time) > pd.Timestamp(decision_issue_time):
+                            continue
+                    return feat, endpoint_kind
                 return None
 
             truth_by_market: dict[str, pd.Series] = {}
@@ -1800,7 +1808,13 @@ class BackfillPipeline:
                     selected_sources: dict[str, str] = {}
                     for model in (self.models or []):
                         # Prefer single_run for this horizon, fall back to historical_forecast/fixture.
-                        selected = _select_feature_record(mid, model, horizon, feature_lookup)
+                        selected = _select_feature_record(
+                            mid,
+                            model,
+                            horizon,
+                            feature_lookup,
+                            decision_point["issue_time_utc"],
+                        )
                         if selected is not None:
                             feat, endpoint_kind = selected
                             selected_models.append(model)

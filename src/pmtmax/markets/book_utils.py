@@ -34,8 +34,15 @@ def book_snapshot_from_payload(
 
     if payload is None:
         return missing_book(snapshot, outcome_label, token_id)
-    bids = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("bids", [])[:5]]
-    asks = [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("asks", [])[:5]]
+    bids = sorted(
+        [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("bids", [])],
+        key=lambda level: level.price,
+        reverse=True,
+    )[:5]
+    asks = sorted(
+        [BookLevel(price=float(level["price"]), size=float(level["size"])) for level in payload.get("asks", [])],
+        key=lambda level: level.price,
+    )[:5]
     timestamp = payload.get("timestamp")
     parsed_ts = None
     if timestamp:

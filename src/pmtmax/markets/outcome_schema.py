@@ -21,8 +21,14 @@ UPPER_RE = re.compile(
     r"^\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*or\s*(?:higher|above|over)\s*$",
     re.I,
 )
-LOWER_BOUND_RE = re.compile(r"^\s*(?:<|<=|≤)\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$", re.I)
-UPPER_BOUND_RE = re.compile(r"^\s*(?:>|>=|≥)\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$", re.I)
+LOWER_BOUND_RE = re.compile(
+    r"^\s*(?P<operator><=|≤|<)\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$",
+    re.I,
+)
+UPPER_BOUND_RE = re.compile(
+    r"^\s*(?P<operator>>=|≥|>)\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$",
+    re.I,
+)
 EXACT_RE = re.compile(r"^\s*(?P<value>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$", re.I)
 RANGE_RE = re.compile(
     r"^\s*(?P<low>-?\d+(?:\.\d+)?)\s*-\s*(?P<high>-?\d+(?:\.\d+)?)\s*°?\s*(?P<unit>[CF])?\s*$",
@@ -86,14 +92,16 @@ def parse_outcome_label(label: str, default_unit: Literal["C", "F"] | None = Non
             msg = f"Unsupported outcome label: {label}"
             raise ValueError(msg)
         value = float(match.group("value"))
-        return OutcomeBin(label=stripped, upper=value, upper_inclusive=False)
+        operator = match.group("operator")
+        return OutcomeBin(label=stripped, upper=value, upper_inclusive=operator in {"<=", "≤"})
 
     if match := UPPER_BOUND_RE.match(normalized):
         if _resolved_unit(match, default_unit) is None:
             msg = f"Unsupported outcome label: {label}"
             raise ValueError(msg)
         value = float(match.group("value"))
-        return OutcomeBin(label=stripped, lower=value, lower_inclusive=False)
+        operator = match.group("operator")
+        return OutcomeBin(label=stripped, lower=value, lower_inclusive=operator in {">=", "≥"})
 
     if match := RANGE_RE.match(normalized):
         if _resolved_unit(match, default_unit) is None:

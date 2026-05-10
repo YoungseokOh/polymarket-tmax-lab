@@ -70,3 +70,13 @@ def test_hko_truth_source_restores_exact_month_payload_from_official_archive() -
     assert bundle.observation.daily_max == 22.4
     assert bundle.source_provenance == "official_archive"
     assert bundle.archive_source_url is not None
+    cdx_call = next(call for call in http.calls if "web.archive.org/cdx/search/cdx" in str(call["url"]))
+    assert cdx_call["params"] == {
+        "url": "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=CLMMAXT&station=HKA&year=2026&month=3&rformat=json&lang=en",
+        "output": "json",
+        "fl": "timestamp,original,statuscode,mimetype",
+        "filter": "statuscode:200",
+        "limit": "10",
+        "from": "202603",
+        "to": "202604",
+    }

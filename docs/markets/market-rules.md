@@ -54,9 +54,11 @@
   - Taipei exact-public markets: CWA CODiS current-month station report for the same `466920` station
   - Seoul research-public markets: AMO `AIR_CALP` current-month same-airport feed for RKSI
   - aviation `METAR` is a fallback after the documented source-specific path, not a silent replacement for it
-- The bin mapper expands labels to settlement intervals using the market precision rule:
+- The bin mapper expands labels to non-overlapping whole-degree settlement intervals:
   - `8°C` -> `[7.5, 8.5)`
-  - `70-71°F` -> `[34.0? no]` not generic conversion; it becomes the rule-specific two-degree Fahrenheit settlement interval centered on the labeled integer endpoints.
+  - `70-71°F` -> `[69.5, 71.5)`
+  - catch-alls meet adjacent bins at the same half-degree boundary, so one realized value cannot map to two outcomes.
+- Range precision detection is based on parsed outcome intervals, not raw hyphen characters; negative labels such as `-1°C or below` are not treated as range markets, while Unicode-dash ranges such as `47–48°F` are.
 
 ## Examples
 - Seoul: Wunderground / Incheon Intl Airport / Celsius / whole degree

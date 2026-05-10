@@ -18,7 +18,7 @@ dependencies = [
   "jinja2>=3.1.6",
   "lightgbm>=4.6.0",
   "matplotlib>=3.10.1",
-  "numpy>=2.2.4",
+  "numpy>=1.26.4,<2.0",
   "orjson>=3.10.15",
   "pandas>=2.2.3",
   "polars>=1.26.0",
@@ -33,7 +33,6 @@ dependencies = [
   "scikit-learn>=1.6.1",
   "scipy>=1.15.2",
   "tenacity>=9.0.0",
-  "torch==2.4.1",
   "typer>=0.15.2",
   "websockets>=15.0.1",
   "xgboost>=2.1.4",
@@ -51,20 +50,15 @@ dev = [
   "ruff>=0.11.2",
   "types-pyyaml>=6.0.12.20241230",
 ]
+advanced = [
+  "torch>=2.2,<2.5; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+]
 
 [project.scripts]
 pmtmax = "pmtmax.cli.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pmtmax"]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu118" }
-
-[[tool.uv.index]]
-name = "pytorch-cu118"
-url = "https://download.pytorch.org/whl/cu118"
-explicit = true
 
 [tool.ruff]
 line-length = 100

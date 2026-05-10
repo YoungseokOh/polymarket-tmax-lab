@@ -15,7 +15,6 @@ from pmtmax.markets.rule_parser import parse_market_spec
 from pmtmax.storage.schemas import MarketSnapshot
 from pmtmax.utils import dump_json, load_json
 
-
 SHARDED_MARKET_SNAPSHOTS_FORMAT = "pmtmax.market_snapshots.sharded.v1"
 
 

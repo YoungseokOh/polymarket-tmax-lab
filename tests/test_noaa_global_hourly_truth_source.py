@@ -130,6 +130,27 @@ def test_noaa_truth_source_fetches_hourly_rows_and_converts_to_market_unit() -> 
     }
 
 
+def test_noaa_truth_source_respects_explicit_timestamp_offsets() -> None:
+    class _OffsetHttp:
+        def get_json(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> list[dict[str, str]]:  # noqa: ARG002
+            return [
+                {"DATE": "2025-12-10T23:30:00+14:00", "TMP": "+0030,1"},
+                {"DATE": "2025-12-11T12:00:00+09:00", "TMP": "+0100,1"},
+            ]
+
+    spec = example_market_specs(["Seoul"])[0].model_copy(
+        update={
+            "public_truth_source_name": "NOAA Global Hourly",
+            "public_truth_station_id": "RKSI",
+        }
+    )
+    source = NoaaGlobalHourlyTruthSource(_OffsetHttp())  # type: ignore[arg-type]
+
+    bundle = source.fetch_observation_bundle(spec, date(2025, 12, 11))
+
+    assert bundle.observation.daily_max == pytest.approx(10.0)
+
+
 def test_noaa_truth_source_raises_lag_error_when_archive_lags_target_date() -> None:
     spec = example_market_specs(["Seoul"])[0].model_copy(update={"target_local_date": date(2025, 9, 1)})
     source = NoaaGlobalHourlyTruthSource(_LaggingHttp())  # type: ignore[arg-type]

@@ -85,6 +85,10 @@ class HkoTruthSource(TruthSource):
 
         params = self._month_params(station_id, target_date)
         official_url = self._request_url(HKO_OPEN_DATA_URL, params)
+        if target_date.month == 12:
+            next_month = date(target_date.year + 1, 1, 1)
+        else:
+            next_month = date(target_date.year, target_date.month + 1, 1)
         captures = cast(
             list[list[str]] | list[object],
             self.http.get_json(
@@ -96,6 +100,7 @@ class HkoTruthSource(TruthSource):
                     "filter": "statuscode:200",
                     "limit": "10",
                     "from": target_date.strftime("%Y%m"),
+                    "to": next_month.strftime("%Y%m"),
                 },
                 use_cache=self.use_cache,
             ),

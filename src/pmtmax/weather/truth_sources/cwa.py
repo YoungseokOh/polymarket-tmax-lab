@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from calendar import monthrange
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
@@ -68,14 +67,21 @@ class CwaTruthSource(TruthSource):
         return None
 
     def _fetch_codis_payload(self, station_id: str, target_date: date) -> dict[str, object]:
-        month_end = monthrange(target_date.year, target_date.month)[1]
+        month_start = target_date.replace(day=1)
+        if target_date.month == 12:
+            next_month_start = date(target_date.year + 1, 1, 1)
+        else:
+            next_month_start = date(target_date.year, target_date.month + 1, 1)
+        # CODiS range semantics are not documented consistently; use the first
+        # instant of the next month so an exclusive ``end`` still includes the
+        # final target-month day.
         request_payload = {
             "type": "report_month",
             "stn_type": "cwb",
             "stn_ID": station_id,
             "more": "",
-            "start": f"{target_date:%Y-%m}-01T00:00:00",
-            "end": f"{target_date:%Y-%m}-{month_end:02d}T00:00:00",
+            "start": f"{month_start:%Y-%m-%d}T00:00:00",
+            "end": f"{next_month_start:%Y-%m-%d}T00:00:00",
         }
         response_payload = cast(dict[str, object], self.http.post_json(CODIS_STATION_API_URL, data=request_payload, use_cache=True))
         return {"request": request_payload, "response": response_payload}

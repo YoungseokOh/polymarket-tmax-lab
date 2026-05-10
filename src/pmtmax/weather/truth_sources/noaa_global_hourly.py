@@ -171,9 +171,10 @@ class NoaaGlobalHourlyTruthSource(TruthSource):
             if not isinstance(timestamp, str):
                 continue
             try:
-                observed_utc = datetime.fromisoformat(timestamp).replace(tzinfo=UTC)
+                observed = datetime.fromisoformat(timestamp)
             except ValueError:
                 continue
+            observed_utc = observed.replace(tzinfo=UTC) if observed.tzinfo is None else observed.astimezone(UTC)
             if observed_utc.astimezone(timezone).date() != target_date:
                 continue
             parsed = self._parse_tmp(row.get("TMP"))

@@ -25,6 +25,8 @@ def target_day_features(package: dict[str, Any], target_date: date) -> dict[str,
     """Build direct-daily-max predictors from hourly target-day slices."""
 
     frame: pd.DataFrame = package["frame"]
+    if frame.empty or "date" not in frame or "temperature_2m" not in frame:
+        return {}
     subset = frame.loc[frame["date"] == target_date].copy()
     if subset.empty:
         return {}
@@ -48,6 +50,8 @@ def summarize_hourly_trajectory(package: dict[str, Any], target_date: date) -> n
     """Return hourly temperature trajectory for the target local date."""
 
     frame: pd.DataFrame = package["frame"]
+    if frame.empty or "date" not in frame or "temperature_2m" not in frame:
+        return np.array([], dtype=float)
     subset = frame.loc[frame["date"] == target_date].copy()
     if subset.empty:
         return np.array([], dtype=float)

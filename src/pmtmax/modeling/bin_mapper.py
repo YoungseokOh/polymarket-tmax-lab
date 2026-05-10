@@ -9,13 +9,17 @@ from pmtmax.modeling.sampling import normal_cdf
 
 
 def _resolution_bounds(bin_spec: OutcomeBin, precision: PrecisionRule) -> tuple[float, float]:
-    half_step = precision.step / 2.0
+    # Market labels resolve against whole-degree official readings.  A 2-degree
+    # label such as ``35-36°F`` therefore covers readings that round/settle to
+    # either 35 or 36, not the full ``step`` width on both sides.  Expanding by
+    # ``precision.step / 2`` would make adjacent labels overlap.
+    settlement_half_step = 0.5 if precision.rounding in {"whole_degree", "range_bin"} else precision.step / 2.0
     if bin_spec.lower is not None and bin_spec.upper is not None and bin_spec.lower == bin_spec.upper:
         center = bin_spec.lower
-        return center - half_step, center + half_step
+        return center - settlement_half_step, center + settlement_half_step
 
-    lower = -np.inf if bin_spec.lower is None else bin_spec.lower - half_step
-    upper = np.inf if bin_spec.upper is None else bin_spec.upper + half_step
+    lower = -np.inf if bin_spec.lower is None else bin_spec.lower - settlement_half_step
+    upper = np.inf if bin_spec.upper is None else bin_spec.upper + settlement_half_step
     return lower, upper
 
 

@@ -6,7 +6,7 @@ daily-max forecasts, calibrates them, and maps them onto Polymarket outcomes.
 
 ## Key Modules
 - `baselines/`: public stable baseline is `gaussian_emos`
-- `advanced/`: public stable candidates include `tuned_ensemble` (contextual mixture-of-experts), `det2prob_nn` (mixture-density NN), and `lgbm_emos`; older scaffolds may remain in-tree but are not part of the supported registry
+- `advanced/`: public stable candidates include `tuned_ensemble` (contextual mixture-of-experts), `det2prob_nn` (torch-backed NN), and `lgbm_emos`; older scaffolds may remain in-tree but are not part of the supported registry
 - `train.py`: model registry, feature selection, artifact serialization
 - `predict.py`: model loading, forecast generation, and outcome-probability mapping
 - `design_matrix.py`: shared contextual featurization for availability, missingness, city, horizon, and seasonality
@@ -30,6 +30,7 @@ daily-max forecasts, calibrates them, and maps them onto Polymarket outcomes.
 ## What To Keep Aligned
 - Baseline and advanced model names must stay in sync with CLI defaults and docs.
 - `train-weather-pretrain` runs only under the `weather_real` profile; `train-advanced` remains a `real_market` Polymarket adaptation/fine-tune path and can record `--pretrained-weather-model` lineage.
+- The base install is torch-free for macOS/CPU portability; `det2prob_nn` imports torch lazily and requires the optional advanced runtime.
 - The public registry must stay aligned with `configs/base.yaml` benchmark candidates and champion publishing.
 - Current public champion docs should name the exact model family and variant; the current alias is `lgbm_emos / high_neighbor_oof`.
 - Probability mapping logic must remain consistent with `MarketSpec.outcome_schema`.

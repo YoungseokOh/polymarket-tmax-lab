@@ -12,11 +12,6 @@ import numpy as np
 import pandas as pd
 
 from pmtmax.markets.market_spec import MarketSpec
-from pmtmax.modeling.advanced.det2prob_nn import (
-    Det2ProbNNModel,
-    resolve_det2prob_variant,
-    supported_det2prob_variants,
-)
 from pmtmax.modeling.advanced.lgbm_emos import (
     LgbmEMOSModel,
     LgbmEMOSVariantConfig,
@@ -67,6 +62,13 @@ def supported_ablation_variants(model_name: str) -> tuple[str, ...]:
     if model_name == "tuned_ensemble":
         return supported_tuned_ensemble_variants()
     if model_name == "det2prob_nn":
+        try:
+            from pmtmax.modeling.advanced.det2prob_nn import supported_det2prob_variants
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                return ()
+            raise
+
         return supported_det2prob_variants()
     if model_name == "gaussian_emos":
         return supported_gaussian_emos_variants()
@@ -292,6 +294,17 @@ def train_model(
         model = GaussianEMOSModel(features, variant=resolved_variant.name)
         model.fit(fit_frame)
     elif model_name == "det2prob_nn":
+        try:
+            from pmtmax.modeling.advanced.det2prob_nn import (
+                Det2ProbNNModel,
+                resolve_det2prob_variant,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                msg = "det2prob_nn requires the optional torch-based advanced dependency set."
+                raise RuntimeError(msg) from exc
+            raise
+
         resolved_variant = resolve_det2prob_variant(variant)
         model = Det2ProbNNModel(features, split_policy=split_policy, variant=resolved_variant.name)
         model.fit(fit_frame)

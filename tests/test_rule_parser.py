@@ -107,6 +107,37 @@ def test_parse_toronto_rules_from_inline_market_description() -> None:
     assert spec.truth_source_key() == "wunderground"
 
 
+def test_negative_temperature_labels_do_not_force_range_precision() -> None:
+    market = {
+        **EXAMPLE_MARKETS["Seoul"],
+        "id": "example-negative-seoul",
+        "slug": "highest-temperature-in-seoul-on-january-5-2026",
+        "question": "Highest temperature in Seoul on January 5?",
+        "outcomes": '["-1°C or below", "0°C", "1°C", "2°C or higher"]',
+    }
+    description = _read_fixture("seoul_rules.txt").replace("11 Dec '25", "5 Jan '26")
+
+    spec = parse_market_spec(description, market=market)
+
+    assert spec.precision_rule.step == 1.0
+    assert spec.precision_rule.rounding == "whole_degree"
+
+
+def test_unicode_dash_range_labels_force_range_precision() -> None:
+    market = {
+        **EXAMPLE_MARKETS["NYC"],
+        "id": "example-nyc-en-dash",
+        "slug": "highest-temperature-in-nyc-on-december-20-2025",
+        "question": "Highest temperature in NYC on December 20?",
+        "outcomes": '["34°F or below", "35–36°F", "37–38°F", "39°F or higher"]',
+    }
+
+    spec = parse_market_spec(_read_fixture("nyc_rules.txt"), market=market)
+
+    assert spec.precision_rule.step == 2.0
+    assert spec.precision_rule.rounding == "range_bin"
+
+
 def test_parse_noaa_timeseries_rules_from_inline_market_description() -> None:
     market = {
         **EXAMPLE_MARKETS["Seoul"],

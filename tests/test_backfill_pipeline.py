@@ -413,7 +413,7 @@ def test_backfill_pipeline_single_run_horizon_overrides_generic_rows(tmp_path: P
     assert not availability["recommended"].empty
 
 
-def test_materialize_training_set_ignores_zero_c_sentinel_single_run(tmp_path: Path) -> None:
+def test_materialize_training_set_does_not_fallback_to_generic_archive_when_single_run_is_invalid(tmp_path: Path) -> None:
     snapshots = bundled_market_snapshots(["Seoul"])
     warehouse = DataWarehouse.from_paths(
         duckdb_path=tmp_path / "duckdb" / "zero_single_run.duckdb",
@@ -439,17 +439,12 @@ def test_materialize_training_set_ignores_zero_c_sentinel_single_run(tmp_path: P
         single_run_horizons=["morning_of"],
     )
     pipeline.backfill_truth(snapshots)
-    gold = pipeline.materialize_training_set(
-        snapshots,
-        output_name="zero_single_run_training_set",
-        decision_horizons=["morning_of"],
-    )
-
-    row = gold.iloc[0]
-    assert row["forecast_source_kind"] == "historical_forecast"
-    assert json.loads(str(row["selected_models_json"])) == ["ecmwf_ifs025"]
-    assert json.loads(str(row["feature_availability_json"])) == {"ecmwf_ifs025": True}
-    assert row["ecmwf_ifs025_model_daily_max"] != 0.0
+    with pytest.raises(ValueError, match="No training rows materialized"):
+        pipeline.materialize_training_set(
+            snapshots,
+            output_name="zero_single_run_training_set",
+            decision_horizons=["morning_of"],
+        )
 
 
 def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: Path) -> None:

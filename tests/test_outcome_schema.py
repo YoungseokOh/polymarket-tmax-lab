@@ -25,6 +25,16 @@ def test_parse_outcome_label_accepts_open_interval_bounds() -> None:
     assert parsed.upper_inclusive is False
 
 
+def test_parse_outcome_label_preserves_closed_symbolic_bounds() -> None:
+    lower = parse_outcome_label("<=29°F")
+    upper = parse_outcome_label("≥ 41°F")
+
+    assert lower.upper == 29
+    assert lower.upper_inclusive is True
+    assert upper.lower == 41
+    assert upper.lower_inclusive is True
+
+
 def test_parse_outcome_schema_infers_missing_unit_from_peer_labels() -> None:
     parsed = parse_outcome_schema(["53–54°F", "55–56°F", "57 or higher"])
 

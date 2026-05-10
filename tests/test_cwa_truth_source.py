@@ -50,5 +50,5 @@ def test_cwa_truth_source_uses_codis_override_when_no_snapshot_is_available() ->
         "stn_ID": "466920",
         "more": "",
         "start": "2026-03-01T00:00:00",
-        "end": "2026-03-31T00:00:00",
+        "end": "2026-04-01T00:00:00",
     }

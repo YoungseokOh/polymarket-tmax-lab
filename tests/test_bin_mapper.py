@@ -76,6 +76,14 @@ def test_map_samples_to_fahrenheit_ranges() -> None:
     assert probabilities["41°F or higher"] > 0.0
 
 
+def test_fahrenheit_range_bins_do_not_overlap_adjacent_outcomes() -> None:
+    probabilities = map_samples_to_outcomes(_spec_fahrenheit(), np.array([34.4, 36.6]))
+
+    assert probabilities["34°F or below"] == 1 / 2
+    assert probabilities["35-36°F"] == 0.0
+    assert probabilities["37-38°F"] == 1 / 2
+
+
 def test_infer_winning_label() -> None:
     assert infer_winning_label(_spec_celsius(), 8.0) == "8°C"
 

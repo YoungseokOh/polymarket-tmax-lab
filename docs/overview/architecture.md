@@ -15,7 +15,7 @@
 ## Data Flow
 - Gamma -> raw market metadata -> filtered temperature markets
 - Rule text -> structured source/station/date/unit/outcomes
-- Open-Meteo forecast archives -> station-aligned features
+- Open-Meteo horizon-specific forecast runs -> station-aligned features; generic historical archives are not used as horizon rows unless their issue time is admissible for that decision point
 - Official source adapter -> realized daily max
 - Dataset -> train/eval -> champion selection
 - Champion forecast + live/public prices -> edge -> paper/live broker

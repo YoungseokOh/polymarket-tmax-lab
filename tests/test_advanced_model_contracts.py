@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pmtmax.examples import example_market_specs
 from pmtmax.modeling.design_matrix import ContextualFeatureBuilder
 from pmtmax.modeling.predict import load_model, predict_market
 from pmtmax.modeling.train import sanitize_model_frame, train_model
+
+
+def _require_det2prob_runtime() -> None:
+    if platform.system() == "Darwin" and platform.machine() == "x86_64":
+        pytest.skip("det2prob_nn torch runtime is unavailable/unstable on macOS x86_64")
+    pytest.importorskip("torch")
 
 
 def _winning_outcome(spec, value: float) -> str:
@@ -108,6 +116,7 @@ def test_tuned_ensemble_and_det2prob_return_mixture_forecasts(tmp_path: Path) ->
     assert forecast.distribution_family == "gaussian_mixture"
     assert abs(sum(forecast.outcome_probabilities.values()) - 1.0) < 1e-6
 
+    _require_det2prob_runtime()
     # det2prob_nn default is champion_v1 (single Gaussian head)
     artifact = train_model("det2prob_nn", frame, tmp_path / "det2prob_nn", split_policy="market_day", seed=42)
     model = load_model(Path(artifact.path))
@@ -184,6 +193,7 @@ def test_ablation_variants_support_gaussian_and_mixture_contracts(tmp_path: Path
         seed=42,
         variant="legacy_fixed2",
     )
+    _require_det2prob_runtime()
     det_artifact = train_model(
         "det2prob_nn",
         frame,

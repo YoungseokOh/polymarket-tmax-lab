@@ -185,14 +185,19 @@ def parse_market_spec(
         raise ValueError(msg)
 
     unit = infer_unit_from_labels(outcome_labels)
+    parsed_outcomes = parse_outcome_schema(outcome_labels)
+    has_range_bins = any(
+        outcome.lower is not None and outcome.upper is not None and outcome.lower != outcome.upper
+        for outcome in parsed_outcomes
+    )
     precision_text = "exact_source"
     if match := WHOLE_DEGREE_RE.search(raw_text):
         precision_text = match.group(0)
 
     precision_rule = PrecisionRule(
         unit=unit,
-        step=2.0 if any("-" in label for label in outcome_labels) else 1.0,
-        rounding="range_bin" if any("-" in label for label in outcome_labels) else "whole_degree",
+        step=2.0 if has_range_bins else 1.0,
+        rounding="range_bin" if has_range_bins else "whole_degree",
         source_precision_text=precision_text,
     )
     finalization_policy = FinalizationPolicy(
@@ -242,7 +247,7 @@ def parse_market_spec(
         research_priority=cast(Any, research_priority),
         unit=unit,
         precision_rule=precision_rule,
-        outcome_schema=parse_outcome_schema(outcome_labels),
+        outcome_schema=parsed_outcomes,
         finalization_policy=finalization_policy,
         notes=f"Parsed at {datetime.now(tz=UTC).isoformat()}",
     )
