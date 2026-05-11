@@ -204,7 +204,7 @@ def _default_dataset_path(*, sequence: bool = False, panel: bool = False) -> Pat
 
     gold_dir = _path_env().parquet_dir / "gold"
     if panel:
-        return gold_dir / "historical_backtest_panel.parquet"
+        return gold_dir / "v2" / "historical_backtest_panel.parquet"
     suffix = "historical_training_set_sequence.parquet" if sequence else "historical_training_set.parquet"
     return gold_dir / suffix
 
@@ -5409,9 +5409,13 @@ def backtest(
         msg = f"Backtest panel is missing required columns {sorted(missing_panel)}."
         raise typer.BadParameter(msg)
     if panel.empty or not (panel["coverage_status"].astype(str) == "ok").any():
+        status_counts = panel["coverage_status"].astype(str).value_counts(dropna=False).to_dict()
         msg = (
-            "Backtest panel has no coverage_status=ok rows. "
-            "Run `uv run pmtmax summarize-price-history-coverage` to inspect gaps."
+            "Backtest panel has no coverage_status=ok rows "
+            f"(coverage_status counts: {status_counts}). "
+            "Backfill official price history with `uv run pmtmax backfill-price-history`, then run "
+            "`uv run pmtmax materialize-backtest-panel`; use "
+            "`uv run pmtmax summarize-price-history-coverage` to inspect remaining gaps."
         )
         raise typer.BadParameter(msg)
     if pricing_source == "real_history":

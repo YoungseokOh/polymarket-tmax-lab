@@ -13,6 +13,7 @@ import typer
 from pmtmax.cli.main import (
     _bootstrap_snapshots,
     _collection_preflight_report,
+    _default_dataset_path,
     _evaluate_market_signal,
     _forbid_fixture_paper_rows,
     _load_alias_metadata,
@@ -79,6 +80,13 @@ def test_load_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="Market snapshot file does not exist"):
         _load_snapshots(markets_path=missing)
+
+
+def test_default_backtest_panel_path_uses_v2_canonical(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    parquet_dir = tmp_path / "parquet"
+    monkeypatch.setenv("PMTMAX_PARQUET_DIR", str(parquet_dir))
+
+    assert _default_dataset_path(panel=True) == parquet_dir / "gold" / "v2" / "historical_backtest_panel.parquet"
 
 
 def _trust_config(tmp_path: Path, *, workspace_name: str, dataset_profile: str):

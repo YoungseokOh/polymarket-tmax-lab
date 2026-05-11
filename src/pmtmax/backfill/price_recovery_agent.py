@@ -321,7 +321,7 @@ def render_status_markdown(
         "- dataset profile: `real_market`",
         f"- inventory: `{markets_path}`",
         f"- inventory markets: `{snapshot.total_markets:,}`",
-        "- gold panel: `data/workspaces/historical_real/parquet/gold/historical_backtest_panel.parquet`",
+        "- gold panel: `data/workspaces/historical_real/parquet/gold/v2/historical_backtest_panel.parquet`",
         f"- coverage artifact: `{coverage_output_path}`",
         f"- tracked token request rows: `{snapshot.request_count:,}`",
         f"- tracked decision rows: `{snapshot.decision_total_rows:,}`",
