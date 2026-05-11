@@ -75,6 +75,14 @@ class _ZeroSingleRunOpenMeteoClient(_SingleRunOpenMeteoClient):
         return payload
 
 
+class _NullSingleRunOpenMeteoClient(_SingleRunOpenMeteoClient):
+    def single_run(self, *, latitude: float, longitude: float, model: str, hourly: list[str], run: str, forecast_days: int, timezone: str) -> dict:  # noqa: ARG002
+        payload = _load_fixture("Seoul")
+        for key in ("temperature_2m", "dew_point_2m", "relative_humidity_2m", "wind_speed_10m", "cloud_cover"):
+            payload["hourly"][key] = [None for _ in payload["hourly"].get(key, [])]
+        return payload
+
+
 class _BadTruthHttp:
     def get_text(self, url: str, params: dict[str, object] | None = None, use_cache: bool = True) -> str:  # noqa: ARG002
         return "<html>no daily max here</html>"
@@ -447,6 +455,45 @@ def test_materialize_training_set_does_not_fallback_to_generic_archive_when_sing
         )
     assert "Forecast diagnostics:" in str(exc_info.value)
     assert "all-zero target-day groups=" in str(exc_info.value)
+
+
+def test_materialize_training_set_falls_back_when_single_run_archive_is_unavailable(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "null_single_run.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_NullSingleRunOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+        truth_snapshot_dir=Path("tests/fixtures/truth"),
+        forecast_fixture_dir=Path("tests/fixtures/openmeteo"),
+    )
+
+    pipeline.backfill_markets(snapshots, source_name="null_single_run_test")
+    pipeline.backfill_forecasts(snapshots, strict_archive=True)
+    pipeline.backfill_forecasts(
+        snapshots,
+        strict_archive=True,
+        single_run_horizons=["morning_of"],
+    )
+    pipeline.backfill_truth(snapshots)
+
+    gold = pipeline.materialize_training_set(
+        snapshots,
+        output_name="null_single_run_training_set",
+        decision_horizons=["morning_of"],
+    )
+
+    assert len(gold) == 1
+    row = gold.iloc[0]
+    assert row["forecast_source_kind"] == "historical_forecast"
+    assert pd.Timestamp(row["issue_time_utc"]) <= pd.Timestamp(row["decision_time_utc"])
 
 
 def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: Path) -> None:

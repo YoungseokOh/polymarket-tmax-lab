@@ -182,6 +182,18 @@ def _forecast_features_are_valid(features: dict[str, float | None]) -> bool:
     )
 
 
+def _forecast_required_temperatures_are_missing(features: dict[str, float | None]) -> bool:
+    """Return whether the target-day temperature features are entirely unavailable."""
+
+    num_hours = features.get("num_hours")
+    if num_hours is None or num_hours <= 0:
+        return False
+    return all(
+        features.get(key) is None
+        for key in ("model_daily_max", "model_daily_mean", "model_daily_min")
+    )
+
+
 def _materializable_features(features: dict[str, float | None]) -> dict[str, float]:
     """Drop None values after validity checks so missing columns stay NaN."""
 
@@ -1735,6 +1747,12 @@ class BackfillPipeline:
                 lookup: dict[tuple[str, str, str, str], dict[str, object]],
                 decision_issue_time: object,
             ) -> tuple[dict[str, object], str] | None:
+                single_run_feat = lookup.get((market_id, model, "single_run", horizon))
+                single_run_missing_temperatures = False
+                if single_run_feat:
+                    single_run_missing_temperatures = _forecast_required_temperatures_are_missing(
+                        _raw_forecast_feature_map(single_run_feat)
+                    )
                 candidates = (
                     ("single_run", horizon),
                     ("fixture", "__historical__"),
@@ -1749,8 +1767,16 @@ class BackfillPipeline:
                     if endpoint_kind == "historical_forecast":
                         latest_issue_time = feat.get("latest_issue_time_utc")
                         if latest_issue_time is None or pd.isna(latest_issue_time):
-                            continue
-                        if pd.Timestamp(latest_issue_time) > pd.Timestamp(decision_issue_time):
+                            # The single-runs archive returns explicit all-null
+                            # target-day vectors for many old runs. In that case
+                            # the run is known unavailable rather than invalid,
+                            # so allow the generic historical forecast fallback
+                            # and materialize it at the decision point. Do not do
+                            # this for all-zero single-run contamination or when
+                            # no single-run collection was attempted.
+                            if not single_run_missing_temperatures:
+                                continue
+                        elif pd.Timestamp(latest_issue_time) > pd.Timestamp(decision_issue_time):
                             continue
                     return feat, endpoint_kind
                 return None
