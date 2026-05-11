@@ -120,6 +120,12 @@ def _coerce_optional_float(value: object) -> float | None:
     return float(numeric)
 
 
+def _coerce_forecast_float(value: object) -> float | None:
+    """Convert raw forecast values without inventing zeros for missing API data."""
+
+    return _coerce_optional_float(value)
+
+
 def _finite_feature_value(value: object) -> float | None:
     """Return a finite feature value or None when the aggregate is unusable."""
 
@@ -1073,23 +1079,23 @@ class BackfillPipeline:
     def summarize_dataset_readiness(self, snapshots: list[MarketSnapshot]) -> dict[str, pd.DataFrame]:
         """Summarize forecast/truth/gold readiness for a target snapshot set."""
 
-        valid_snapshots = [snapshot for snapshot in snapshots if snapshot.spec is not None]
-        if not valid_snapshots:
+        valid_specs = [snapshot.spec for snapshot in snapshots if snapshot.spec is not None]
+        if not valid_specs:
             return {"summary": pd.DataFrame(), "details": pd.DataFrame()}
 
         base = pd.DataFrame(
             [
                 {
-                    "market_id": snapshot.spec.market_id,
-                    "city": snapshot.spec.city,
-                    "station_id": snapshot.spec.station_id,
-                    "target_local_date": pd.Timestamp(snapshot.spec.target_local_date),
-                    "truth_track": snapshot.spec.truth_track,
-                    "settlement_eligible": snapshot.spec.settlement_eligible,
-                    "official_source_name": snapshot.spec.official_source_name,
-                    "public_truth_source_name": snapshot.spec.public_truth_source_name,
+                    "market_id": spec.market_id,
+                    "city": spec.city,
+                    "station_id": spec.station_id,
+                    "target_local_date": pd.Timestamp(spec.target_local_date),
+                    "truth_track": spec.truth_track,
+                    "settlement_eligible": spec.settlement_eligible,
+                    "official_source_name": spec.official_source_name,
+                    "public_truth_source_name": spec.public_truth_source_name,
                 }
-                for snapshot in valid_snapshots
+                for spec in valid_specs
             ]
         )
         market_ids = set(base["market_id"].astype(str))
@@ -1332,7 +1338,7 @@ class BackfillPipeline:
                                 "station_id": spec.station_id,
                                 "target_local_date": pd.Timestamp(spec.target_local_date),
                                 "timestamp": pd.Timestamp(cast(pd.Timestamp, point["timestamp"])),
-                                "price": float(point["price"]),
+                                "price": float(cast(float, point["price"])),
                                 "interval_used": interval,
                                 "source": "polymarket_official",
                                 **self._metadata_fields(created_at=requested_at, source_priority=100),
@@ -1964,6 +1970,24 @@ class BackfillPipeline:
     ) -> str:
         """Build an actionable error when no gold rows can be materialized."""
 
+        market_ids = sorted({snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None})
+        if market_ids and (forecast_frame.empty or "market_id" not in forecast_frame.columns) and self.warehouse.table_exists(
+            "silver_forecast_runs_hourly"
+        ):
+            placeholders = ",".join(["?"] * len(market_ids))
+            forecast_frame = self.warehouse.read_query(
+                f"select * from silver_forecast_runs_hourly where market_id in ({placeholders})",  # noqa: S608
+                parameters=market_ids,
+            )
+        if market_ids and (truth_frame.empty or "market_id" not in truth_frame.columns) and self.warehouse.table_exists(
+            "silver_observations_daily"
+        ):
+            placeholders = ",".join(["?"] * len(market_ids))
+            truth_frame = self.warehouse.read_query(
+                f"select * from silver_observations_daily where market_id in ({placeholders})",  # noqa: S608
+                parameters=market_ids,
+            )
+
         missing_inputs: list[str] = []
         if forecast_frame.empty or "market_id" not in forecast_frame.columns:
             missing_inputs.append("silver_forecast_runs_hourly")
@@ -1973,6 +1997,9 @@ class BackfillPipeline:
         message = "No training rows materialized."
         if missing_inputs:
             message += f" Missing usable rows in: {', '.join(missing_inputs)}."
+        forecast_diag = self._forecast_empty_materialization_diagnostics(forecast_frame)
+        if forecast_diag:
+            message += f" {forecast_diag}"
         if any(snapshot.spec is not None and snapshot.spec.adapter_key() == "wunderground" for snapshot in snapshots):
             message += (
                 " Wunderground-family markets require a documented same-airport public truth response "
@@ -1982,10 +2009,10 @@ class BackfillPipeline:
             )
         truth_bronze = self.warehouse.read_table("bronze_truth_snapshots")
         if not truth_bronze.empty and "status" in truth_bronze.columns:
-            market_ids = {snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None}
+            lag_market_ids = {snapshot.spec.market_id for snapshot in snapshots if snapshot.spec is not None}
             lagged = truth_bronze.loc[truth_bronze["status"].astype(str) == "lag"].copy()
-            if market_ids and "market_id" in lagged.columns:
-                lagged = lagged.loc[lagged["market_id"].astype(str).isin(market_ids)].copy()
+            if lag_market_ids and "market_id" in lagged.columns:
+                lagged = lagged.loc[lagged["market_id"].astype(str).isin(lag_market_ids)].copy()
             if not lagged.empty:
                 details: list[str] = []
                 for _, row in lagged.head(3).iterrows():
@@ -1999,6 +2026,54 @@ class BackfillPipeline:
                 message += f" Public archive lag detected: {'; '.join(details)}."
                 message += " Run `uv run pmtmax summarize-truth-coverage` for per-market lag details."
         return message
+
+    @staticmethod
+    def _forecast_empty_materialization_diagnostics(forecast_frame: pd.DataFrame) -> str:
+        """Summarize why present forecast rows did not become training rows."""
+
+        required_columns = {
+            "market_id",
+            "endpoint_kind",
+            "decision_horizon",
+            "local_date",
+            "target_local_date",
+            "temperature_2m",
+            "issue_time_utc",
+        }
+        if forecast_frame.empty or not required_columns.issubset(set(forecast_frame.columns)):
+            return ""
+
+        frame = forecast_frame.copy()
+        frame["temperature_2m"] = pd.to_numeric(frame["temperature_2m"], errors="coerce")
+        frame["local_date"] = pd.to_datetime(frame["local_date"], errors="coerce").dt.date
+        frame["target_local_date"] = pd.to_datetime(frame["target_local_date"], errors="coerce").dt.date
+        frame["on_target_day"] = frame["local_date"] == frame["target_local_date"]
+        group_cols = ["market_id", "endpoint_kind", "decision_horizon"]
+        grouped = frame.groupby(group_cols, dropna=False)
+
+        group_count = 0
+        nonnull_target_groups = 0
+        all_zero_target_groups = 0
+        all_null_target_groups = 0
+        historical_missing_issue_groups = 0
+        for (_, endpoint_kind, _), group in grouped:
+            group_count += 1
+            target_temps = group.loc[group["on_target_day"], "temperature_2m"].dropna()
+            if target_temps.empty:
+                all_null_target_groups += 1
+            else:
+                nonnull_target_groups += 1
+                if (target_temps.abs() <= 1e-9).all():
+                    all_zero_target_groups += 1
+            if str(endpoint_kind) == "historical_forecast" and pd.to_datetime(group["issue_time_utc"], errors="coerce").isna().all():
+                historical_missing_issue_groups += 1
+
+        return (
+            "Forecast diagnostics: "
+            f"rows={len(frame)}, groups={group_count}, target-day non-null groups={nonnull_target_groups}, "
+            f"all-null target-day groups={all_null_target_groups}, all-zero target-day groups={all_zero_target_groups}, "
+            f"historical groups missing issue_time={historical_missing_issue_groups}."
+        )
 
     @staticmethod
     def _truth_failure_details(exc: Exception) -> tuple[str, dt.date | None]:
@@ -2863,11 +2938,11 @@ class BackfillPipeline:
                     "local_date": pd.Timestamp(local_timestamp.date()),
                     "hour": int(local_timestamp.hour),
                     "source_variables_json": json.dumps(source_variables),
-                    "temperature_2m": _coerce_float(frame.iloc[idx].get("temperature_2m", 0.0)),
-                    "dew_point_2m": _coerce_float(frame.iloc[idx].get("dew_point_2m", 0.0)),
-                    "relative_humidity_2m": _coerce_float(frame.iloc[idx].get("relative_humidity_2m", 0.0)),
-                    "wind_speed_10m": _coerce_float(frame.iloc[idx].get("wind_speed_10m", 0.0)),
-                    "cloud_cover": _coerce_float(frame.iloc[idx].get("cloud_cover", 0.0)),
+                    "temperature_2m": _coerce_forecast_float(frame.iloc[idx].get("temperature_2m")),
+                    "dew_point_2m": _coerce_forecast_float(frame.iloc[idx].get("dew_point_2m")),
+                    "relative_humidity_2m": _coerce_forecast_float(frame.iloc[idx].get("relative_humidity_2m")),
+                    "wind_speed_10m": _coerce_forecast_float(frame.iloc[idx].get("wind_speed_10m")),
+                    "cloud_cover": _coerce_forecast_float(frame.iloc[idx].get("cloud_cover")),
                     "raw_path": raw_path,
                     "raw_hash": raw_hash,
                     **self._metadata_fields(

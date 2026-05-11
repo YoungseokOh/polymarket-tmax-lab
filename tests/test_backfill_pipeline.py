@@ -439,12 +439,14 @@ def test_materialize_training_set_does_not_fallback_to_generic_archive_when_sing
         single_run_horizons=["morning_of"],
     )
     pipeline.backfill_truth(snapshots)
-    with pytest.raises(ValueError, match="No training rows materialized"):
+    with pytest.raises(ValueError, match="No training rows materialized") as exc_info:
         pipeline.materialize_training_set(
             snapshots,
             output_name="zero_single_run_training_set",
             decision_horizons=["morning_of"],
         )
+    assert "Forecast diagnostics:" in str(exc_info.value)
+    assert "all-zero target-day groups=" in str(exc_info.value)
 
 
 def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: Path) -> None:
@@ -489,6 +491,50 @@ def test_normalize_forecast_rows_handles_dst_nonexistent_local_times(tmp_path: P
     assert rows[1]["forecast_time_utc"] == "2026-03-08T07:00:00+00:00"
     features = pipeline._features_from_hourly_rows(pd.DataFrame(rows), date(2026, 3, 8), spec.timezone)
     assert features["num_hours"] == 3.0
+
+
+def test_normalize_forecast_rows_preserves_missing_numeric_values(tmp_path: Path) -> None:
+    snapshots = bundled_market_snapshots(["Seoul"])
+    warehouse = DataWarehouse.from_paths(
+        duckdb_path=tmp_path / "duckdb" / "null_forecast.duckdb",
+        parquet_root=tmp_path / "parquet",
+        raw_root=tmp_path / "raw",
+        manifest_root=tmp_path / "manifests",
+        archive_root=tmp_path / "archive",
+    )
+    pipeline = BackfillPipeline(
+        http=CachedHttpClient(tmp_path / "cache"),
+        openmeteo=_BrokenOpenMeteoClient(),  # type: ignore[arg-type]
+        warehouse=warehouse,
+        models=["ecmwf_ifs025"],
+    )
+    spec = snapshots[0].spec
+    assert spec is not None
+
+    rows = pipeline._normalize_forecast_rows(
+        spec=spec,
+        model_name="ecmwf_ifs025",
+        endpoint_kind="single_run",
+        payload={
+            "hourly": {
+                "time": ["2026-03-08T00:00"],
+                "temperature_2m": [None],
+                "dew_point_2m": [None],
+                "relative_humidity_2m": [None],
+                "wind_speed_10m": [None],
+                "cloud_cover": [None],
+            }
+        },
+        raw_path="raw.json",
+        raw_hash="hash",
+        availability_status="available",
+        source_variables=["temperature_2m"],
+        retrieved_at=datetime.now(tz=UTC),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["temperature_2m"] is None
+    assert rows[0]["dew_point_2m"] is None
 
 
 def test_summarize_dataset_readiness_reports_city_level_progress(tmp_path: Path) -> None:
