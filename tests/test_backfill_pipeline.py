@@ -115,11 +115,19 @@ class _FakeClobClient:
         self,
         market: str,
         *,
-        interval: str = "max",
+        interval: str | None = "max",
+        start_ts: int | None = None,
+        end_ts: int | None = None,
         fidelity: int | None = 60,
         use_cache: bool = True,
     ) -> dict[str, object]:
-        assert interval == "max"
+        if interval is None:
+            assert start_ts is not None
+            assert end_ts is not None
+        else:
+            assert interval == "max"
+            assert start_ts is None
+            assert end_ts is None
         assert fidelity == 60
         self.price_history_calls.append((market, use_cache))
         return self.payloads.get(market, {"history": []})
@@ -806,6 +814,8 @@ def test_backfill_price_history_and_panel_materialization_capture_coverage_state
     assert bool(empty_request["last_trade_present"]) is True
     assert set(clob.last_trade_calls) == set(empty_token_ids)
     assert len(history_tables["silver_price_timeseries"]) == 3
+    assert set(bronze["interval_used"].astype(str)) == {"target_window"}
+    assert set(history_tables["silver_price_timeseries"]["interval_used"].astype(str)) == {"target_window"}
 
     dataset = pd.DataFrame(
         [

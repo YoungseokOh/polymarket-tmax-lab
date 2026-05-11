@@ -1287,9 +1287,36 @@ class BackfillPipeline:
                 last_trade_http_status_code: int | None = None
                 last_trade_error_message: str | None = None
                 try:
+                    request_interval: str | None = interval
+                    start_ts: int | None = None
+                    end_ts: int | None = None
+                    interval_used = interval
+                    if interval == "max":
+                        # The public CLOB `interval=max` endpoint can return an empty history for
+                        # older closed outcome tokens even when bounded start/end queries still
+                        # return decision-time prices. Backtests need no-lookahead prices near the
+                        # forecast decision points, so use a target-local bounded window instead of
+                        # accepting the empty all-history response.
+                        timezone = ZoneInfo(spec.timezone)
+                        window_start = dt.datetime.combine(
+                            spec.target_local_date - dt.timedelta(days=4),
+                            dt.time(0, 0),
+                            tzinfo=timezone,
+                        ).astimezone(dt.UTC)
+                        window_end = dt.datetime.combine(
+                            spec.target_local_date + dt.timedelta(days=2),
+                            dt.time(0, 0),
+                            tzinfo=timezone,
+                        ).astimezone(dt.UTC)
+                        request_interval = None
+                        start_ts = int(window_start.timestamp())
+                        end_ts = int(window_end.timestamp())
+                        interval_used = "target_window"
                     payload = clob.get_prices_history(
                         token_id,
-                        interval=interval,
+                        interval=request_interval,
+                        start_ts=start_ts,
+                        end_ts=end_ts,
                         fidelity=fidelity,
                         use_cache=use_cache,
                     )
@@ -1351,7 +1378,7 @@ class BackfillPipeline:
                                 "target_local_date": pd.Timestamp(spec.target_local_date),
                                 "timestamp": pd.Timestamp(cast(pd.Timestamp, point["timestamp"])),
                                 "price": float(cast(float, point["price"])),
-                                "interval_used": interval,
+                                "interval_used": interval_used,
                                 "source": "polymarket_official",
                                 **self._metadata_fields(created_at=requested_at, source_priority=100),
                             }
@@ -1369,7 +1396,7 @@ class BackfillPipeline:
                         "requested_at": pd.Timestamp(requested_at),
                         "status": status,
                         "interval_requested": interval,
-                        "interval_used": interval,
+                        "interval_used": interval_used,
                         "fidelity": fidelity,
                         "point_count": len(history),
                         "first_price_ts": earliest_ts,
