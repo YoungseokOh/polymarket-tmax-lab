@@ -545,7 +545,9 @@ absent from `bronze_forecast_requests`, add `--missing-only` to
 incremental forecast top-off by default.
 Keep `--max-consecutive-429 2` on free-path Open-Meteo forecast backfills. Two
 consecutive `429` responses are treated as a daily-limit hit: the run flushes
-already collected rows, records `data/manifests/openmeteo_rate_limit_state.json`,
+already collected rows, records `openmeteo_rate_limit_state.json` under the active
+manifest dir (`data/workspaces/historical_real/manifests/` when using
+`scripts/pmtmax-workspace historical_real`; plain default is `data/manifests/`),
 and cancels. `backfill-forecasts` now applies a default
 `--rate-limit-cooldown-hours 10` gate before future Open-Meteo forecast runs.
 This is based on the 2026-05-12 PMTMAX run: a retry after ~6.5h still hit 429,
