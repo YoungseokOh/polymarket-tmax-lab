@@ -18,7 +18,10 @@ from pmtmax.cli.main import (
     _forbid_fixture_paper_rows,
     _load_alias_metadata,
     _load_snapshots,
+    _openmeteo_429_state_path,
     _quote_proxy_prices,
+    _raise_if_openmeteo_429_cooldown_active,
+    _record_openmeteo_429_cooldown,
     _resolve_opportunity_shadow_horizon,
     _resolve_signal_horizon_with_reason,
     _run_quote_proxy_backtest,
@@ -48,6 +51,11 @@ from pmtmax.markets.repository import bundled_market_snapshots, load_market_snap
 from pmtmax.storage.schemas import BookLevel, BookSnapshot, OpportunityObservation
 
 
+class _DummyWarehouse:
+    def __init__(self, manifest_root: Path) -> None:
+        self.manifest_root = manifest_root
+
+
 def _future_snapshot(city: str = "Seoul"):
     snapshot = bundled_market_snapshots([city])[0].model_copy(deep=True)
     assert snapshot.spec is not None
@@ -73,6 +81,51 @@ def _future_snapshot_days(city: str, days: int):
         update={"target_local_date": local_today + timedelta(days=days)}
     )
     return snapshot
+
+
+def test_openmeteo_429_cooldown_blocks_until_empirical_window(tmp_path: Path) -> None:
+    warehouse = _DummyWarehouse(tmp_path)
+    last_429 = datetime(2026, 5, 12, 1, 48, tzinfo=UTC)
+    _record_openmeteo_429_cooldown(
+        warehouse,  # type: ignore[arg-type]
+        command="backfill-forecasts",
+        cooldown_hours=10.0,
+        cities=["NYC"],
+        reason="forecast collection cancelled after 2 consecutive 429 responses",
+        now_utc=last_429,
+    )
+
+    with pytest.raises(typer.BadParameter, match="Open-Meteo 429 cooldown is active"):
+        _raise_if_openmeteo_429_cooldown_active(
+            warehouse,  # type: ignore[arg-type]
+            cooldown_hours=10.0,
+            now_utc=last_429 + timedelta(hours=9, minutes=24),
+        )
+
+    _raise_if_openmeteo_429_cooldown_active(
+        warehouse,  # type: ignore[arg-type]
+        cooldown_hours=10.0,
+        now_utc=last_429 + timedelta(hours=10, seconds=1),
+    )
+
+
+def test_openmeteo_429_cooldown_can_be_disabled(tmp_path: Path) -> None:
+    warehouse = _DummyWarehouse(tmp_path)
+    _record_openmeteo_429_cooldown(
+        warehouse,  # type: ignore[arg-type]
+        command="backfill-forecasts",
+        cooldown_hours=10.0,
+        cities=["NYC"],
+        reason="429",
+        now_utc=datetime(2026, 5, 12, 1, 48, tzinfo=UTC),
+    )
+
+    assert _openmeteo_429_state_path(warehouse).exists()  # type: ignore[arg-type]
+    _raise_if_openmeteo_429_cooldown_active(
+        warehouse,  # type: ignore[arg-type]
+        cooldown_hours=0.0,
+        now_utc=datetime(2026, 5, 12, 1, 49, tzinfo=UTC),
+    )
 
 
 def test_load_snapshots_raises_for_missing_markets_path(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from rich.table import Table
 from typer.models import OptionInfo
 
 from pmtmax.backfill import BackfillPipeline
+from pmtmax.backfill.pipeline import ForecastRateLimitError
 from pmtmax.backtest.dataset_builder import DatasetBuilder
 from pmtmax.backtest.metrics import summarize_trade_log
 from pmtmax.backtest.pnl import Position, settle_position
@@ -157,6 +158,9 @@ from pmtmax.weather.truth_sources.base import celsius_to_fahrenheit
 
 app = typer.Typer(help="Polymarket maximum temperature research and trading lab.")
 console = Console()
+
+DEFAULT_OPENMETEO_429_COOLDOWN_HOURS = 10.0
+OPENMETEO_429_STATE_FILENAME = "openmeteo_rate_limit_state.json"
 DEFAULT_RECENT_HORIZON_POLICY_PATH = Path("configs/recent-core-horizon-policy.yaml")
 DEFAULT_PAPER_ALL_SUPPORTED_HORIZON_POLICY_PATH = Path("configs/paper-all-supported-horizon-policy.yaml")
 DEFAULT_PAPER_EXPLORATION_CONFIG_PATH = Path("configs/paper-exploration.yaml")
@@ -943,6 +947,82 @@ def _config_hash(config: Any, command: str, **kwargs: object) -> str:
         "kwargs": kwargs,
     }
     return stable_hash(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _openmeteo_429_state_path(warehouse: DataWarehouse) -> Path:
+    return warehouse.manifest_root / OPENMETEO_429_STATE_FILENAME
+
+
+def _exception_chain_contains(exc: BaseException, target_type: type[BaseException]) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, target_type):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _record_openmeteo_429_cooldown(
+    warehouse: DataWarehouse,
+    *,
+    command: str,
+    cooldown_hours: float,
+    cities: list[str] | None,
+    reason: str,
+    now_utc: datetime | None = None,
+) -> Path:
+    now = now_utc or datetime.now(tz=UTC)
+    cooldown_until = now + timedelta(hours=max(cooldown_hours, 0.0))
+    state = {
+        "provider": "open-meteo",
+        "reason": reason,
+        "command": command,
+        "cities": cities or [],
+        "last_429_at": now.isoformat(),
+        "cooldown_hours": cooldown_hours,
+        "cooldown_until": cooldown_until.isoformat(),
+        "policy": "Empirical PMTMAX finding on 2026-05-12: retry at ~6.5h still hit 429; retry at ~9.4h succeeded, so use 10h by default.",
+    }
+    path = _openmeteo_429_state_path(warehouse)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _raise_if_openmeteo_429_cooldown_active(
+    warehouse: DataWarehouse,
+    *,
+    cooldown_hours: float,
+    now_utc: datetime | None = None,
+) -> None:
+    if cooldown_hours <= 0:
+        return
+    path = _openmeteo_429_state_path(warehouse)
+    if not path.exists():
+        return
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        last_429 = datetime.fromisoformat(str(state["last_429_at"]))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return
+    if last_429.tzinfo is None:
+        last_429 = last_429.replace(tzinfo=UTC)
+    now = now_utc or datetime.now(tz=UTC)
+    cooldown_until = last_429.astimezone(UTC) + timedelta(hours=cooldown_hours)
+    if now >= cooldown_until:
+        return
+    remaining = cooldown_until - now
+    hours = remaining.total_seconds() / 3600
+    msg = (
+        "Open-Meteo 429 cooldown is active: "
+        f"last_429_at={last_429.astimezone(UTC).isoformat()}, "
+        f"cooldown_hours={cooldown_hours:g}, retry_after={cooldown_until.isoformat()} "
+        f"(~{hours:.1f}h remaining). "
+        "Pass --rate-limit-cooldown-hours 0 only for an intentional override."
+    )
+    raise typer.BadParameter(msg)
 
 
 def _filter_snapshots_by_city(snapshots: list[MarketSnapshot], cities: list[str] | None) -> list[MarketSnapshot]:
@@ -4380,6 +4460,17 @@ def backfill_forecasts(
         int,
         typer.Option("--max-consecutive-429", help="Cancel forecast backfill after this many consecutive 429 responses; 0 disables."),
     ] = 2,
+    rate_limit_cooldown_hours: Annotated[
+        float,
+        typer.Option(
+            "--rate-limit-cooldown-hours",
+            min=0.0,
+            help=(
+                "Skip Open-Meteo forecast backfills until this many hours after the last recorded "
+                "429 cancellation; 0 disables the cooldown gate."
+            ),
+        ),
+    ] = DEFAULT_OPENMETEO_429_COOLDOWN_HOURS,
 ) -> None:
     """Backfill forecast payloads and normalized hourly forecast tables."""
 
@@ -4405,10 +4496,15 @@ def backfill_forecasts(
             missing_only=missing_only,
             strict_archive=strict_archive,
             allow_demo_fixture_fallback=allow_demo_fixture_fallback,
+            rate_limit_cooldown_hours=rate_limit_cooldown_hours,
         ),
     )
     pipeline.run_id = run.run_id
     try:
+        _raise_if_openmeteo_429_cooldown_active(
+            pipeline.warehouse,
+            cooldown_hours=rate_limit_cooldown_hours,
+        )
         result = pipeline.backfill_forecasts(
             snapshots,
             models=models,
@@ -4421,6 +4517,14 @@ def backfill_forecasts(
         )
         pipeline.warehouse.finish_run(run, status="completed")
     except Exception as exc:  # noqa: BLE001
+        if _exception_chain_contains(exc, ForecastRateLimitError):
+            _record_openmeteo_429_cooldown(
+                pipeline.warehouse,
+                command="backfill-forecasts",
+                cooldown_hours=rate_limit_cooldown_hours,
+                cities=cities,
+                reason=str(exc),
+            )
         pipeline.warehouse.finish_run(run, status="failed", notes=str(exc))
         raise
     finally:
