@@ -1942,10 +1942,17 @@ class BackfillPipeline:
                     row["neighbor_mean_temp"] = float(
                         _coerce_float(row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0)))
                     )
-                    row["neighbor_spread"] = abs(
-                        _coerce_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
-                        - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
-                    )
+                    # Only emit neighbor_spread when both source members exist. A zero
+                    # fallback turns into a constant/dead feature for GFS-only
+                    # historical-real rows.
+                    if (
+                        "ecmwf_ifs025_model_daily_max" in row
+                        and "ecmwf_aifs025_single_model_daily_max" in row
+                    ):
+                        row["neighbor_spread"] = abs(
+                            _coerce_float(row["ecmwf_ifs025_model_daily_max"])
+                            - _coerce_float(row["ecmwf_aifs025_single_model_daily_max"])
+                        )
 
                     availability = {model: bool(model in selected_models) for model in (self.models or [])}
                     row["contract_version"] = "v2"
@@ -2153,10 +2160,14 @@ class BackfillPipeline:
         row["neighbor_mean_temp"] = float(
             _coerce_float(row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0)))
         )
-        row["neighbor_spread"] = abs(
-            _coerce_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
-            - _coerce_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
-        )
+        if (
+            "ecmwf_ifs025_model_daily_max" in row
+            and "ecmwf_aifs025_single_model_daily_max" in row
+        ):
+            row["neighbor_spread"] = abs(
+                _coerce_float(row["ecmwf_ifs025_model_daily_max"])
+                - _coerce_float(row["ecmwf_aifs025_single_model_daily_max"])
+            )
 
     def _features_from_hourly_rows(
         self,

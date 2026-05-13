@@ -239,10 +239,17 @@ class DatasetBuilder:
         row["neighbor_mean_temp"] = _as_float(
             row.get("ecmwf_ifs025_model_daily_mean", row.get("model_daily_max", 0.0))
         )
-        row["neighbor_spread"] = abs(
-            _as_float(row.get("ecmwf_ifs025_model_daily_max", 0.0))
-            - _as_float(row.get("ecmwf_aifs025_single_model_daily_max", 0.0))
-        )
+        # Only materialize a neighbor spread when both source members are present.
+        # Historical-real currently uses GFS-only rows, so the old 0.0 fallback was a
+        # constant/dead feature rather than a real spatial uncertainty signal.
+        if (
+            "ecmwf_ifs025_model_daily_max" in row
+            and "ecmwf_aifs025_single_model_daily_max" in row
+        ):
+            row["neighbor_spread"] = abs(
+                _as_float(row["ecmwf_ifs025_model_daily_max"])
+                - _as_float(row["ecmwf_aifs025_single_model_daily_max"])
+            )
 
     def _decision_point(self, spec: MarketSpec, horizon: str) -> DecisionPoint:
         if horizon not in HORIZON_OFFSETS:

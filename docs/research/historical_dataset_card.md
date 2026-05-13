@@ -1,11 +1,11 @@
 # Historical Real Dataset Card
 
-Generated: `2026-05-13T12:11:10.787872+00:00`
+Generated: `2026-05-13T12:55:48.327923+00:00`
 
 ## Verdict
 
-- Quality score: **7.55/10** (research-grade)
-- Check statuses: `{'pass': 10, 'warn': 2}`
+- Quality score: **8.5/10** (research-grade)
+- Check statuses: `{'pass': 11, 'warn': 1}`
 - Rows: **7806** / Markets: **2602** / Cities: **30**
 - Target date range: **2025-05-30 → 2026-04-26**
 
@@ -16,6 +16,8 @@ Generated: `2026-05-13T12:11:10.787872+00:00`
 - Settlement eligible: `{'False': 7791, 'True': 15}`
 - Forecast source kind: `{'historical_forecast': 6658, 'single_run': 1148}`
 - Readiness statuses: `{'ready': 2602}`
+- City sample tiering: `{'enabled': True, 'primary_min_rows': 90, 'primary_city_count': 25, 'exploratory_city_count': 5, 'exploratory_cities': {'Shenzhen': 84, 'Wuhan': 84, 'Tel Aviv': 39, 'Taipei': 15, 'Hong Kong': 6}, 'policy': 'Cities below the minimum row threshold remain in the raw dataset but are treated as exploratory and excluded from broad cross-city quality claims.', 'raw_max_city_ratio': 0.1618}`
+- City exposure weighting: `{'enabled': True, 'city_exposure_cap': 0.15, 'raw_max_city_ratio': 0.1618, 'capped_cities': {'London': 0.927078, 'NYC': 0.995663}, 'policy': 'Evaluation reports should apply city-balanced sample weights when making aggregate claims; raw rows stay unchanged for reproducibility.'}`
 
 ## Baseline Forecast Quality
 
@@ -60,6 +62,10 @@ Worst 10 cities by baseline MAE:
 
 Small-sample cities: `['Shenzhen', 'Wuhan', 'Tel Aviv', 'Taipei', 'Hong Kong']`
 
+City tiering policy: `Cities below the minimum row threshold remain in the raw dataset but are treated as exploratory and excluded from broad cross-city quality claims.`
+
+City weighting policy: `Evaluation reports should apply city-balanced sample weights when making aggregate claims; raw rows stay unchanged for reproducibility.`
+
 Top city row counts:
 
 | city | rows |
@@ -91,7 +97,7 @@ Top city row counts:
 | pass | three_horizons_per_market | markets_without_3_horizons=0 |
 | pass | issue_time_not_after_decision_time | invalid_rows=0 |
 | pass | no_obvious_leaky_feature_names | leaky_named_features=[] |
-| warn | no_constant_numeric_features | constant_features=['neighbor_spread'] |
+| pass | no_constant_numeric_features | constant_features=[] |
 | pass | truth_tier_explicit | truth_track_counts={'research_public': 7791, 'exact_public': 15} |
 | warn | exact_truth_coverage | Most rows are research_public; keep as research-grade or tier exact/proxy datasets. |
 | pass | readiness_non_ready_small | non_ready=0, status_counts={'ready': 2602} |
@@ -101,5 +107,4 @@ Top city row counts:
 
 - Increase high-confidence/exact truth-track coverage or explicitly tier training/evaluation sets.
 - Run model-level city/time split backtests, not only deterministic forecast audits.
-- Balance or weight city exposure; current small-sample cities should not dominate claims.
-- Remove or repair constant/dead features before model training.
+- Keep city sample tiers and capped evaluation weights active so small/large cities do not dominate claims.

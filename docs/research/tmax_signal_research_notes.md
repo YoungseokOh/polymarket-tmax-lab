@@ -1,12 +1,12 @@
 # TMAX Signal Research Notes
 
-Updated: 2026-05-13 21:15 KST
+Updated: 2026-05-13 21:55 KST
 
 ## Current Dataset / Quality State
 
 - Workspace: `historical_real`
 - Canonical gold dataset: **7,806 rows** / **2,602 markets** / **30 cities** / 3 horizons per market.
-- Dataset quality score: **7.55/10** (`docs/research/historical_dataset_card.md`).
+- Dataset quality score: **8.5/10** (`docs/research/historical_dataset_card.md`) after removing the constant `neighbor_spread` feature and adding explicit city sample tiering / exposure weighting policy.
 - Readiness is now clean for canonical inventory: **2,602 ready**, **0 non-ready**.
 - Official price panel: **68,682 rows** with **57,733 ok**, **10,435 missing**, **514 stale**.
 - Price coverage is no longer Seoul-only. All 30 cities have at least some `ok` rows after the 2026-05-13 recovery pass.
@@ -91,7 +91,7 @@ Still not production-ready:
 
 1. Truth fidelity is still mostly `research_public` rather than high-confidence exact settlement truth.
 2. Missing/stale price rows remain large enough to bias execution evaluation, especially London/NYC.
-3. `neighbor_spread` is still a constant/dead feature and should be removed or ignored before future training.
+3. Small-sample cities are now explicitly tiered as exploratory and city exposure weighting is documented, but model-level city/time split robustness still needs to be run before broad claims.
 4. `tuned_ensemble` looks promising for execution, but needs time/city split robustness checks before publishing or using it as a live execution candidate.
 5. Quote-proxy diagnostics remain much weaker than real-history PnL, so execution friction can still erase apparent edge.
 
@@ -104,4 +104,4 @@ Still not production-ready:
    - retention-limited / unavailable (`London`, `NYC` confirmed by no-cache zero-row retries),
    - decision-time gaps (`market_open` heavy groups),
    - genuinely recoverable gaps.
-5. Remove or exclude `neighbor_spread` before the next training round.
+5. Keep `neighbor_spread` excluded unless a future multi-model/spatial source can populate it with non-constant values.

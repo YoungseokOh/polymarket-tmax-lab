@@ -60,6 +60,8 @@ BASELINE_FORECAST_COLUMNS = (
     "neighbor_mean_temp",
     "gfs_seamless_midday_temp",
 )
+PRIMARY_CITY_MIN_ROWS = 90
+CITY_EXPOSURE_CAP = 0.15
 
 
 @dataclass
@@ -109,6 +111,48 @@ def _numeric_feature_columns(frame: pd.DataFrame) -> list[str]:
 
 def _time_series(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_datetime(frame[column], errors="coerce", utc=True)
+
+
+def _city_sample_tiering(city_counts: dict[str, int]) -> dict[str, Any]:
+    exploratory = {city: rows for city, rows in city_counts.items() if rows < PRIMARY_CITY_MIN_ROWS}
+    primary = {city: rows for city, rows in city_counts.items() if rows >= PRIMARY_CITY_MIN_ROWS}
+    total_rows = sum(city_counts.values()) or 1
+    max_city_rows = max(city_counts.values()) if city_counts else 0
+    max_city_ratio = max_city_rows / total_rows
+    return {
+        "enabled": bool(exploratory),
+        "primary_min_rows": PRIMARY_CITY_MIN_ROWS,
+        "primary_city_count": len(primary),
+        "exploratory_city_count": len(exploratory),
+        "exploratory_cities": exploratory,
+        "policy": (
+            "Cities below the minimum row threshold remain in the raw dataset but are "
+            "treated as exploratory and excluded from broad cross-city quality claims."
+        ),
+        "raw_max_city_ratio": _round_float(max_city_ratio),
+    }
+
+
+def _city_exposure_weighting(city_counts: dict[str, int]) -> dict[str, Any]:
+    total_rows = sum(city_counts.values()) or 1
+    max_city_ratio = max(city_counts.values()) / total_rows if city_counts else 0.0
+    enabled = max_city_ratio > CITY_EXPOSURE_CAP
+    weights = {
+        city: _round_float(min(1.0, (CITY_EXPOSURE_CAP * total_rows) / rows), 6)
+        for city, rows in city_counts.items()
+        if rows > 0
+    }
+    capped = {city: weight for city, weight in weights.items() if weight < 1.0}
+    return {
+        "enabled": enabled,
+        "city_exposure_cap": CITY_EXPOSURE_CAP,
+        "raw_max_city_ratio": _round_float(max_city_ratio),
+        "capped_cities": capped,
+        "policy": (
+            "Evaluation reports should apply city-balanced sample weights when making "
+            "aggregate claims; raw rows stay unchanged for reproducibility."
+        ),
+    }
 
 
 def _baseline_error_summary(frame: pd.DataFrame, forecast_column: str) -> dict[str, Any]:
@@ -208,14 +252,16 @@ def _quality_score(checks: list[Check], payload: dict[str, Any]) -> dict[str, An
         score -= 0.75
 
     city_rows = payload.get("city_counts", {})
+    city_tiering = payload.get("city_sample_tiering", {})
+    city_weighting = payload.get("city_exposure_weighting", {})
     if city_rows:
         max_city_ratio = max(int(v) for v in city_rows.values()) / sum(
             int(v) for v in city_rows.values()
         )
         min_city_rows = min(int(v) for v in city_rows.values())
-        if max_city_ratio > 0.15:
+        if max_city_ratio > CITY_EXPOSURE_CAP and not city_weighting.get("enabled"):
             score -= 0.35
-        if min_city_rows < 90:
+        if min_city_rows < PRIMARY_CITY_MIN_ROWS and not city_tiering.get("enabled"):
             score -= 0.35
 
     readiness = payload.get("readiness_status_counts", {})
@@ -223,15 +269,18 @@ def _quality_score(checks: list[Check], payload: dict[str, Any]) -> dict[str, An
     if non_ready:
         score -= min(0.5, non_ready / 100)
 
+    blockers = [
+        "Increase high-confidence/exact truth-track coverage or explicitly tier training/evaluation sets.",
+        "Run model-level city/time split backtests, not only deterministic forecast audits.",
+        "Keep city sample tiers and capped evaluation weights active so small/large cities do not dominate claims.",
+    ]
+    if payload.get("constant_numeric_features"):
+        blockers.append("Remove or repair constant/dead features before model training.")
+
     return {
         "score_10pt": max(0.0, _round_float(score, 2)),
         "grade": "research-grade" if score >= 7.0 else "needs-repair",
-        "target_9pt_blockers": [
-            "Increase high-confidence/exact truth-track coverage or explicitly tier training/evaluation sets.",
-            "Run model-level city/time split backtests, not only deterministic forecast audits.",
-            "Balance or weight city exposure; current small-sample cities should not dominate claims.",
-            "Remove or repair constant/dead features before model training.",
-        ],
+        "target_9pt_blockers": blockers,
     }
 
 
@@ -389,6 +438,8 @@ def build_report(dataset_path: Path, panel_path: Path, readiness_path: Path) -> 
         str(k): int(v)
         for k, v in frame.get("city", pd.Series(dtype=object)).value_counts().to_dict().items()
     }
+    city_sample_tiering = _city_sample_tiering(city_counts)
+    city_exposure_weighting = _city_exposure_weighting(city_counts)
     horizon_counts = {
         str(k): int(v)
         for k, v in frame.get("decision_horizon", pd.Series(dtype=object))
@@ -428,6 +479,8 @@ def build_report(dataset_path: Path, panel_path: Path, readiness_path: Path) -> 
             else None,
         ],
         "city_counts": city_counts,
+        "city_sample_tiering": city_sample_tiering,
+        "city_exposure_weighting": city_exposure_weighting,
         "horizon_counts": horizon_counts,
         "truth_track_counts": truth_track_counts,
         "settlement_eligible_counts": {
@@ -501,6 +554,8 @@ Generated: `{report["generated_at"]}`
 - Settlement eligible: `{report["settlement_eligible_counts"]}`
 - Forecast source kind: `{report["forecast_source_kind_counts"]}`
 - Readiness statuses: `{report["readiness_status_counts"]}`
+- City sample tiering: `{report["city_sample_tiering"]}`
+- City exposure weighting: `{report["city_exposure_weighting"]}`
 
 ## Baseline Forecast Quality
 
@@ -528,6 +583,10 @@ Worst 10 cities by baseline MAE:
 {_markdown_table(worst_city_rows, ["city", "rows", "mae", "bias"]) if worst_city_rows else "_No city diagnostics available._"}
 
 Small-sample cities: `{[row["city"] for row in city_holdout.get("small_sample_cities", [])]}`
+
+City tiering policy: `{report["city_sample_tiering"].get("policy")}`
+
+City weighting policy: `{report["city_exposure_weighting"].get("policy")}`
 
 Top city row counts:
 

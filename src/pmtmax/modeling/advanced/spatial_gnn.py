@@ -18,15 +18,28 @@ class SpatialGNNModel:
 
     def __post_init__(self) -> None:
         self.model = Ridge(alpha=self.alpha)
+        self._fit_columns: list[str] | None = None
+
+    def _design_matrix(self, frame: pd.DataFrame, *, fit: bool = False) -> pd.DataFrame:
+        columns = [*self.feature_names, "neighbor_mean_temp"]
+        if "neighbor_spread" in frame.columns:
+            columns.append("neighbor_spread")
+        if fit:
+            self._fit_columns = columns
+        elif self._fit_columns is not None:
+            columns = self._fit_columns
+        return frame.reindex(columns=columns, fill_value=0.0)
 
     def fit(self, frame: pd.DataFrame) -> None:
-        x = frame[self.feature_names + ["neighbor_mean_temp", "neighbor_spread"]]
+        x = self._design_matrix(frame, fit=True)
         y = frame["realized_daily_max"]
         self.model.fit(x, y)
 
     def predict(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        x = frame[self.feature_names + ["neighbor_mean_temp", "neighbor_spread"]]
+        x = self._design_matrix(frame)
         mean = self.model.predict(x)
-        std = np.clip(frame["neighbor_spread"].to_numpy(dtype=float), 0.5, None)
+        if "neighbor_spread" in frame.columns:
+            std = np.clip(frame["neighbor_spread"].to_numpy(dtype=float), 0.5, None)
+        else:
+            std = np.full(len(frame), 1.0, dtype=float)
         return mean, std
-
