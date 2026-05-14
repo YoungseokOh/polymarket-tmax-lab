@@ -3236,6 +3236,7 @@ def _run_real_history_backtest(
     min_market_price: float = 0.0,
     max_market_price: float = 1.0,
     min_edge: float = 0.0,
+    decision_horizons: set[str] | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -3256,6 +3257,7 @@ def _run_real_history_backtest(
         min_market_price=min_market_price,
         max_market_price=max_market_price,
         min_edge=min_edge,
+        decision_horizons=decision_horizons,
     )
 
 
@@ -3295,6 +3297,7 @@ def _run_quote_proxy_backtest(
     min_market_price: float = 0.0,
     max_market_price: float = 1.0,
     min_edge: float = 0.0,
+    decision_horizons: set[str] | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using last price plus an explicit quote proxy."""
 
@@ -3316,6 +3319,7 @@ def _run_quote_proxy_backtest(
         min_market_price=min_market_price,
         max_market_price=max_market_price,
         min_edge=min_edge,
+        decision_horizons=decision_horizons,
     )
 
 
@@ -3338,6 +3342,7 @@ def _run_panel_pricing_backtest(
     min_market_price: float = 0.0,
     max_market_price: float = 1.0,
     min_edge: float = 0.0,
+    decision_horizons: set[str] | None = None,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using historical pricing or a quote proxy."""
 
@@ -3421,6 +3426,8 @@ def _run_panel_pricing_backtest(
             print(f"[backtest] step={step} evaluating ...", flush=True, file=sys.stderr)
         step += 1
         for _, row in test.iterrows():
+            if decision_horizons is not None and str(row["decision_horizon"]) not in decision_horizons:
+                continue
             spec = MarketSpec.model_validate_json(str(row["market_spec_json"]))
             forecast = predict_market(Path(artifact.path), model_name, spec, row.to_frame().T)
             winning_label = str(row["winning_outcome"])
@@ -3555,6 +3562,7 @@ def _run_panel_pricing_backtest(
             "min_market_price": float(min_market_price),
             "max_market_price": float(max_market_price),
             "min_edge": float(min_edge),
+            "decision_horizons": sorted(decision_horizons) if decision_horizons is not None else [],
             "avg_price_age_seconds": float(sum(price_ages) / len(price_ages)) if price_ages else 0.0,
             "avg_execution_price_premium": (
                 float(sum(execution_price_premiums) / len(execution_price_premiums))
@@ -5501,6 +5509,7 @@ def backtest(
     min_market_price: float = 0.0,
     max_market_price: float = 1.0,
     min_edge: float = 0.0,
+    decision_horizon: Annotated[list[str] | None, typer.Option("--decision-horizon", help="Limit execution to one or more decision horizons; repeat the option for multiple horizons.")] = None,
 ) -> None:
     """Run a rolling-origin backtest with official historical pricing.
 
@@ -5540,6 +5549,7 @@ def backtest(
         raise typer.BadParameter(msg)
     if len(frame) < 2:
         raise typer.BadParameter("Need at least two rows to backtest.")
+    decision_horizons = set(decision_horizon or []) or None
 
     if not panel_path.exists():
         msg = (
@@ -5580,6 +5590,7 @@ def backtest(
             min_market_price=min_market_price,
             max_market_price=max_market_price,
             min_edge=min_edge,
+            decision_horizons=decision_horizons,
         )
         metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
         trades_output = _default_backtest_output("backtest_trades_real_history.json")
@@ -5601,6 +5612,7 @@ def backtest(
             min_market_price=min_market_price,
             max_market_price=max_market_price,
             min_edge=min_edge,
+            decision_horizons=decision_horizons,
         )
         metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
         trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
@@ -5618,6 +5630,7 @@ def backtest(
     metrics["min_market_price"] = float(min_market_price)
     metrics["max_market_price"] = float(max_market_price)
     metrics["min_edge"] = float(min_edge)
+    metrics["decision_horizons"] = sorted(decision_horizons) if decision_horizons is not None else []
     metrics["split_policy"] = _effective_split_policy(split_policy)
     metrics["leakage_audit_passed"] = True
     dump_json(metrics_output, metrics)
