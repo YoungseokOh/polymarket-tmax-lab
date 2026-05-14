@@ -3233,6 +3233,9 @@ def _run_real_history_backtest(
     seed: int | None = None,
     min_train_size: int | None = None,
     retrain_stride: int = 1,
+    min_market_price: float = 0.0,
+    max_market_price: float = 1.0,
+    min_edge: float = 0.0,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using official historical market prices."""
 
@@ -3250,6 +3253,9 @@ def _run_real_history_backtest(
         seed=seed,
         min_train_size=min_train_size,
         retrain_stride=retrain_stride,
+        min_market_price=min_market_price,
+        max_market_price=max_market_price,
+        min_edge=min_edge,
     )
 
 
@@ -3286,6 +3292,9 @@ def _run_quote_proxy_backtest(
     seed: int | None = None,
     min_train_size: int | None = None,
     retrain_stride: int = 1,
+    min_market_price: float = 0.0,
+    max_market_price: float = 1.0,
+    min_edge: float = 0.0,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using last price plus an explicit quote proxy."""
 
@@ -3304,6 +3313,9 @@ def _run_quote_proxy_backtest(
         seed=seed,
         min_train_size=min_train_size,
         retrain_stride=retrain_stride,
+        min_market_price=min_market_price,
+        max_market_price=max_market_price,
+        min_edge=min_edge,
     )
 
 
@@ -3323,6 +3335,9 @@ def _run_panel_pricing_backtest(
     seed: int | None = None,
     min_train_size: int | None = None,
     retrain_stride: int = 1,
+    min_market_price: float = 0.0,
+    max_market_price: float = 1.0,
+    min_edge: float = 0.0,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
     """Run a decision-time backtest using historical pricing or a quote proxy."""
 
@@ -3330,6 +3345,10 @@ def _run_panel_pricing_backtest(
         raise typer.BadParameter("flat_stake must be positive.")
     if pricing_source == "quote_proxy" and quote_proxy_half_spread < 0:
         raise typer.BadParameter("quote_proxy_half_spread must be non-negative.")
+    if min_market_price < 0 or max_market_price > 1 or min_market_price > max_market_price:
+        raise typer.BadParameter("Require 0 <= min_market_price <= max_market_price <= 1.")
+    if min_edge < 0:
+        raise typer.BadParameter("min_edge must be non-negative.")
     required_panel_columns = {
         "market_id",
         "decision_horizon",
@@ -3366,6 +3385,7 @@ def _run_panel_pricing_backtest(
     skipped_missing_price = 0
     skipped_stale_price = 0
     skipped_non_positive_edge = 0
+    skipped_execution_filter = 0
     price_ages: list[float] = []
     execution_price_premiums: list[float] = []
 
@@ -3426,6 +3446,8 @@ def _run_panel_pricing_backtest(
             best_candidate: dict[str, object] | None = None
             has_covered_price = False
             has_stale_price = False
+            has_filter_eligible_price = False
+            has_positive_edge_before_threshold = False
             for outcome_label, fair_probability in forecast.outcome_probabilities.items():
                 try:
                     _panel_rows = slim_panel.loc[(spec.market_id, str(row["decision_horizon"]), outcome_label)]
@@ -3445,8 +3467,15 @@ def _run_panel_pricing_backtest(
                         market_price,
                         half_spread=quote_proxy_half_spread,
                     )
+                if executable_price < min_market_price or executable_price > max_market_price:
+                    continue
+                has_filter_eligible_price = True
                 fee_per_share = estimate_fee(executable_price, taker_bps=default_fee_bps)
                 edge = compute_edge(fair_probability, executable_price, fee_per_share, 0.0)
+                if edge > 0:
+                    has_positive_edge_before_threshold = True
+                if edge < min_edge:
+                    continue
                 if edge > best_edge:
                     best_edge = edge
                     best_candidate = {
@@ -3464,7 +3493,12 @@ def _run_panel_pricing_backtest(
                     skipped_missing_price += 1
                 continue
             if best_candidate is None:
-                skipped_non_positive_edge += 1
+                if has_filter_eligible_price and not has_positive_edge_before_threshold:
+                    skipped_non_positive_edge += 1
+                elif has_covered_price:
+                    skipped_execution_filter += 1
+                else:
+                    skipped_non_positive_edge += 1
                 continue
             outcome_label = str(best_candidate["outcome_label"])
             market_price = float(best_candidate["market_price"])  # type: ignore[arg-type]
@@ -3517,6 +3551,10 @@ def _run_panel_pricing_backtest(
             "skipped_missing_price": float(skipped_missing_price),
             "skipped_stale_price": float(skipped_stale_price),
             "skipped_non_positive_edge": float(skipped_non_positive_edge),
+            "skipped_execution_filter": float(skipped_execution_filter),
+            "min_market_price": float(min_market_price),
+            "max_market_price": float(max_market_price),
+            "min_edge": float(min_edge),
             "avg_price_age_seconds": float(sum(price_ages) / len(price_ages)) if price_ages else 0.0,
             "avg_execution_price_premium": (
                 float(sum(execution_price_premiums) / len(execution_price_premiums))
@@ -5460,6 +5498,9 @@ def backtest(
     variant_spec: Path | None = None,
     last_n: int = 0,
     retrain_stride: int = 1,
+    min_market_price: float = 0.0,
+    max_market_price: float = 1.0,
+    min_edge: float = 0.0,
 ) -> None:
     """Run a rolling-origin backtest with official historical pricing.
 
@@ -5536,6 +5577,9 @@ def backtest(
             seed=config.app.random_seed,
             min_train_size=fast_eval_min_train,
             retrain_stride=retrain_stride,
+            min_market_price=min_market_price,
+            max_market_price=max_market_price,
+            min_edge=min_edge,
         )
         metrics_output = _default_backtest_output("backtest_metrics_real_history.json")
         trades_output = _default_backtest_output("backtest_trades_real_history.json")
@@ -5554,6 +5598,9 @@ def backtest(
             seed=config.app.random_seed,
             min_train_size=fast_eval_min_train,
             retrain_stride=retrain_stride,
+            min_market_price=min_market_price,
+            max_market_price=max_market_price,
+            min_edge=min_edge,
         )
         metrics_output = _default_backtest_output("backtest_metrics_quote_proxy.json")
         trades_output = _default_backtest_output("backtest_trades_quote_proxy.json")
@@ -5568,6 +5615,9 @@ def backtest(
     metrics["artifacts_dir"] = str(artifacts_dir)
     metrics["pricing_source"] = pricing_source
     metrics["retrain_stride"] = float(retrain_stride)
+    metrics["min_market_price"] = float(min_market_price)
+    metrics["max_market_price"] = float(max_market_price)
+    metrics["min_edge"] = float(min_edge)
     metrics["split_policy"] = _effective_split_policy(split_policy)
     metrics["leakage_audit_passed"] = True
     dump_json(metrics_output, metrics)
